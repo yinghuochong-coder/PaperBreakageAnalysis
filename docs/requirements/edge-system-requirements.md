@@ -45,25 +45,28 @@
 
 ### 2.2 编译与开发环境
 
-建议固定以下基线：
+批准以下基线；详细版本、获取、许可证和升级规则见 `docs/architecture/dependencies.md`：
 
 ```
-编译器：Visual Studio 2026 MSVC x64
+开发环境：Visual Studio 2026 stable
+编译器：MSVC v145 x64
 C++标准：C++20
-Qt：Qt 6.8.x 或项目批准的 Qt 6.x
-CMake：最低 3.27
+Qt：Qt 6.10.2 msvc2022_64
+CMake：最低 4.2
 构建工具：Ninja 或 Visual Studio Generator
 架构：仅支持 x86_64
 字符集：UTF-8
 ```
 
-项目根目录提供 `CMakePresets.json`，统一 Debug、Release、测试及部署构建参数；开发人员的本地路径放入不提交版本库的 `CMakeUserPresets.json`。这是 CMake 官方建议的项目级和用户级预设分工。
+项目根目录提供 `CMakePresets.json`，统一 Debug、Release、测试及部署构建参数；开发人员的本地路径放入不提交版本库的 `CMakeUserPresets.json`。CMake 4.2 是支持 Visual Studio 18 2026 Generator 的最低版本。
 
 ### 2.3 主要依赖
 
-必需依赖：
+外部 SDK 不由 vcpkg 下载，其安装根目录通过环境变量或不提交的 `CMakeUserPresets.json` 注入。禁止把以下 SDK 的开发机绝对路径写入提交的项目预设、Release 配置或安装产物。
 
-Qt: C:\Qt\6.10.2\msvc2022\_64
+必需外部 SDK：
+
+Qt 6.10.2 `msvc2022_64`：
 
 ```
 Qt6::Core
@@ -71,27 +74,22 @@ Qt6::Widgets
 Qt6::Network
 Qt6::Gui
 Qt6::Concurrent（按需）
-SQLite3
 ```
 
-OpenCV: C:\opencv\build
+OpenCV 4.12.0：首期批准 core、imgproc、imgcodecs。
 
-
-
-海康机器人 MVS SDK: C:\Program Files (x86)\MVS\Development
+海康机器人 MVS SDK Development/Runtime 4.8.0.3。
 
 海康机器人官网当前提供 Windows 平台的 MVS 软件及相机开发支持，项目应将 MVS SDK 封装在独立适配层内，禁止业务模块直接调用厂商 API。
 
-
-
-建议依赖 (优化通过 vcpkg 管理下载)：
+批准通过固定 baseline 的 vcpkg manifest 管理：
 
 ```
-spdlog          日志
-nlohmann/json   配置和消息序列化
-GoogleTest      单元测试
-zstd            事件数据压缩，可选
-
+spdlog          1.17.0#1   日志
+nlohmann/json   3.12.0#2   配置和消息序列化
+GoogleTest      1.17.0#3   单元测试
+SQLite3         3.53.4     事件元数据和上传任务
+zstd            1.5.7      事件数据压缩，可选且默认关闭
 ```
 
 

@@ -944,6 +944,7 @@ timestamp         墙上时间
 | ADR-012 | Deferred | 上位机具体协议、认证和断点续传契约 | M8-00 |
 | ADR-013 | Deferred | Plant IO 生产协议 | DEC-005/另行批准 |
 | ADR-014 | Deferred | 安装器技术 | M9-01 |
+| ADR-015 | Accepted | VS 2026/v145、CMake 4.2、外部 SDK 与 vcpkg manifest 基线 | `decisions/adr-015-windows-toolchain-dependencies.md` |
 
 ## 21. 需求追踪
 
