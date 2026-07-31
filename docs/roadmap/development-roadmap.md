@@ -8,7 +8,7 @@
 | 计划基线 | 2026-07-31 |
 | 需求来源 | `docs/requirements/edge-system-requirements.md` |
 | 适用范围 | 首期边缘工控机软件，Windows 10/11 x64，最多四台 MV-CS020-60GM |
-| 目标工具链 | Visual Studio 2022 MSVC、C++20、Qt 6、CMake |
+| 目标工具链 | Visual Studio 2026 MSVC、C++20、Qt 6、CMake |
 | 执行方式 | 一次只领取一个可审查任务；复杂任务先按 `.agent/PLANS.md` 建立 ExecPlan |
 
 本文档是实施顺序、任务边界和验收门禁的基线，不代替需求文档。需求变更后，应先更新需求与追踪矩阵，再调整本路线图。
@@ -30,7 +30,7 @@
 
 | 编号 | 事项 | 当前处理原则 | 最晚决策点 |
 | --- | --- | --- | --- |
-| DEC-001 | 需求正文写 Visual Studio 2026，项目规则写 Visual Studio 2022 | 采用项目规则中的 VS 2022；确认后修订需求文档 | G0 |
+| DEC-001 | 需求正文写 Visual Studio 2026，项目规则写 Visual Studio 2026 | 采用项目规则中的 VS 2026；确认后修订需求文档 | G0 |
 | DEC-002 | Qt 路径 `C:\Qt\6.10.2\msvc2022\_64` 可能不是实际目录名 | M0 配置时探测并通过用户预设传入，不把绝对路径写入 Release 产物 | M0-01 |
 | DEC-003 | OpenCV、MVS SDK 的具体版本未记录 | 先形成依赖清单；MVS 仅在 Hikrobot 适配器中启用 | M0-02 / M3-01 |
 | DEC-004 | 上位机协议尚未最终确定 | M8 前仅实现传输抽象和 Mock，不提前固化 REST/WebSocket 数据契约 | M8-00 |
@@ -155,6 +155,10 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### G0-01 建立系统架构文档
 
+状态：`completed`  
+完成日期：2026-07-31  
+执行记录：`.agent/plans/g0-01-system-architecture.md`
+
 前置：本路线图已批准。
 
 实施：
@@ -191,7 +195,7 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 实施：
 
-- 确认 VS 2022、CMake 最低版本、Qt 版本与组件；
+- 确认 VS 2026、CMake 最低版本、Qt 版本与组件；
 - 确认依赖获取策略，记录 Qt、OpenCV、MVS SDK 为外部 SDK，其他批准依赖可由 vcpkg 管理；
 - 为 spdlog、nlohmann/json、GoogleTest、SQLite3 和可选 zstd 记录引入原因、版本和许可证；
 - 禁止把开发机绝对路径固化到提交的 Release 配置；

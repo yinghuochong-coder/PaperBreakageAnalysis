@@ -5,7 +5,7 @@
 目标环境：
 
 * Windows 10/11 x64
-* Visual Studio 2022 MSVC
+* Visual Studio 2026 MSVC
 * C++20
 * Qt 6
 * CMake
