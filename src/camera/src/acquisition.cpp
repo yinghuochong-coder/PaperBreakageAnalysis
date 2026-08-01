@@ -32,9 +32,9 @@ FrameEnqueueStatus AcquisitionQueue::push(FramePacket packet) noexcept
     FrameEnqueueStatus status = FrameEnqueueStatus::enqueued;
     {
         std::lock_guard lock{mutex_};
-        if (closed_)
+        if (closed_.load(std::memory_order_relaxed))
         {
-            ++rejected_closed_;
+            rejected_closed_.fetch_add(1U, std::memory_order_relaxed);
             return FrameEnqueueStatus::closed;
         }
         if (size_ == slots_.size())
@@ -42,14 +42,16 @@ FrameEnqueueStatus AcquisitionQueue::push(FramePacket packet) noexcept
             slots_[head_].reset();
             head_ = (head_ + 1U) % slots_.size();
             --size_;
-            ++dropped_oldest_;
+            dropped_oldest_.fetch_add(1U, std::memory_order_relaxed);
             status = FrameEnqueueStatus::enqueued_after_dropping_oldest;
         }
         const auto tail = (head_ + size_) % slots_.size();
         slots_[tail] = std::move(packet);
         ++size_;
-        ++enqueued_;
-        high_watermark_ = std::max(high_watermark_, size_);
+        depth_.store(size_, std::memory_order_relaxed);
+        enqueued_.fetch_add(1U, std::memory_order_relaxed);
+        high_watermark_.store(std::max(high_watermark_.load(std::memory_order_relaxed), size_),
+                              std::memory_order_relaxed);
     }
     condition_.notify_one();
     return status;
@@ -64,44 +66,46 @@ FrameDequeueResult AcquisitionQueue::wait_pop(const std::stop_token stop_token,
         slots_[head_].reset();
         head_ = (head_ + 1U) % slots_.size();
         --size_;
-        ++dequeued_;
+        depth_.store(size_, std::memory_order_relaxed);
+        dequeued_.fetch_add(1U, std::memory_order_relaxed);
         return {FrameDequeueStatus::frame, std::move(packet)};
     };
 
     if (stop_token.stop_requested())
     {
-        ++wait_cancelled_;
+        wait_cancelled_.fetch_add(1U, std::memory_order_relaxed);
         return {FrameDequeueStatus::stopped, std::nullopt};
     }
     if (size_ > 0U)
     {
         return pop_frame();
     }
-    if (closed_)
+    if (closed_.load(std::memory_order_relaxed))
     {
         return {FrameDequeueStatus::closed, std::nullopt};
     }
     if (timeout <= std::chrono::milliseconds::zero())
     {
-        ++wait_timeouts_;
+        wait_timeouts_.fetch_add(1U, std::memory_order_relaxed);
         return {FrameDequeueStatus::timeout, std::nullopt};
     }
 
-    const bool ready =
-        condition_.wait_for(lock, stop_token, timeout, [&] { return closed_ || size_ > 0U; });
+    const bool ready = condition_.wait_for(lock, stop_token, timeout, [&] {
+        return closed_.load(std::memory_order_relaxed) || size_ > 0U;
+    });
     if (!ready)
     {
         if (stop_token.stop_requested())
         {
-            ++wait_cancelled_;
+            wait_cancelled_.fetch_add(1U, std::memory_order_relaxed);
             return {FrameDequeueStatus::stopped, std::nullopt};
         }
-        ++wait_timeouts_;
+        wait_timeouts_.fetch_add(1U, std::memory_order_relaxed);
         return {FrameDequeueStatus::timeout, std::nullopt};
     }
     if (stop_token.stop_requested())
     {
-        ++wait_cancelled_;
+        wait_cancelled_.fetch_add(1U, std::memory_order_relaxed);
         return {FrameDequeueStatus::stopped, std::nullopt};
     }
     if (size_ > 0U)
@@ -115,24 +119,23 @@ void AcquisitionQueue::close() noexcept
 {
     {
         std::lock_guard lock{mutex_};
-        closed_ = true;
+        closed_.store(true, std::memory_order_release);
     }
     condition_.notify_all();
 }
 
 AcquisitionQueueSnapshot AcquisitionQueue::snapshot() const noexcept
 {
-    std::lock_guard lock{mutex_};
     return {.capacity = slots_.size(),
-            .depth = size_,
-            .high_watermark = high_watermark_,
-            .enqueued = enqueued_,
-            .dequeued = dequeued_,
-            .dropped_oldest = dropped_oldest_,
-            .rejected_closed = rejected_closed_,
-            .wait_timeouts = wait_timeouts_,
-            .wait_cancelled = wait_cancelled_,
-            .closed = closed_};
+            .depth = depth_.load(std::memory_order_relaxed),
+            .high_watermark = high_watermark_.load(std::memory_order_relaxed),
+            .enqueued = enqueued_.load(std::memory_order_relaxed),
+            .dequeued = dequeued_.load(std::memory_order_relaxed),
+            .dropped_oldest = dropped_oldest_.load(std::memory_order_relaxed),
+            .rejected_closed = rejected_closed_.load(std::memory_order_relaxed),
+            .wait_timeouts = wait_timeouts_.load(std::memory_order_relaxed),
+            .wait_cancelled = wait_cancelled_.load(std::memory_order_relaxed),
+            .closed = closed_.load(std::memory_order_acquire)};
 }
 
 AcquisitionWorker::AcquisitionWorker(ICameraDevice& device, FrameBufferPool& pool,
@@ -155,7 +158,9 @@ AcquisitionWorker::~AcquisitionWorker()
 Result<void> AcquisitionWorker::start()
 {
     std::lock_guard lock{mutex_};
-    if (options_.camera_id.empty() || options_.receive_timeout <= std::chrono::milliseconds::zero())
+    if (options_.camera_id.empty() ||
+        options_.receive_timeout <= std::chrono::milliseconds::zero() ||
+        options_.statistics_window <= std::chrono::milliseconds::zero())
     {
         return Result<void>::failure(
             acquisition_error("CAMERA_CONFIG_FAILED", Severity::error, "采集工作线程配置无效",
@@ -173,6 +178,14 @@ Result<void> AcquisitionWorker::start()
     completed_ = false;
     last_sequence_number_ = 0U;
     last_error_.reset();
+    frames_received_.store(0U, std::memory_order_relaxed);
+    camera_frame_gaps_.store(0U, std::memory_order_relaxed);
+    capture_timeouts_.store(0U, std::memory_order_relaxed);
+    incomplete_frames_.store(0U, std::memory_order_relaxed);
+    bytes_received_.store(0U, std::memory_order_relaxed);
+    actual_fps_.store(0.0, std::memory_order_relaxed);
+    bandwidth_bytes_per_second_.store(0.0, std::memory_order_relaxed);
+    has_last_frame_.store(false, std::memory_order_relaxed);
     try
     {
         worker_ = std::jthread([this](const std::stop_token stop_token) { run(stop_token); });
@@ -223,16 +236,50 @@ Result<void> AcquisitionWorker::join(const std::chrono::steady_clock::time_point
 AcquisitionWorkerSnapshot AcquisitionWorker::snapshot() const
 {
     std::lock_guard lock{mutex_};
-    return {.started = started_,
-            .running = running_,
-            .completed = completed_,
-            .last_sequence_number = last_sequence_number_,
-            .last_error = last_error_};
+    AcquisitionWorkerSnapshot result{
+        .started = started_,
+        .running = running_,
+        .completed = completed_,
+        .last_sequence_number = last_sequence_number_,
+        .frames_received = frames_received_.load(std::memory_order_relaxed),
+        .camera_frame_gaps = camera_frame_gaps_.load(std::memory_order_relaxed),
+        .capture_timeouts = capture_timeouts_.load(std::memory_order_relaxed),
+        .incomplete_frames = incomplete_frames_.load(std::memory_order_relaxed),
+        .bytes_received = bytes_received_.load(std::memory_order_relaxed),
+        .actual_fps = actual_fps_.load(std::memory_order_relaxed),
+        .bandwidth_bytes_per_second = bandwidth_bytes_per_second_.load(std::memory_order_relaxed),
+        .last_error = last_error_};
+    if (has_last_frame_.load(std::memory_order_acquire))
+    {
+        result.last_frame_monotonic_time = MonotonicTime{
+            MonotonicTime::duration{last_frame_monotonic_ticks_.load(std::memory_order_relaxed)}};
+        result.last_frame_wall_clock_time = WallClockTime{
+            WallClockTime::duration{last_frame_wall_clock_ticks_.load(std::memory_order_relaxed)}};
+    }
+    return result;
 }
 
 void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
 {
     std::uint64_t sequence_number = 0U;
+    std::uint64_t previous_camera_frame_number = 0U;
+    std::uint64_t window_frames = 0U;
+    std::uint64_t window_bytes = 0U;
+    auto window_started = std::chrono::steady_clock::now();
+    const auto publish_rates = [&](const std::chrono::steady_clock::time_point now) {
+        const auto elapsed = now - window_started;
+        if (elapsed < options_.statistics_window)
+        {
+            return;
+        }
+        const auto seconds = std::chrono::duration<double>{elapsed}.count();
+        actual_fps_.store(static_cast<double>(window_frames) / seconds, std::memory_order_relaxed);
+        bandwidth_bytes_per_second_.store(static_cast<double>(window_bytes) / seconds,
+                                          std::memory_order_relaxed);
+        window_frames = 0U;
+        window_bytes = 0U;
+        window_started = now;
+    };
     try
     {
         while (!stop_token.stop_requested())
@@ -245,6 +292,7 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
             }
             if (acquired.status != FramePoolAcquireStatus::acquired)
             {
+                publish_rates(std::chrono::steady_clock::now());
                 continue;
             }
 
@@ -254,6 +302,8 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
                 if (captured.error().business_code ==
                     camera_business_code(CameraErrorKind::frame_timeout))
                 {
+                    capture_timeouts_.fetch_add(1U, std::memory_order_relaxed);
+                    publish_rates(std::chrono::steady_clock::now());
                     continue;
                 }
                 finish(captured.error(), sequence_number);
@@ -262,11 +312,36 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
 
             ++sequence_number;
             const auto metadata = captured.value();
+            const auto received_monotonic_time = std::chrono::steady_clock::now();
+            const auto received_wall_clock_time = std::chrono::system_clock::now();
+            if (previous_camera_frame_number > 0U &&
+                metadata.camera_frame_number > previous_camera_frame_number &&
+                metadata.camera_frame_number - previous_camera_frame_number > 1U)
+            {
+                camera_frame_gaps_.fetch_add(metadata.camera_frame_number -
+                                                 previous_camera_frame_number - 1U,
+                                             std::memory_order_relaxed);
+            }
+            previous_camera_frame_number = metadata.camera_frame_number;
+            frames_received_.fetch_add(1U, std::memory_order_relaxed);
+            bytes_received_.fetch_add(acquired.buffer->size(), std::memory_order_relaxed);
+            if (metadata.flags.incomplete)
+            {
+                incomplete_frames_.fetch_add(1U, std::memory_order_relaxed);
+            }
+            ++window_frames;
+            window_bytes += acquired.buffer->size();
+            last_frame_monotonic_ticks_.store(received_monotonic_time.time_since_epoch().count(),
+                                              std::memory_order_relaxed);
+            last_frame_wall_clock_ticks_.store(received_wall_clock_time.time_since_epoch().count(),
+                                               std::memory_order_relaxed);
+            has_last_frame_.store(true, std::memory_order_release);
+            publish_rates(received_monotonic_time);
             FramePacket packet{.camera_id = options_.camera_id,
                                .camera_frame_number = metadata.camera_frame_number,
                                .sequence_number = sequence_number,
-                               .received_monotonic_time = std::chrono::steady_clock::now(),
-                               .received_wall_clock_time = std::chrono::system_clock::now(),
+                               .received_monotonic_time = received_monotonic_time,
+                               .received_wall_clock_time = received_wall_clock_time,
                                .camera_timestamp = metadata.camera_timestamp,
                                .geometry = metadata.geometry,
                                .pixel_format = metadata.pixel_format,

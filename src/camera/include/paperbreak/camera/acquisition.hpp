@@ -4,6 +4,7 @@
 #include "paperbreak/camera/frame_pool.hpp"
 #include "paperbreak/common/result.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -75,20 +76,22 @@ class AcquisitionQueue final
     std::vector<std::optional<FramePacket>> slots_;
     std::size_t head_{};
     std::size_t size_{};
-    std::size_t high_watermark_{};
-    std::uint64_t enqueued_{};
-    std::uint64_t dequeued_{};
-    std::uint64_t dropped_oldest_{};
-    std::uint64_t rejected_closed_{};
-    std::uint64_t wait_timeouts_{};
-    std::uint64_t wait_cancelled_{};
-    bool closed_{};
+    std::atomic<std::size_t> depth_{};
+    std::atomic<std::size_t> high_watermark_{};
+    std::atomic<std::uint64_t> enqueued_{};
+    std::atomic<std::uint64_t> dequeued_{};
+    std::atomic<std::uint64_t> dropped_oldest_{};
+    std::atomic<std::uint64_t> rejected_closed_{};
+    std::atomic<std::uint64_t> wait_timeouts_{};
+    std::atomic<std::uint64_t> wait_cancelled_{};
+    std::atomic<bool> closed_{};
 };
 
 struct AcquisitionWorkerOptions final
 {
     std::string camera_id;
     std::chrono::milliseconds receive_timeout{std::chrono::seconds{1}};
+    std::chrono::milliseconds statistics_window{std::chrono::seconds{1}};
 };
 
 struct AcquisitionWorkerSnapshot final
@@ -97,6 +100,15 @@ struct AcquisitionWorkerSnapshot final
     bool running{};
     bool completed{true};
     std::uint64_t last_sequence_number{};
+    std::uint64_t frames_received{};
+    std::uint64_t camera_frame_gaps{};
+    std::uint64_t capture_timeouts{};
+    std::uint64_t incomplete_frames{};
+    std::uint64_t bytes_received{};
+    double actual_fps{};
+    double bandwidth_bytes_per_second{};
+    std::optional<MonotonicTime> last_frame_monotonic_time;
+    std::optional<WallClockTime> last_frame_wall_clock_time;
     std::optional<Error> last_error;
 };
 
@@ -131,6 +143,16 @@ class AcquisitionWorker final
     bool completed_{true};
     std::uint64_t last_sequence_number_{};
     std::optional<Error> last_error_;
+    std::atomic<std::uint64_t> frames_received_{};
+    std::atomic<std::uint64_t> camera_frame_gaps_{};
+    std::atomic<std::uint64_t> capture_timeouts_{};
+    std::atomic<std::uint64_t> incomplete_frames_{};
+    std::atomic<std::uint64_t> bytes_received_{};
+    std::atomic<double> actual_fps_{};
+    std::atomic<double> bandwidth_bytes_per_second_{};
+    std::atomic<std::int64_t> last_frame_monotonic_ticks_{};
+    std::atomic<std::int64_t> last_frame_wall_clock_ticks_{};
+    std::atomic<bool> has_last_frame_{};
     std::jthread worker_;
 };
 

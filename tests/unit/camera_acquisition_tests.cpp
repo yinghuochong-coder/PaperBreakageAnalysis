@@ -347,6 +347,11 @@ TEST(CameraAcquisitionWorker, ContinuesAfterTimeoutAndPublishesCompleteMetadata)
     EXPECT_FALSE(snapshot.running);
     EXPECT_TRUE(snapshot.completed);
     EXPECT_EQ(snapshot.last_sequence_number, 1U);
+    EXPECT_EQ(snapshot.frames_received, 1U);
+    EXPECT_EQ(snapshot.capture_timeouts, 1U);
+    EXPECT_EQ(snapshot.bytes_received, 4U);
+    ASSERT_TRUE(snapshot.last_frame_monotonic_time);
+    ASSERT_TRUE(snapshot.last_frame_wall_clock_time);
     ASSERT_TRUE(snapshot.last_error);
     EXPECT_EQ(snapshot.last_error->business_code, "CAMERA_CONFIG_FAILED");
     EXPECT_EQ(device.capture_calls(), 3U);
@@ -361,6 +366,28 @@ TEST(CameraAcquisitionWorker, ContinuesAfterTimeoutAndPublishesCompleteMetadata)
     EXPECT_EQ(dequeued.packet->buffer->size(), 4U);
     EXPECT_NE(dequeued.packet->received_monotonic_time, MonotonicTime{});
     EXPECT_NE(dequeued.packet->received_wall_clock_time, WallClockTime{});
+}
+
+TEST(CameraAcquisitionWorker, PublishesRecentFrameRateAndBandwidthWithoutQueueLock)
+{
+    ScriptedCameraDevice device{{CaptureAction::slow_success}, true};
+    FrameBufferPool pool{4U, 4U};
+    AcquisitionQueue queue{4U};
+    AcquisitionWorker worker{
+        device,
+        pool,
+        queue,
+        {.camera_id = "CAM01", .receive_timeout = 200ms, .statistics_window = 20ms}};
+
+    ASSERT_TRUE(worker.start());
+    ASSERT_TRUE(wait_until([&] { return worker.snapshot().frames_received >= 2U; }, 1s));
+    const auto snapshot = worker.snapshot();
+    EXPECT_GT(snapshot.actual_fps, 0.0);
+    EXPECT_GT(snapshot.bandwidth_bytes_per_second, 0.0);
+    EXPECT_EQ(snapshot.bytes_received, snapshot.frames_received * 4U);
+    EXPECT_NO_THROW(static_cast<void>(queue.snapshot()));
+    worker.request_stop();
+    EXPECT_TRUE(worker.join(std::chrono::steady_clock::now() + 1s));
 }
 
 TEST(CameraAcquisitionWorker, StopCancelsPoolWaitAndQueueCloseStopsProducer)

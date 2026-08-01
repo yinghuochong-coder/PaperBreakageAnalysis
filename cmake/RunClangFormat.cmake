@@ -9,7 +9,14 @@ if(NOT CLANG_FORMAT_EXECUTABLE)
         "or add it to PATH before running the format-check target.")
 endif()
 
-string(REPLACE "|" ";" format_files "${FILES}")
+if(DEFINED FILE_LIST)
+    if(NOT EXISTS "${FILE_LIST}")
+        message(FATAL_ERROR "clang-format file list does not exist: ${FILE_LIST}")
+    endif()
+    file(STRINGS "${FILE_LIST}" format_files ENCODING UTF-8)
+else()
+    string(REPLACE "|" ";" format_files "${FILES}")
+endif()
 foreach(format_file IN LISTS format_files)
     execute_process(
         COMMAND "${CLANG_FORMAT_EXECUTABLE}" --dry-run --Werror "${format_file}"
