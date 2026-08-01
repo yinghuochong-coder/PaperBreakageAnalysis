@@ -11,6 +11,7 @@ add_executable(PaperBreakTests
     unit/ipc_server_tests.cpp
     unit/logging_tests.cpp
     unit/monitoring_tests.cpp
+    unit/mock_camera_tests.cpp
     unit/service_runtime_tests.cpp
     unit/system_command_tests.cpp
     unit/windows_control_tests.cpp
@@ -21,6 +22,7 @@ target_link_libraries(PaperBreakTests
     PRIVATE
         paperbreak_common
         paperbreak_camera
+        paperbreak_camera_mock
         paperbreak_console_model
         paperbreak_config
         paperbreak_platform_windows
@@ -59,7 +61,7 @@ add_test(NAME unit
 set_tests_properties(unit PROPERTIES LABELS "unit")
 
 add_test(NAME simulation
-    COMMAND PaperBreakTests --gtest_filter=SimulationBaseline.*)
+    COMMAND PaperBreakTests --gtest_filter=Simulation*)
 set_tests_properties(simulation PROPERTIES LABELS "simulation")
 
 add_test(NAME hardware_baseline

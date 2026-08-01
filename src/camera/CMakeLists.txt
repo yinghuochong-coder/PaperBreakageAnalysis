@@ -12,3 +12,5 @@ target_include_directories(paperbreak_camera PUBLIC
 set_target_properties(paperbreak_camera PROPERTIES FOLDER "PaperBreak/Libraries")
 install(TARGETS paperbreak_camera ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+
+add_subdirectory(mock)
