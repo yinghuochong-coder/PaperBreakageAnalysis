@@ -86,11 +86,15 @@ target_link_libraries(paperbreak_camera_hikrobot
         paperbreak_common)
 target_include_directories(paperbreak_camera_hikrobot PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/private")
+target_include_directories(paperbreak_camera_hikrobot PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 set_target_properties(paperbreak_camera_hikrobot PROPERTIES
     FOLDER "PaperBreak/Libraries")
 
 install(TARGETS paperbreak_camera_hikrobot
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(FILES "$<TARGET_FILE:Hikrobot::MVS>"
     DESTINATION "${CMAKE_INSTALL_BINDIR}")
 

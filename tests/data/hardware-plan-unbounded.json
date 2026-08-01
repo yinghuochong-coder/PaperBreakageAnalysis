@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "targetModel": "MV-CS020-60GM",
+  "bindings": [
+    { "cameraId": "CAM01", "serialNumber": "MOCK-01" }
+  ],
+  "parameters": {
+    "frameRate": 60.0,
+    "triggerMode": "continuous"
+  },
+  "capture": {
+    "durationSeconds": 86400,
+    "sampleIntervalMs": 1,
+    "receiveTimeoutMs": 1000,
+    "queueCapacity": 0,
+    "framePoolCapacity": 1000000,
+    "frameBufferBytes": 0,
+    "consumerDelayMs": 0,
+    "minimumFpsRatio": 1.5
+  }
+}

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -180,6 +181,16 @@ TEST(CameraCapabilities, AcceptsSupportedParameterSnapshot)
     EXPECT_TRUE(result);
 }
 
+TEST(CameraCapabilities, AcceptsContinuousFloatingRangeAndRejectsNonFiniteValue)
+{
+    CameraCapabilities capabilities;
+    capabilities.exposure_us = SteppedRange<double>{10.0, 100.0, 0.0};
+
+    EXPECT_TRUE(validate_parameters(capabilities, {.exposure_us = 25.125}));
+    EXPECT_FALSE(validate_parameters(capabilities,
+                                     {.exposure_us = std::numeric_limits<double>::infinity()}));
+}
+
 TEST(CameraCapabilities, RejectsUnsupportedOutOfStepAndInvalidCombination)
 {
     CameraCapabilities limited;
@@ -263,6 +274,11 @@ TEST(CameraInventory, FindsUniqueDeviceAndRejectsMissingOrDuplicateSerial)
     ASSERT_EQ(result.error().details.size(), 1U);
     EXPECT_EQ(result.error().details.front().value, "9999");
 
+    result = find_device_by_serial(devices, "");
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().business_code, "CAMERA_CONFIG_FAILED");
+    EXPECT_EQ(result.error().details.front().value, "invalid-serial-number");
+
     const std::vector<CameraDeviceDescriptor> duplicates = {
         {"ModelA", "SERIAL-0001", "192.0.2.1", "nic0"},
         {"ModelB", "SERIAL-0001", "192.0.2.2", "nic1"}};
@@ -271,6 +287,55 @@ TEST(CameraInventory, FindsUniqueDeviceAndRejectsMissingOrDuplicateSerial)
     EXPECT_EQ(result.error().business_code, "CAMERA_CONFIG_FAILED");
     ASSERT_EQ(result.error().details.size(), 2U);
     EXPECT_EQ(result.error().details.front().value, "duplicate-serial-number");
+}
+
+TEST(CameraInventory, ReconcilesFourLogicalSlotsBySerialAndReportsProblems)
+{
+    const std::vector<CameraSlotBinding> bindings = {{"CAM01", "SERIAL-0001"},
+                                                     {"CAM02", "SERIAL-0002"},
+                                                     {"CAM03", "SERIAL-0003"},
+                                                     {"CAM04", "SERIAL-0004"}};
+    const std::vector<CameraDeviceDescriptor> devices = {
+        {"ModelA", "SERIAL-0001", "192.0.2.99", "192.0.2.10", true},
+        {"ModelB", "SERIAL-0002", "192.0.2.2", "192.0.2.10", false},
+        {"Wrong", "SERIAL-9999", "192.0.2.3", "192.0.2.10", true}};
+
+    const auto result = reconcile_camera_slots(bindings, devices);
+
+    ASSERT_TRUE(result);
+    ASSERT_EQ(result.value().slots.size(), 4U);
+    EXPECT_EQ(result.value().slots[0].camera_id, "CAM01");
+    EXPECT_EQ(result.value().slots[0].status, CameraSlotStatus::ready);
+    ASSERT_TRUE(result.value().slots[0].device);
+    EXPECT_EQ(result.value().slots[0].device->ip_address, "192.0.2.99");
+    EXPECT_EQ(result.value().slots[1].status, CameraSlotStatus::occupied);
+    EXPECT_EQ(result.value().slots[2].status, CameraSlotStatus::missing);
+    EXPECT_EQ(result.value().slots[3].status, CameraSlotStatus::missing);
+    ASSERT_EQ(result.value().unexpected_devices.size(), 1U);
+    EXPECT_EQ(result.value().unexpected_devices.front().serial_number, "SERIAL-9999");
+}
+
+TEST(CameraInventory, RejectsInvalidSlotsAndDuplicateConfiguredSerials)
+{
+    std::vector<CameraSlotBinding> bindings = {{"CAM05", "SERIAL-0001"}};
+    auto result = reconcile_camera_slots(bindings, {});
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().business_code, "CAMERA_CONFIG_FAILED");
+    EXPECT_EQ(result.error().details.front().value, "invalid-or-duplicate-camera-id");
+
+    bindings = {{"CAM01", "SERIAL-0001"}, {"CAM02", "SERIAL-0001"}};
+    result = reconcile_camera_slots(bindings, {});
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().details.front().value, "invalid-or-duplicate-configured-serial");
+
+    bindings = {{"CAM01", "SERIAL-0001"},
+                {"CAM02", "SERIAL-0002"},
+                {"CAM03", "SERIAL-0003"},
+                {"CAM04", "SERIAL-0004"},
+                {"CAM01", "SERIAL-0005"}};
+    result = reconcile_camera_slots(bindings, {});
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().details.front().value, "too-many-camera-slots");
 }
 
 TEST(CameraFrameBuffer, KeepsFixedCapacityAndRejectsOversizedPayload)

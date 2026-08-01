@@ -34,6 +34,9 @@ enum class CameraErrorKind
     open_failed,
     access_denied,
     config_failed,
+    parameter_read_failed,
+    parameter_write_failed,
+    parameter_faulted,
     stream_start_failed,
     disconnected,
     frame_timeout,
@@ -91,7 +94,38 @@ struct CameraDeviceDescriptor final
     std::string serial_number;
     std::string ip_address;
     std::string network_interface;
+    bool exclusive_access_available{true};
     bool operator==(const CameraDeviceDescriptor&) const = default;
+};
+
+enum class CameraSlotStatus
+{
+    ready,
+    missing,
+    occupied,
+};
+
+struct CameraSlotBinding final
+{
+    std::string camera_id;
+    std::string serial_number;
+    bool operator==(const CameraSlotBinding&) const = default;
+};
+
+struct CameraSlotDiscovery final
+{
+    std::string camera_id;
+    std::string serial_number;
+    CameraSlotStatus status{CameraSlotStatus::missing};
+    std::optional<CameraDeviceDescriptor> device;
+    bool operator==(const CameraSlotDiscovery&) const = default;
+};
+
+struct CameraDiscoveryReport final
+{
+    std::vector<CameraSlotDiscovery> slots;
+    std::vector<CameraDeviceDescriptor> unexpected_devices;
+    bool operator==(const CameraDiscoveryReport&) const = default;
 };
 
 struct CameraCapabilities final
@@ -180,6 +214,8 @@ class ICameraProvider
     std::span<const CameraDeviceDescriptor> devices);
 [[nodiscard]] Result<CameraDeviceDescriptor> find_device_by_serial(
     std::span<const CameraDeviceDescriptor> devices, std::string_view serial_number);
+[[nodiscard]] Result<CameraDiscoveryReport> reconcile_camera_slots(
+    std::span<const CameraSlotBinding> bindings, std::span<const CameraDeviceDescriptor> devices);
 [[nodiscard]] Result<void> validate_parameters(const CameraCapabilities& capabilities,
                                                const CameraParameterSnapshot& parameters);
 [[nodiscard]] Result<CameraParameterSnapshot> apply_validated_parameters(

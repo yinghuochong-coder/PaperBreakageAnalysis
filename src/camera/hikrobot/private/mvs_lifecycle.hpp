@@ -19,17 +19,31 @@ struct MvsApi final
 {
     unsigned int(__stdcall* get_sdk_version)();
     int(__stdcall* enumerate_devices)(unsigned int, MV_CC_DEVICE_INFO_LIST*);
+    bool(__stdcall* is_device_accessible)(MV_CC_DEVICE_INFO*, unsigned int);
     int(__stdcall* create_handle)(void**, const MV_CC_DEVICE_INFO*);
     int(__stdcall* open_device)(void*, unsigned int, unsigned short);
     int(__stdcall* close_device)(void*);
     int(__stdcall* destroy_handle)(void*);
     int(__stdcall* start_grabbing)(void*);
     int(__stdcall* stop_grabbing)(void*);
+    int(__stdcall* get_one_frame_timeout)(void*, unsigned char*, unsigned int,
+                                          MV_FRAME_OUT_INFO_EX*, unsigned int);
+    int(__stdcall* get_float_value)(void*, const char*, MVCC_FLOATVALUE*);
+    int(__stdcall* set_float_value)(void*, const char*, float);
+    int(__stdcall* get_int_value)(void*, const char*, MVCC_INTVALUE_EX*);
+    int(__stdcall* set_int_value)(void*, const char*, std::int64_t);
+    int(__stdcall* get_enum_value)(void*, const char*, MVCC_ENUMVALUE*);
+    int(__stdcall* set_enum_value)(void*, const char*, unsigned int);
+    int(__stdcall* get_bool_value)(void*, const char*, bool*);
+    int(__stdcall* set_bool_value)(void*, const char*, bool);
+    int(__stdcall* set_command_value)(void*, const char*);
 };
 
 [[nodiscard]] const MvsApi& production_mvs_api() noexcept;
 [[nodiscard]] Error translate_mvs_error(CameraErrorKind kind, int native_code,
                                         std::string operation, std::string message);
+[[nodiscard]] Result<CameraDeviceDescriptor> map_gige_descriptor(
+    const MV_CC_DEVICE_INFO& device_info, bool exclusive_access_available);
 
 class DeviceList final
 {
@@ -52,6 +66,19 @@ class DeviceList final
     std::vector<MV_CC_DEVICE_INFO> devices_;
 };
 
+class HikrobotCameraProvider final : public ICameraProvider
+{
+  public:
+    explicit HikrobotCameraProvider(const MvsApi& api) noexcept;
+
+    [[nodiscard]] Result<std::vector<CameraDeviceDescriptor>> enumerate_devices() override;
+    [[nodiscard]] Result<std::unique_ptr<ICameraDevice>> create_device(
+        std::string_view serial_number) override;
+
+  private:
+    const MvsApi& api_;
+};
+
 class StreamSession;
 
 class DeviceHandle final
@@ -67,6 +94,13 @@ class DeviceHandle final
     ~DeviceHandle() = default;
 
     [[nodiscard]] Result<StreamSession> start_streaming();
+    [[nodiscard]] Result<CameraCapabilities> capabilities();
+    [[nodiscard]] Result<CameraParameterSnapshot> read_parameters();
+    [[nodiscard]] Result<CameraParameterSnapshot> apply_parameters(
+        const CameraParameterSnapshot& parameters);
+    [[nodiscard]] Result<void> software_trigger();
+    [[nodiscard]] Result<CapturedFrameMetadata> capture_into(FrameBuffer& destination,
+                                                             std::chrono::milliseconds timeout);
     [[nodiscard]] Result<void> close() noexcept;
     [[nodiscard]] void* native_handle() const noexcept;
 

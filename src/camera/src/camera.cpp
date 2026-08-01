@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <string_view>
 #include <utility>
 
 namespace paperbreak::camera
@@ -28,6 +29,12 @@ ErrorDefaults error_defaults(const CameraErrorKind kind) noexcept
         return {"CAMERA_ACCESS_DENIED", Severity::error, true};
     case CameraErrorKind::config_failed:
         return {"CAMERA_CONFIG_FAILED", Severity::error, false};
+    case CameraErrorKind::parameter_read_failed:
+        return {"CAMERA_PARAMETER_READ_FAILED", Severity::error, true};
+    case CameraErrorKind::parameter_write_failed:
+        return {"CAMERA_PARAMETER_WRITE_FAILED", Severity::error, true};
+    case CameraErrorKind::parameter_faulted:
+        return {"CAMERA_PARAMETER_FAULTED", Severity::critical, false};
     case CameraErrorKind::stream_start_failed:
         return {"CAMERA_STREAM_START_FAILED", Severity::error, true};
     case CameraErrorKind::disconnected:
@@ -49,6 +56,23 @@ std::string serial_suffix(const std::string_view serial_number)
     constexpr std::size_t suffix_length = 4U;
     return std::string{serial_number.substr(
         serial_number.size() > suffix_length ? serial_number.size() - suffix_length : 0U)};
+}
+
+bool valid_camera_id(const std::string_view camera_id) noexcept
+{
+    return camera_id.size() == 5U && camera_id.starts_with("CAM0") && camera_id[4] >= '1' &&
+           camera_id[4] <= '4';
+}
+
+bool valid_external_text(const std::string_view value, const std::size_t maximum_size) noexcept
+{
+    if (value.empty() || value.size() > maximum_size)
+    {
+        return false;
+    }
+    return std::all_of(value.begin(), value.end(), [](const unsigned char character) {
+        return character >= 0x20U && character != 0x7FU;
+    });
 }
 
 Error invalid_parameter(std::string parameter, std::string reason)
@@ -73,7 +97,7 @@ bool valid_floating_range(const SteppedRange<double>& range) noexcept
 {
     return std::isfinite(range.minimum) && std::isfinite(range.maximum) &&
            std::isfinite(range.increment) && range.minimum <= range.maximum &&
-           range.increment > 0.0;
+           range.increment >= 0.0;
 }
 
 bool contains_floating(const SteppedRange<double>& range, const double value) noexcept
@@ -82,6 +106,10 @@ bool contains_floating(const SteppedRange<double>& range, const double value) no
         value > range.maximum)
     {
         return false;
+    }
+    if (range.increment == 0.0)
+    {
+        return true;
     }
     const double steps = (value - range.minimum) / range.increment;
     const double tolerance = 1e-8 * std::max(1.0, std::abs(steps));
@@ -218,11 +246,14 @@ Result<void> validate_device_inventory(const std::span<const CameraDeviceDescrip
     std::set<std::string> serial_numbers;
     for (const auto& device : devices)
     {
-        if (device.serial_number.empty())
+        if (!valid_external_text(device.serial_number, 128U) ||
+            !valid_external_text(device.model_name, 128U) ||
+            !valid_external_text(device.ip_address, 45U) ||
+            !valid_external_text(device.network_interface, 128U))
         {
             return Result<void>::failure(make_camera_error(
-                CameraErrorKind::config_failed, "发现的相机缺少序列号", "camera.enumerate",
-                std::nullopt, {{"reason", "missing-serial-number"}}));
+                CameraErrorKind::config_failed, "发现的相机描述信息无效", "camera.enumerate",
+                std::nullopt, {{"reason", "invalid-device-descriptor"}}));
         }
         if (!serial_numbers.insert(device.serial_number).second)
         {
@@ -236,9 +267,81 @@ Result<void> validate_device_inventory(const std::span<const CameraDeviceDescrip
     return Result<void>::success();
 }
 
+Result<CameraDiscoveryReport> reconcile_camera_slots(
+    const std::span<const CameraSlotBinding> bindings,
+    const std::span<const CameraDeviceDescriptor> devices)
+{
+    constexpr std::size_t maximum_slots = 4U;
+    if (bindings.size() > maximum_slots)
+    {
+        return Result<CameraDiscoveryReport>::failure(make_camera_error(
+            CameraErrorKind::config_failed, "逻辑相机槽位不能超过四个", "camera.reconcileSlots",
+            std::nullopt, {{"reason", "too-many-camera-slots"}}));
+    }
+    if (const auto inventory = validate_device_inventory(devices); !inventory)
+    {
+        return Result<CameraDiscoveryReport>::failure(inventory.error());
+    }
+
+    std::set<std::string> camera_ids;
+    std::set<std::string> configured_serials;
+    for (const auto& binding : bindings)
+    {
+        if (!valid_camera_id(binding.camera_id) || !camera_ids.insert(binding.camera_id).second)
+        {
+            return Result<CameraDiscoveryReport>::failure(make_camera_error(
+                CameraErrorKind::config_failed, "逻辑相机 ID 必须是唯一的 CAM01 至 CAM04",
+                "camera.reconcileSlots", std::nullopt,
+                {{"reason", "invalid-or-duplicate-camera-id"}}));
+        }
+        if (!valid_external_text(binding.serial_number, 128U) ||
+            !configured_serials.insert(binding.serial_number).second)
+        {
+            return Result<CameraDiscoveryReport>::failure(make_camera_error(
+                CameraErrorKind::config_failed, "逻辑相机必须绑定唯一的有效序列号",
+                "camera.reconcileSlots", binding.camera_id,
+                {{"reason", "invalid-or-duplicate-configured-serial"}}));
+        }
+    }
+
+    CameraDiscoveryReport report;
+    report.slots.reserve(bindings.size());
+    report.unexpected_devices.reserve(devices.size());
+    for (const auto& binding : bindings)
+    {
+        const auto match = std::find_if(devices.begin(), devices.end(), [&](const auto& device) {
+            return device.serial_number == binding.serial_number;
+        });
+        if (match == devices.end())
+        {
+            report.slots.push_back({binding.camera_id, binding.serial_number,
+                                    CameraSlotStatus::missing, std::nullopt});
+            continue;
+        }
+        report.slots.push_back({binding.camera_id, binding.serial_number,
+                                match->exclusive_access_available ? CameraSlotStatus::ready
+                                                                  : CameraSlotStatus::occupied,
+                                *match});
+    }
+    for (const auto& device : devices)
+    {
+        if (!configured_serials.contains(device.serial_number))
+        {
+            report.unexpected_devices.push_back(device);
+        }
+    }
+    return Result<CameraDiscoveryReport>::success(std::move(report));
+}
+
 Result<CameraDeviceDescriptor> find_device_by_serial(
     const std::span<const CameraDeviceDescriptor> devices, const std::string_view serial_number)
 {
+    if (!valid_external_text(serial_number, 128U))
+    {
+        return Result<CameraDeviceDescriptor>::failure(make_camera_error(
+            CameraErrorKind::config_failed, "相机序列号无效", "camera.findBySerial", std::nullopt,
+            {{"reason", "invalid-serial-number"}}));
+    }
     if (const auto inventory = validate_device_inventory(devices); !inventory)
     {
         return Result<CameraDeviceDescriptor>::failure(inventory.error());

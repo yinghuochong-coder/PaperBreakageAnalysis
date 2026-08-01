@@ -129,12 +129,15 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `CAMERA_NOT_FOUND` | Error | 是 | 绑定的实体相机未枚举到；该路进入断开/恢复，其他路继续 |
 | `CAMERA_OPEN_FAILED` | Error | 是 | 设备打开失败且不是更明确的访问拒绝；保留 MVS 原始码 |
 | `CAMERA_ACCESS_DENIED` | Error | 是 | 相机被占用或权限不足；不得紧循环重试 |
-| `CAMERA_CONFIG_FAILED` | Error | 视参数 | 参数不受设备能力支持、范围/步进/组合非法、发现重复序列号，或参数写入/回读不一致；拒绝写入、恢复旧快照或进入 Faulted，并以 `reason` 区分具体原因 |
+| `CAMERA_CONFIG_FAILED` | Error | 否 | 参数不受设备能力支持、范围/步进/组合非法或发现重复序列号；在触达 SDK 前拒绝请求 |
+| `CAMERA_PARAMETER_READ_FAILED` | Error | 是 | 参数能力或当前值读取失败；保留 MVS 原始码，不把不完整快照报告为成功 |
+| `CAMERA_PARAMETER_WRITE_FAILED` | Error | 是 | 参数写入或写后回读失败；尝试恢复旧快照并恢复原采集状态 |
+| `CAMERA_PARAMETER_FAULTED` | Critical | 否 | 参数事务无法恢复旧快照或原采集状态；锁定当前连接会话的参数操作，要求断开重连 |
 | `CAMERA_STREAM_START_FAILED` | Error | 是 | 开始取流失败；关闭本次句柄后按状态机恢复 |
-| `CAMERA_DISCONNECTED` | Warning | 是 | 活跃设备掉线；当前路进入 Recovering |
-| `CAMERA_FRAME_TIMEOUT` | Warning | 是 | 截止时间内未接收帧；计数并按连续阈值升级报警 |
+| `CAMERA_DISCONNECTED` | Warning | 是 | 活跃设备掉线或 MVS 取流返回链路/设备错误；保留 `hikrobot-mvs` 原始码、阶段和恢复次数，当前路清理句柄后进入 Recovering |
+| `CAMERA_FRAME_TIMEOUT` | Warning | 是 | 截止时间内未接收帧；单次只计数，连续达到会话阈值后携带超时次数/阈值并进入有界恢复 |
 | `CAMERA_FRAME_INCOMPLETE` | Warning | 否 | 当前帧不完整；丢弃/隔离该帧，不对同一帧重试 |
-| `CAMERA_FRAME_FORMAT_CHANGED` | Error | 视配置 | 运行中尺寸或像素格式意外改变；暂停该路并重新校验缓冲预算 |
+| `CAMERA_FRAME_FORMAT_CHANGED` | Error | 视配置 | 运行中尺寸、步长、有效载荷或像素格式意外改变；停止该路且不在线扩容，重新校验固定缓冲预算后方可恢复 |
 | `CAMERA_INVALID_STATE_TRANSITION` | Error | 否 | 相机会话请求了状态表不允许的转换；拒绝转换并记录相机、源状态、目标状态和原因 |
 
 ### 4.4 管线与算法
@@ -205,6 +208,15 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `UPLOAD_CHECKSUM_MISMATCH` | Error | 是 | 服务端或本地分块校验不一致；重传受影响内容且有上限 |
 | `UPLOAD_REJECTED` | Error | 否 | 服务端永久拒绝有效请求；转 `PermanentFailed` 并等待人工处理 |
 | `UPLOAD_RETRY_EXHAUSTED` | Error | 否 | 已达到任务次数/时间上限；不再自动重试，保留任务和本地文件 |
+
+### 4.9 硬件验收工具
+
+这些码仅用于目标机硬件验收工具和审计记录，不进入生产服务业务流。
+
+| 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
+| --- | --- | ---: | --- |
+| `HW_PLAN_INVALID` | Error | 否 | 测试计划缺失、schema/字段非法或时长、采样、队列、池、缓冲预算超过硬上限；在枚举、打开或写相机前拒绝 |
+| `HW_RECORD_WRITE_FAILED` | Error | 否 | 无法创建或原子提交审计记录，或目标记录已存在；拒绝覆盖既有证据，人工修正输出位置后以新记录 ID 重试 |
 
 ## 5. 典型失败映射
 

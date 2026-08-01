@@ -2,6 +2,7 @@
 
 #include "paperbreak/camera/camera.hpp"
 #include "paperbreak/camera/frame_pool.hpp"
+#include "paperbreak/camera/state.hpp"
 #include "paperbreak/common/result.hpp"
 
 #include <atomic>
@@ -92,6 +93,7 @@ struct AcquisitionWorkerOptions final
     std::string camera_id;
     std::chrono::milliseconds receive_timeout{std::chrono::seconds{1}};
     std::chrono::milliseconds statistics_window{std::chrono::seconds{1}};
+    std::size_t consecutive_timeout_limit{3U};
 };
 
 struct AcquisitionWorkerSnapshot final
@@ -126,6 +128,8 @@ class AcquisitionWorker final
     [[nodiscard]] Result<void> start();
     void request_stop() noexcept;
     [[nodiscard]] Result<void> join(std::chrono::steady_clock::time_point deadline);
+    [[nodiscard]] bool wait_until_completed(
+        std::chrono::steady_clock::time_point deadline) noexcept;
     [[nodiscard]] AcquisitionWorkerSnapshot snapshot() const;
 
   private:
@@ -153,6 +157,65 @@ class AcquisitionWorker final
     std::atomic<std::int64_t> last_frame_monotonic_ticks_{};
     std::atomic<std::int64_t> last_frame_wall_clock_ticks_{};
     std::atomic<bool> has_last_frame_{};
+    std::jthread worker_;
+};
+
+struct RecoveringCameraSessionOptions final
+{
+    std::string camera_id;
+    std::string serial_number;
+    std::chrono::milliseconds receive_timeout{std::chrono::seconds{1}};
+    std::chrono::milliseconds statistics_window{std::chrono::seconds{1}};
+    std::size_t consecutive_timeout_limit{3U};
+    ReconnectPolicy reconnect_policy;
+};
+
+struct RecoveringCameraSessionSnapshot final
+{
+    bool started{};
+    bool running{};
+    bool completed{true};
+    CameraStateSnapshot state;
+    AcquisitionWorkerSnapshot acquisition;
+    std::uint64_t connection_attempts{};
+};
+
+/// Owns one camera's connect/start/capture/cleanup/retry loop while using fixed external resources.
+class RecoveringCameraSession final
+{
+  public:
+    RecoveringCameraSession(ICameraProvider& provider, FrameBufferPool& pool,
+                            AcquisitionQueue& queue, RecoveringCameraSessionOptions options,
+                            CameraTransitionObserver observer = {}, ReconnectWaiter waiter = {});
+    ~RecoveringCameraSession();
+
+    RecoveringCameraSession(const RecoveringCameraSession&) = delete;
+    RecoveringCameraSession& operator=(const RecoveringCameraSession&) = delete;
+
+    [[nodiscard]] Result<void> start();
+    void request_stop() noexcept;
+    [[nodiscard]] Result<void> join(std::chrono::steady_clock::time_point deadline);
+    [[nodiscard]] RecoveringCameraSessionSnapshot snapshot() const;
+
+  private:
+    void run(std::stop_token stop_token) noexcept;
+    [[nodiscard]] bool recover_from(Error error, std::string reason,
+                                    std::stop_token stop_token) noexcept;
+    void finish() noexcept;
+
+    ICameraProvider& provider_;
+    FrameBufferPool& pool_;
+    AcquisitionQueue& queue_;
+    RecoveringCameraSessionOptions options_;
+    CameraSessionController controller_;
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    bool started_{};
+    bool running_{};
+    bool completed_{true};
+    AcquisitionWorker* active_worker_{};
+    AcquisitionWorkerSnapshot last_acquisition_;
+    std::atomic<std::uint64_t> connection_attempts_{};
     std::jthread worker_;
 };
 

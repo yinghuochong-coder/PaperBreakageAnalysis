@@ -54,12 +54,17 @@ add_subdirectory(src/uplink)
 add_subdirectory(src/ipc)
 add_subdirectory(src/service)
 add_subdirectory(src/console)
+if(PAPERBREAK_ENABLE_HIKROBOT)
+    add_subdirectory(tools/hardware)
+endif()
 
 file(GLOB_RECURSE PAPERBREAK_FORMAT_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.hpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/*.hpp")
 set(PAPERBREAK_FORMAT_FILE_LIST "${CMAKE_CURRENT_BINARY_DIR}/format-files.txt")
 list(JOIN PAPERBREAK_FORMAT_FILES "\n" PAPERBREAK_FORMAT_FILES_CONTENT)
 file(WRITE "${PAPERBREAK_FORMAT_FILE_LIST}" "${PAPERBREAK_FORMAT_FILES_CONTENT}\n")

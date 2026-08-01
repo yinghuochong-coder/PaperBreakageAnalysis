@@ -1,4 +1,5 @@
 #include "paperbreak/camera/acquisition.hpp"
+#include "paperbreak/camera/mock_camera.hpp"
 
 #include <gtest/gtest.h>
 
@@ -57,6 +58,7 @@ enum class CaptureAction
     timeout,
     permanent_error,
     slow_success,
+    geometry_change,
 };
 
 class ScriptedCameraDevice final : public ICameraDevice
@@ -125,6 +127,16 @@ class ScriptedCameraDevice final : public ICameraDevice
         {
             return Result<CapturedFrameMetadata>::failure(make_camera_error(
                 CameraErrorKind::config_failed, "测试永久错误", "camera.testCapture", "CAM01"));
+        }
+
+        if (action == CaptureAction::geometry_change)
+        {
+            std::fill(destination.writable_bytes().begin(), destination.writable_bytes().end(),
+                      std::byte{0x33});
+            static_cast<void>(destination.set_size(6U));
+            return Result<CapturedFrameMetadata>::success({.camera_frame_number = 43U,
+                                                           .geometry = {3U, 2U, 3U},
+                                                           .pixel_format = PixelFormat::mono8});
         }
 
         std::fill(destination.writable_bytes().begin(), destination.writable_bytes().end(),
@@ -451,4 +463,164 @@ TEST(CameraAcquisitionWorker, RejectsInvalidOrRepeatedStart)
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().business_code, "CAMERA_INVALID_STATE_TRANSITION");
     EXPECT_TRUE(worker.join(std::chrono::steady_clock::now() + 1s));
+}
+
+TEST(CameraAcquisitionWorker, EscalatesConsecutiveTimeoutsWithBoundedContext)
+{
+    ScriptedCameraDevice device{{CaptureAction::timeout}, true};
+    FrameBufferPool pool{1U, 4U};
+    AcquisitionQueue queue{1U};
+    AcquisitionWorker worker{
+        device,
+        pool,
+        queue,
+        {.camera_id = "CAM01", .receive_timeout = 1ms, .consecutive_timeout_limit = 3U}};
+
+    ASSERT_TRUE(worker.start());
+    ASSERT_TRUE(worker.join(std::chrono::steady_clock::now() + 1s));
+    const auto snapshot = worker.snapshot();
+    EXPECT_EQ(snapshot.capture_timeouts, 3U);
+    ASSERT_TRUE(snapshot.last_error);
+    EXPECT_EQ(snapshot.last_error->business_code, "CAMERA_FRAME_TIMEOUT");
+    EXPECT_EQ(snapshot.last_error->source_id, "CAM01");
+    EXPECT_EQ(snapshot.last_error->details.back().value, "3");
+}
+
+TEST(CameraAcquisitionWorker, StopsBeforePublishingUnexpectedGeometryChange)
+{
+    ScriptedCameraDevice device{{CaptureAction::success, CaptureAction::geometry_change}};
+    FrameBufferPool pool{2U, 8U};
+    AcquisitionQueue queue{2U};
+    AcquisitionWorker worker{device, pool, queue, {.camera_id = "CAM01", .receive_timeout = 1ms}};
+
+    ASSERT_TRUE(worker.start());
+    ASSERT_TRUE(worker.join(std::chrono::steady_clock::now() + 1s));
+    const auto snapshot = worker.snapshot();
+    EXPECT_EQ(snapshot.frames_received, 1U);
+    ASSERT_TRUE(snapshot.last_error);
+    EXPECT_EQ(snapshot.last_error->business_code, "CAMERA_FRAME_FORMAT_CHANGED");
+    EXPECT_EQ(queue.snapshot().enqueued, 1U);
+}
+
+TEST(CameraRecoverySession, RecreatesDeviceAfterDisconnectAndCancelsDeterministically)
+{
+    using namespace paperbreak::camera::mock;
+    MockCameraConfig config;
+    config.descriptor = {"Mock", "RECOVERY-0001", "192.0.2.1", "mock0"};
+    config.width = 2U;
+    config.height = 2U;
+    config.maximum_payload_bytes = 4U;
+    config.fault_script = {{1U, {.kind = MockFaultKind::disconnect}}};
+    auto provider_result = MockCameraProvider::create({config});
+    ASSERT_TRUE(provider_result);
+    auto provider = std::move(provider_result).value();
+    FrameBufferPool pool{4U, 4U};
+    AcquisitionQueue queue{2U};
+    std::mutex records_mutex;
+    std::vector<CameraTransitionRecord> records;
+    RecoveringCameraSession session{*provider,
+                                    pool,
+                                    queue,
+                                    {.camera_id = "CAM01",
+                                     .serial_number = "RECOVERY-0001",
+                                     .receive_timeout = 5ms,
+                                     .statistics_window = 10ms,
+                                     .consecutive_timeout_limit = 2U},
+                                    [&](const CameraTransitionRecord& record) {
+                                        std::lock_guard lock{records_mutex};
+                                        records.push_back(record);
+                                    },
+                                    [](const std::stop_token token, std::chrono::milliseconds) {
+                                        return !token.stop_requested();
+                                    }};
+
+    ASSERT_TRUE(session.start());
+    ASSERT_TRUE(wait_until(
+        [&] {
+            const auto value = session.snapshot();
+            return value.connection_attempts >= 2U && value.state.state == CameraState::streaming &&
+                   value.acquisition.frames_received > 0U && queue.snapshot().dropped_oldest > 0U;
+        },
+        2s));
+    EXPECT_GE(queue.snapshot().dropped_oldest, 1U);
+    session.request_stop();
+    EXPECT_TRUE(session.join(std::chrono::steady_clock::now() + 1s));
+    const auto final = session.snapshot();
+    EXPECT_FALSE(final.running);
+    EXPECT_TRUE(final.completed);
+    EXPECT_EQ(final.state.state, CameraState::disconnected);
+    EXPECT_TRUE(queue.snapshot().closed);
+    EXPECT_TRUE(pool.snapshot().closed);
+
+    std::lock_guard lock{records_mutex};
+    EXPECT_NE(std::find_if(records.begin(), records.end(),
+                           [](const auto& record) {
+                               return record.to == CameraState::recovering && record.cause &&
+                                      record.cause->business_code == "CAMERA_DISCONNECTED";
+                           }),
+              records.end());
+}
+
+TEST(CameraRecoverySession, EntersFaultedAfterBoundedCreateRetries)
+{
+    using namespace paperbreak::camera::mock;
+    MockCameraConfig config;
+    config.descriptor = {"Mock", "PRESENT-0001", "192.0.2.1", "mock0"};
+    auto provider_result = MockCameraProvider::create({config});
+    ASSERT_TRUE(provider_result);
+    auto provider = std::move(provider_result).value();
+    FrameBufferPool pool{2U, config.width * config.height};
+    AcquisitionQueue queue{1U};
+    RecoveringCameraSession session{*provider,
+                                    pool,
+                                    queue,
+                                    {.camera_id = "CAM01",
+                                     .serial_number = "MISSING-0001",
+                                     .receive_timeout = 1ms,
+                                     .statistics_window = 1ms,
+                                     .reconnect_policy = {.maximum_attempts = 2U}},
+                                    {},
+                                    [](const std::stop_token token, std::chrono::milliseconds) {
+                                        return !token.stop_requested();
+                                    }};
+
+    ASSERT_TRUE(session.start());
+    ASSERT_TRUE(wait_until([&] { return session.snapshot().state.state == CameraState::faulted; }));
+    ASSERT_TRUE(session.join(std::chrono::steady_clock::now() + 1s));
+    const auto snapshot = session.snapshot();
+    EXPECT_EQ(snapshot.connection_attempts, 3U);
+    EXPECT_EQ(snapshot.state.recovery_attempt, 2U);
+    ASSERT_TRUE(snapshot.state.last_error);
+    EXPECT_EQ(snapshot.state.last_error->business_code, "CAMERA_NOT_FOUND");
+    EXPECT_FALSE(snapshot.state.last_error->retryable);
+}
+
+TEST(CameraRecoverySession, StopCancelsScheduledReconnectAndClosesFixedResources)
+{
+    using namespace paperbreak::camera::mock;
+    MockCameraConfig config;
+    config.descriptor = {"Mock", "PRESENT-0002", "192.0.2.2", "mock1"};
+    auto provider_result = MockCameraProvider::create({config});
+    ASSERT_TRUE(provider_result);
+    auto provider = std::move(provider_result).value();
+    FrameBufferPool pool{2U, config.width * config.height};
+    AcquisitionQueue queue{1U};
+    RecoveringCameraSession session{*provider,
+                                    pool,
+                                    queue,
+                                    {.camera_id = "CAM02",
+                                     .serial_number = "MISSING-0002",
+                                     .receive_timeout = 5ms,
+                                     .statistics_window = 5ms}};
+
+    ASSERT_TRUE(session.start());
+    ASSERT_TRUE(
+        wait_until([&] { return session.snapshot().state.state == CameraState::recovering; }));
+    const auto started = std::chrono::steady_clock::now();
+    session.request_stop();
+    EXPECT_TRUE(session.join(std::chrono::steady_clock::now() + 500ms));
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 500ms);
+    EXPECT_EQ(session.snapshot().state.state, CameraState::disconnected);
+    EXPECT_TRUE(pool.snapshot().closed);
+    EXPECT_TRUE(queue.snapshot().closed);
 }

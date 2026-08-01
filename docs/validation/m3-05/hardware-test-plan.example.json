@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "targetModel": "MV-CS020-60GM",
+  "bindings": [
+    { "cameraId": "CAM01", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_1" },
+    { "cameraId": "CAM02", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_2" },
+    { "cameraId": "CAM03", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_3" },
+    { "cameraId": "CAM04", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_4" }
+  ],
+  "parameters": {
+    "exposureUs": 1000.0,
+    "gainDb": 0.0,
+    "frameRate": 60.0,
+    "triggerMode": "continuous",
+    "packetSizeBytes": 1500,
+    "interPacketDelay": 0
+  },
+  "capture": {
+    "durationSeconds": 60,
+    "sampleIntervalMs": 1000,
+    "receiveTimeoutMs": 1000,
+    "queueCapacity": 16,
+    "framePoolCapacity": 24,
+    "frameBufferBytes": 2097152,
+    "consumerDelayMs": 0,
+    "minimumFpsRatio": 0.95
+  }
+}
