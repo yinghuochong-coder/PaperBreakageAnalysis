@@ -1,0 +1,28 @@
+#pragma once
+
+#include <string>
+#include <string_view>
+
+namespace paperbreak {
+
+/// Build and direct-dependency metadata shared by every process.
+struct VersionInfo final {
+    std::string_view application_version;
+    std::string_view git_commit;
+    bool git_dirty;
+    std::string_view build_time_utc;
+    std::string_view compiler;
+    std::string_view qt_version;
+    std::string_view opencv_version;
+    std::string_view spdlog_version;
+    std::string_view json_version;
+    std::string_view sqlite_version;
+};
+
+/// Returns immutable metadata generated during CMake configuration.
+[[nodiscard]] const VersionInfo& version_info() noexcept;
+
+/// Formats the canonical multi-line version output for process command lines.
+[[nodiscard]] std::string format_version_info();
+
+}  // namespace paperbreak

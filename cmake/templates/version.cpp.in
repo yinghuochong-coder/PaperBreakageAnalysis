@@ -1,0 +1,37 @@
+#include "paperbreak/common/version.hpp"
+
+#include <sstream>
+
+namespace paperbreak {
+
+const VersionInfo& version_info() noexcept {
+    static constexpr VersionInfo info{
+        "@PROJECT_VERSION@",
+        "@PAPERBREAK_GIT_COMMIT@",
+        @PAPERBREAK_GIT_DIRTY@,
+        "@PAPERBREAK_BUILD_TIME_UTC@",
+        "MSVC @MSVC_VERSION@",
+        "@PAPERBREAK_QT_VERSION@",
+        "@PAPERBREAK_OPENCV_VERSION@",
+        "@PAPERBREAK_SPDLOG_VERSION@",
+        "@PAPERBREAK_JSON_VERSION@",
+        "@PAPERBREAK_SQLITE_VERSION@"};
+    return info;
+}
+
+std::string format_version_info() {
+    const auto& info = version_info();
+    std::ostringstream output;
+    output << "PaperBreakEdge " << info.application_version << " (commit " << info.git_commit;
+    if (info.git_dirty) {
+        output << ", dirty";
+    }
+    output << ", built " << info.build_time_utc << ")\n"
+           << "compiler=" << info.compiler << "; qt=" << info.qt_version
+           << "; opencv=" << info.opencv_version << "; spdlog=" << info.spdlog_version
+           << "; nlohmann-json=" << info.json_version << "; sqlite=" << info.sqlite_version;
+    return output.str();
+}
+
+}  // namespace paperbreak
+

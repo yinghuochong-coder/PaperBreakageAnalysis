@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "paperbreak-edge",
+  "version-semver": "0.1.0",
+  "description": "Paper breakage analysis edge service and console",
+  "builtin-baseline": "6d811e820d5dd72ce2cc8a35596a33e67572d83d",
+  "dependencies": [
+    {
+      "name": "spdlog",
+      "version>=": "1.17.0#1"
+    },
+    {
+      "name": "nlohmann-json",
+      "version>=": "3.12.0#2"
+    },
+    {
+      "name": "sqlite3",
+      "version>=": "3.53.4"
+    }
+  ],
+  "features": {
+    "tests": {
+      "description": "GoogleTest-based automated tests",
+      "dependencies": [
+        {
+          "name": "gtest",
+          "version>=": "1.17.0#3"
+        }
+      ]
+    },
+    "zstd": {
+      "description": "Optional event compression; disabled until M7 approval",
+      "dependencies": [
+        {
+          "name": "zstd",
+          "version>=": "1.5.7"
+        }
+      ]
+    }
+  }
+}
+

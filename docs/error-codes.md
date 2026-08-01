@@ -105,6 +105,8 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `SYS_CONFIG_APPLY_FAILED` | Error | 视原因 | 组件预应用或回读失败；回滚已修改组件，不提交新修订 |
 | `SYS_CONFIG_PERSIST_FAILED` | Critical | 视 I/O | 临时写、刷新或原子替换失败；内存和文件均保持最后已提交版本 |
 | `SYS_CONFIG_SCHEMA_UNSUPPORTED` | Error | 否 | 配置 schema 高于支持范围或没有迁移路径 |
+| `LOG_INITIALIZATION_FAILED` | Error | 视 I/O | 日志目录创建、日志文件打开或后台运行时初始化失败；保留文件系统原始码和逻辑日志目录，不得静默退化 |
+| `LOG_WRITE_FAILED` | Error | 视 I/O | 已初始化日志运行时无法接受、写入或刷新日志；记录受限诊断并进入可观测降级，不得把日志失败升级为业务成功 |
 
 ### 4.2 相机
 
@@ -236,4 +238,3 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 4. 验证未知业务码在旧客户端不会被当成成功；
 5. 若新增线程/队列故障，另行记录容量、溢出、指标和关闭行为；
 6. 若改变公开错误结构，按对应 IPC/上位机协议规则处理版本。
-
