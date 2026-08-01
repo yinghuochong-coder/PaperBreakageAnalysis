@@ -345,6 +345,10 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M1-03 配置模型、校验和原子存储
 
+状态：`completed`
+
+完成证据（2026-08-01）：提交 schema v1、完整默认配置、强类型/依赖/路径/敏感字段校验、不可变快照、期望修订事务、Windows 原子替换、5 份历史恢复/回滚、热应用/待重启分离和同步脱敏审计。`cmake --build --preset local-windows-vs2026-debug` 通过；`ctest --preset local-windows-vs2026-debug` 为 17/17，通过的 unit 入口包含 40 项测试（其中配置仓储 7 项），排除 `hardware-integration`。未访问实体相机或 MVS SDK。
+
 实施：
 
 - 建立版本化 JSON schema 和强类型配置模型；

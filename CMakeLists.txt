@@ -41,6 +41,7 @@ include(PaperBreakVersion)
 paperbreak_generate_version(PAPERBREAK_VERSION_SOURCE PAPERBREAK_GENERATED_INCLUDE_DIR)
 
 add_subdirectory(src/common)
+add_subdirectory(src/platform)
 add_subdirectory(src/logging)
 add_subdirectory(src/config)
 add_subdirectory(src/camera)
@@ -81,6 +82,11 @@ install(RUNTIME_DEPENDENCY_SET paperbreak_service_runtime
 install(FILES
     "${PAPERBREAK_GENERATED_INCLUDE_DIR}/paperbreak/common/version.hpp"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/paperbreak/common")
+
+install(FILES config/default-config.json
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/PaperBreakEdge/config")
+install(FILES config/schemas/edge-config-v1.schema.json
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/PaperBreakEdge/config/schemas")
 
 set(CPACK_PACKAGE_NAME "PaperBreakEdge")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")

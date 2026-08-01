@@ -75,7 +75,9 @@ PaperBreakEdgeService.exe --install --config '<config.json>'
 PaperBreakEdgeService.exe --uninstall
 ```
 
-`--validate-config` 当前只执行有界基础校验：配置文件必须不超过 1 MiB，是合法 UTF-8 JSON 对象，并包含值为 `1` 的无符号整数 `schemaVersion`。强类型字段、范围、跨字段依赖、原子保存和回滚属于 M1-03。配置路径必须显式传入，尚未固化生产环境默认路径。
+`--validate-config` 执行完整 schema v1 校验：配置文件必须不超过 1 MiB，必须是合法 UTF-8 JSON 对象，并通过强类型、有限范围、未知/敏感字段、跨字段依赖和路径安全校验。根版本字段为 `configSchemaVersion`、`configRevision` 和 `modifiedAt`；完整格式、热应用/待重启分类及默认值见 `docs/config-schema.md`。配置路径必须显式传入，尚未固化生产环境默认路径。
+
+console/SCM 启动通过 `ConfigRepository` 加载配置。主文件损坏时会从同目录 `.history` 中恢复最新有效快照；残留 `.paperbreak.tmp.*` 文件不会被当作配置加载。后续更新使用期望修订、同目录临时文件、刷新和原子替换，并默认保留最近 5 个有效历史快照。
 
 控制台模式按 Ctrl+C 受控退出，并把控制台关闭、注销和系统关机信号转换为同一服务停止请求。自动化 smoke 可附加 `--run-for-ms 25`，取值范围为 0～60000 毫秒；该参数只用于控制台测试。退出码为：成功 `0`、命令行或配置错误 `2`、启动、关闭或 SCM 操作失败 `1`。
 

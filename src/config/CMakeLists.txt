@@ -1,9 +1,11 @@
 add_library(paperbreak_config STATIC
-    src/basic_config.cpp)
+    src/basic_config.cpp
+    src/config_repository.cpp)
 
 target_link_libraries(paperbreak_config
     PUBLIC
         paperbreak_common
+        paperbreak_platform
         paperbreak_compiler_options
     PRIVATE
         nlohmann_json::nlohmann_json)

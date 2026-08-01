@@ -1,6 +1,8 @@
 #include "paperbreak/common/version.hpp"
 #include "paperbreak/config/basic_config.hpp"
+#include "paperbreak/config/config_repository.hpp"
 #include "paperbreak/logging/logging.hpp"
+#include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/service/windows/console_control.hpp"
 #include "paperbreak/service/windows/scm.hpp"
@@ -189,7 +191,7 @@ class StopRequestChannel final
 class LoggingLifecycleComponent final : public paperbreak::service::ILifecycleComponent
 {
   public:
-    explicit LoggingLifecycleComponent(std::unique_ptr<paperbreak::logging::LoggingRuntime> runtime)
+    explicit LoggingLifecycleComponent(std::shared_ptr<paperbreak::logging::LoggingRuntime> runtime)
         : runtime_(std::move(runtime))
     {
     }
@@ -232,8 +234,146 @@ class LoggingLifecycleComponent final : public paperbreak::service::ILifecycleCo
     }
 
   private:
-    std::unique_ptr<paperbreak::logging::LoggingRuntime> runtime_;
+    std::shared_ptr<paperbreak::logging::LoggingRuntime> runtime_;
 };
+
+class BufferedConfigAuditSink final : public paperbreak::config::IConfigAuditSink
+{
+  public:
+    [[nodiscard]] paperbreak::Result<void> record(
+        const paperbreak::config::ConfigAuditRecord& record) override
+    {
+        std::string message = "config-change source=" +
+                              std::string{paperbreak::config::config_change_source_name(record.source)} +
+                              " actor=" + paperbreak::logging::redact_sensitive(record.actor) +
+                              " previousRevision=" + std::to_string(record.previous_revision) +
+                              " candidateRevision=" + std::to_string(record.candidate_revision) +
+                              " correlationId=" + record.correlation_id + " paths=";
+        for (const auto& path : record.changed_paths)
+        {
+            message += path + ',';
+        }
+        message += " changes=";
+        for (const auto& change : record.redacted_changes)
+        {
+            message += change.path + ":" + change.previous_value + "->" +
+                       change.candidate_value + ';';
+        }
+        std::scoped_lock lock{mutex_};
+        if (runtime_)
+        {
+            return runtime_->log(paperbreak::logging::Category::audit,
+                                 paperbreak::logging::Level::info, message);
+        }
+        if (pending_.size() >= 64U)
+        {
+            return paperbreak::Result<void>::failure(paperbreak::make_error(
+                "LOG_WRITE_FAILED", paperbreak::Severity::error,
+                "配置审计启动缓冲已满", "service", "service.configAudit.buffer"));
+        }
+        pending_.push_back(std::move(message));
+        return paperbreak::Result<void>::success();
+    }
+
+    [[nodiscard]] paperbreak::Result<void> attach(
+        std::shared_ptr<paperbreak::logging::LoggingRuntime> runtime)
+    {
+        std::scoped_lock lock{mutex_};
+        runtime_ = std::move(runtime);
+        for (const auto& message : pending_)
+        {
+            auto result = runtime_->log(paperbreak::logging::Category::audit,
+                                        paperbreak::logging::Level::info, message);
+            if (!result)
+            {
+                return result;
+            }
+        }
+        pending_.clear();
+        return paperbreak::Result<void>::success();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::vector<std::string> pending_;
+    std::shared_ptr<paperbreak::logging::LoggingRuntime> runtime_;
+};
+
+struct ConfigurationResources final
+{
+    explicit ConfigurationResources(std::filesystem::path path)
+        : repository(std::move(path), files, audit)
+    {
+    }
+
+    paperbreak::platform::WindowsAtomicFileSystem files;
+    BufferedConfigAuditSink audit;
+    paperbreak::config::ConfigRepository repository;
+};
+
+class ConfigurationLifecycleComponent final : public paperbreak::service::ILifecycleComponent
+{
+  public:
+    explicit ConfigurationLifecycleComponent(std::shared_ptr<ConfigurationResources> resources)
+        : resources_(std::move(resources))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override { return "configuration"; }
+    [[nodiscard]] paperbreak::service::ShutdownPhase shutdown_phase() const noexcept override
+    { return paperbreak::service::ShutdownPhase::configuration; }
+    [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
+    {
+        auto result = resources_->repository.snapshot();
+        if (!result)
+            return paperbreak::Result<void>::failure(result.error());
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> request_stop(
+        paperbreak::service::StopReason) override
+    {
+        resources_->repository.stop_accepting_changes();
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> join(
+        std::chrono::steady_clock::time_point) override
+    { return paperbreak::Result<void>::success(); }
+
+  private:
+    std::shared_ptr<ConfigurationResources> resources_;
+};
+
+std::filesystem::path path_from_utf8(const std::string_view value)
+{
+    std::u8string converted;
+    converted.reserve(value.size());
+    for (const unsigned char byte : value)
+        converted.push_back(static_cast<char8_t>(byte));
+    return std::filesystem::path{converted};
+}
+
+paperbreak::logging::Level logging_level_from_config(
+    const paperbreak::config::LogLevel level) noexcept
+{
+    using ConfigLevel = paperbreak::config::LogLevel;
+    using RuntimeLevel = paperbreak::logging::Level;
+    switch (level)
+    {
+    case ConfigLevel::trace:
+        return RuntimeLevel::trace;
+    case ConfigLevel::debug:
+        return RuntimeLevel::debug;
+    case ConfigLevel::info:
+        return RuntimeLevel::info;
+    case ConfigLevel::warning:
+        return RuntimeLevel::warning;
+    case ConfigLevel::error:
+        return RuntimeLevel::error;
+    case ConfigLevel::critical:
+        return RuntimeLevel::critical;
+    }
+    return RuntimeLevel::info;
+}
 
 class HostedRuntime final : public paperbreak::service::windows::IHostedService
 {
@@ -281,8 +421,26 @@ void print_error(const paperbreak::Error& error)
 paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>
 create_hosted_service(const std::filesystem::path& config_path, const bool validate_config)
 {
+    static_cast<void>(validate_config);
+    auto configuration = std::make_shared<ConfigurationResources>(config_path);
+    auto loaded = configuration->repository.load();
+    if (!loaded)
+    {
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(loaded.error());
+    }
+
     paperbreak::logging::LoggingConfig log_config;
-    log_config.directory = std::filesystem::temp_directory_path() / "PaperBreakEdge" / "logs";
+    log_config.directory = path_from_utf8(loaded.value().effective->logging.directory);
+    if (log_config.directory.is_relative())
+        log_config.directory = config_path.parent_path() / log_config.directory;
+    log_config.max_file_size_bytes =
+        static_cast<std::size_t>(loaded.value().effective->logging.maximum_file_size_mib) * 1024U *
+        1024U;
+    log_config.max_files_per_day = loaded.value().effective->logging.maximum_files_per_day;
+    log_config.queue_capacity = loaded.value().effective->logging.queue_capacity;
+    log_config.minimum_level =
+        logging_level_from_config(loaded.value().effective->logging.level);
     auto logging_result = paperbreak::logging::LoggingRuntime::create(log_config);
     if (!logging_result)
     {
@@ -290,24 +448,19 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
             failure(logging_result.error());
     }
 
-    auto logging = std::move(logging_result).value();
-    if (validate_config)
+    std::shared_ptr<paperbreak::logging::LoggingRuntime> logging{
+        std::move(logging_result).value()};
+    auto audit_attach = configuration->audit.attach(logging);
+    if (!audit_attach)
     {
-        auto config_result = paperbreak::config::validate_basic_config(config_path);
-        if (!config_result)
-        {
-            static_cast<void>(logging->log(
-                paperbreak::logging::Category::service, paperbreak::logging::Level::critical,
-                config_result.error().business_code + ": " + config_result.error().message));
-            static_cast<void>(logging->shutdown());
-            return paperbreak::
-                Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(
-                    config_result.error());
-        }
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(audit_attach.error());
     }
 
     std::vector<std::unique_ptr<paperbreak::service::ILifecycleComponent>> components;
-    components.push_back(std::make_unique<LoggingLifecycleComponent>(std::move(logging)));
+    components.push_back(std::make_unique<ConfigurationLifecycleComponent>(configuration));
+    components.push_back(std::make_unique<LoggingLifecycleComponent>(logging));
     return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
         success(std::make_unique<HostedRuntime>(std::move(components)));
 }
@@ -485,7 +638,9 @@ int main(const int argc, char* argv[])
     }
     if (arguments.mode == Mode::validate_config)
     {
-        std::cout << "配置基础校验通过，schemaVersion=" << config_result.value().schema_version
+        std::cout << "配置完整校验通过，configSchemaVersion="
+                  << config_result.value().schema_version
+                  << "，configRevision=" << config_result.value().config_revision
                   << "，bytes=" << config_result.value().file_size_bytes << '\n';
         return 0;
     }
