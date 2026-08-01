@@ -487,6 +487,18 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M2-03 固定容量帧池和有界队列
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-01
+
+完成日期：2026-08-01
+
+执行记录：`.agent/plans/m2-03-frame-pool-bounded-queue.md`
+
+完成证据（2026-08-01）：已实现每相机固定容量 `FrameBufferPool`、共享状态安全归还租约、采用 `drop-oldest` 的预分配环形 `AcquisitionQueue`、容量/深度/高水位/背压快照，以及只执行限时取帧、元数据填充和非阻塞入队的可停止 `AcquisitionWorker`；新增 11 项单元测试。Debug/Release、格式检查和 MSVC 静态分析构建通过，非硬件 CTest 17/17 通过，unit 入口共 120 项测试。未访问 MVS SDK 或实体相机，真实 SDK 取流取消和硬件关闭时延留待 M3。
+
 实施：
 
 - 预分配固定容量 FrameBuffer 对象池；

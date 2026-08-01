@@ -1,5 +1,6 @@
 add_executable(PaperBreakTests
     test_main.cpp
+    unit/camera_acquisition_tests.cpp
     unit/camera_model_tests.cpp
     unit/camera_state_tests.cpp
     unit/common_tests.cpp
