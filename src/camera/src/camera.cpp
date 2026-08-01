@@ -38,6 +38,8 @@ ErrorDefaults error_defaults(const CameraErrorKind kind) noexcept
         return {"CAMERA_FRAME_INCOMPLETE", Severity::warning, false};
     case CameraErrorKind::frame_format_changed:
         return {"CAMERA_FRAME_FORMAT_CHANGED", Severity::error, false};
+    case CameraErrorKind::invalid_state_transition:
+        return {"CAMERA_INVALID_STATE_TRANSITION", Severity::error, false};
     }
     return {"CAMERA_CONFIG_FAILED", Severity::error, false};
 }

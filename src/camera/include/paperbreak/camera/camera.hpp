@@ -39,6 +39,7 @@ enum class CameraErrorKind
     frame_timeout,
     frame_incomplete,
     frame_format_changed,
+    invalid_state_transition,
 };
 
 template <typename T> struct SteppedRange final

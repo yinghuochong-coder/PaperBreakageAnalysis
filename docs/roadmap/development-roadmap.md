@@ -463,6 +463,18 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M2-02 相机状态机与重连控制器
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-01
+
+完成日期：2026-08-01
+
+执行记录：`.agent/plans/m2-02-camera-state-reconnect.md`
+
+完成证据（2026-08-01）：已实现八状态完整转换表、结构化转换观察、稳定非法转换错误、默认六次的 1/2/5/10/30/60 秒退避、可取消等待、恢复耗尽和四路隔离；新增 13 项单元测试。Debug/Release、格式检查和 MSVC 静态分析构建通过，非硬件 CTest 17/17 通过，unit 入口共 109 项测试。未访问 MVS SDK 或实体相机，硬件拔线恢复留待 M3。
+
 实现 Disabled、Disconnected、Connecting、Connected、Starting、Streaming、Recovering、Faulted；非法转换必须被拒绝并记录。
 
 测试：

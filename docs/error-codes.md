@@ -135,6 +135,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `CAMERA_FRAME_TIMEOUT` | Warning | 是 | 截止时间内未接收帧；计数并按连续阈值升级报警 |
 | `CAMERA_FRAME_INCOMPLETE` | Warning | 否 | 当前帧不完整；丢弃/隔离该帧，不对同一帧重试 |
 | `CAMERA_FRAME_FORMAT_CHANGED` | Error | 视配置 | 运行中尺寸或像素格式意外改变；暂停该路并重新校验缓冲预算 |
+| `CAMERA_INVALID_STATE_TRANSITION` | Error | 否 | 相机会话请求了状态表不允许的转换；拒绝转换并记录相机、源状态、目标状态和原因 |
 
 ### 4.4 管线与算法
 

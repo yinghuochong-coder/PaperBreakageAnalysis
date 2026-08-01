@@ -1,6 +1,7 @@
 add_library(paperbreak_camera STATIC
     src/camera.cpp
     src/frame.cpp
+    src/state.cpp
     src/module.cpp)
 target_link_libraries(paperbreak_camera PUBLIC paperbreak_common paperbreak_compiler_options)
 target_include_directories(paperbreak_camera PUBLIC
