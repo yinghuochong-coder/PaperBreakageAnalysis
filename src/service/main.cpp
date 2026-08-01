@@ -4,9 +4,12 @@
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/service/runtime.hpp"
+#include "paperbreak/service/system_commands.hpp"
 #include "paperbreak/service/windows/console_control.hpp"
 #include "paperbreak/service/windows/scm.hpp"
 #include "paperbreak/service/windows/scm_host.hpp"
+
+#include <QCoreApplication>
 
 #include <charconv>
 #include <chrono>
@@ -343,6 +346,41 @@ class ConfigurationLifecycleComponent final : public paperbreak::service::ILifec
     std::shared_ptr<ConfigurationResources> resources_;
 };
 
+class IpcLifecycleComponent final : public paperbreak::service::ILifecycleComponent
+{
+  public:
+    explicit IpcLifecycleComponent(std::shared_ptr<paperbreak::ipc::IpcServer> server)
+        : server_(std::move(server))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "ipc";
+    }
+    [[nodiscard]] paperbreak::service::ShutdownPhase shutdown_phase() const noexcept override
+    {
+        return paperbreak::service::ShutdownPhase::ipc;
+    }
+    [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
+    {
+        return server_->start();
+    }
+    [[nodiscard]] paperbreak::Result<void> request_stop(paperbreak::service::StopReason) override
+    {
+        server_->request_stop();
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> join(
+        const std::chrono::steady_clock::time_point deadline) override
+    {
+        return server_->join(deadline);
+    }
+
+  private:
+    std::shared_ptr<paperbreak::ipc::IpcServer> server_;
+};
+
 std::filesystem::path path_from_utf8(const std::string_view value)
 {
     std::u8string converted;
@@ -379,28 +417,49 @@ class HostedRuntime final : public paperbreak::service::windows::IHostedService
 {
   public:
     explicit HostedRuntime(
-        std::vector<std::unique_ptr<paperbreak::service::ILifecycleComponent>> components)
-        : runtime_(std::move(components))
+        std::vector<std::unique_ptr<paperbreak::service::ILifecycleComponent>> components,
+        std::shared_ptr<paperbreak::service::ServiceStatusStore> status)
+        : runtime_(std::move(components)), status_(std::move(status))
     {
     }
 
     [[nodiscard]] paperbreak::Result<paperbreak::service::StartOutcome> start() override
     {
-        return runtime_.start();
+        status_->set_state(paperbreak::service::ServiceState::starting);
+        auto result = runtime_.start();
+        if (!result)
+        {
+            status_->set_state(paperbreak::service::ServiceState::failed);
+        }
+        else if (result.value() == paperbreak::service::StartOutcome::cancelled)
+        {
+            status_->set_state(paperbreak::service::ServiceState::stopped);
+        }
+        else
+        {
+            status_->set_state(paperbreak::service::ServiceState::running);
+        }
+        return result;
     }
 
     void request_stop(const paperbreak::service::StopReason reason) noexcept override
     {
+        status_->set_state(paperbreak::service::ServiceState::stop_requested);
         runtime_.request_stop(reason);
     }
 
     [[nodiscard]] paperbreak::Result<void> shutdown() override
     {
-        return runtime_.shutdown();
+        status_->set_state(paperbreak::service::ServiceState::draining);
+        auto result = runtime_.shutdown();
+        status_->set_state(result ? paperbreak::service::ServiceState::stopped
+                                  : paperbreak::service::ServiceState::failed);
+        return result;
     }
 
   private:
     paperbreak::service::ServiceRuntime runtime_;
+    std::shared_ptr<paperbreak::service::ServiceStatusStore> status_;
 };
 
 void print_error(const paperbreak::Error& error)
@@ -461,8 +520,13 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     std::vector<std::unique_ptr<paperbreak::service::ILifecycleComponent>> components;
     components.push_back(std::make_unique<ConfigurationLifecycleComponent>(configuration));
     components.push_back(std::make_unique<LoggingLifecycleComponent>(logging));
+    auto status = std::make_shared<paperbreak::service::ServiceStatusStore>();
+    auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
+        configuration->repository, status);
+    auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(commands);
+    components.push_back(std::make_unique<IpcLifecycleComponent>(ipc_server));
     return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
-        success(std::make_unique<HostedRuntime>(std::move(components)));
+        success(std::make_unique<HostedRuntime>(std::move(components), std::move(status)));
 }
 
 int run_console(const Arguments& arguments)
@@ -605,8 +669,9 @@ int run_service(const Arguments& arguments)
 
 } // namespace
 
-int main(const int argc, char* argv[])
+int main(int argc, char* argv[])
 {
+    QCoreApplication application{argc, argv};
     auto parsed = parse_arguments(argc, argv);
     if (!parsed)
     {

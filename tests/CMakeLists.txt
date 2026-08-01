@@ -1,8 +1,12 @@
 add_executable(PaperBreakTests
+    test_main.cpp
     unit/common_tests.cpp
     unit/basic_config_tests.cpp
+    unit/ipc_protocol_tests.cpp
+    unit/ipc_server_tests.cpp
     unit/logging_tests.cpp
     unit/service_runtime_tests.cpp
+    unit/system_command_tests.cpp
     unit/windows_control_tests.cpp
     unit/windows_scm_tests.cpp
     simulation/simulation_baseline_tests.cpp
@@ -13,10 +17,14 @@ target_link_libraries(PaperBreakTests
         paperbreak_config
         paperbreak_platform_windows
         paperbreak_logging
+        paperbreak_ipc
         paperbreak_service_core
         paperbreak_windows_service
         paperbreak_compiler_options
-        GTest::gtest_main)
+        Qt6::Core
+        Qt6::Network
+        nlohmann_json::nlohmann_json
+        GTest::gtest)
 target_compile_definitions(PaperBreakTests PRIVATE
     PAPERBREAK_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 set_target_properties(PaperBreakTests PROPERTIES FOLDER "PaperBreak/Tests")
@@ -38,7 +46,7 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Common*:Result*:Version*:Logging*:BasicConfig*:ConfigRepository*:ServiceRuntime*:WindowsControl*:WindowsScm*)
+    COMMAND PaperBreakTests --gtest_filter=Common*:Result*:Version*:Logging*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
 set_tests_properties(unit PROPERTIES LABELS "unit")
 
 add_test(NAME simulation

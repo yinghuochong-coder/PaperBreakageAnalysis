@@ -9,12 +9,14 @@ target_include_directories(paperbreak_platform
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 add_library(paperbreak_platform_windows STATIC
-    windows/atomic_file_win.cpp)
+    windows/atomic_file_win.cpp
+    windows/local_ipc_security_win.cpp)
 target_link_libraries(paperbreak_platform_windows
     PUBLIC
         paperbreak_platform
         paperbreak_common
         paperbreak_compiler_options)
+target_link_libraries(paperbreak_platform_windows PRIVATE advapi32)
 target_include_directories(paperbreak_platform_windows
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

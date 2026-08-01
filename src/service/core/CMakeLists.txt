@@ -1,10 +1,14 @@
 add_library(paperbreak_service_core STATIC
-    src/runtime.cpp)
+    src/runtime.cpp
+    src/system_commands.cpp)
 
 target_link_libraries(paperbreak_service_core
     PUBLIC
         paperbreak_common
+        paperbreak_config
+        paperbreak_ipc
         paperbreak_compiler_options)
+target_link_libraries(paperbreak_service_core PRIVATE nlohmann_json::nlohmann_json)
 target_include_directories(paperbreak_service_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

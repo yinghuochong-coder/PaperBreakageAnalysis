@@ -197,7 +197,7 @@ Qt 桌面客户端只承担：
 | `paperbreak_uplink_transport` | 批准后的 TLS/REST/WebSocket/HTTP 实现 | uplink、Qt Network 或批准网络库 | 相机、UI |
 | `paperbreak_plant_io` | `IPlantIoAdapter` 和生产信号模型 | common | 具体未批准协议 |
 | `paperbreak_monitoring` | 指标、报警、健康快照和诊断接口 | common、logging 接口 | UI、MVS |
-| `paperbreak_ipc` | 版本化 IPC 编解码、Server/Client 传输 | common、Qt Core/Network | Widgets、MVS、业务实现 |
+| `paperbreak_ipc` | 版本化 IPC 编解码、Server/Client 传输 | common、platform_windows、Qt Core/Network、nlohmann/json | Widgets、MVS、业务实现 |
 | `paperbreak_service_core` | ServiceRuntime、用例编排、命令处理和生命周期 | 上述业务接口，不依赖具体适配器 | Widgets、MVS C API、具体网络/数据库句柄 |
 | `paperbreak_windows_service` | SCM 宿主与 Win32 服务适配 | service_core、platform_windows、common | 业务模块内部实现 |
 | `PaperBreakEdgeService` | Bootstrap、选择宿主、装配依赖、进程入口 | service_core、windows_service、批准的具体适配器 | Widgets |
@@ -412,7 +412,7 @@ ProcessMain
 | `event.persist` | 事件管理 → 事件写入 | 默认 8 个事件，不超过 `maxConcurrentEvents` | 不扩容；无法接收新事件时保护现有租约并触发 Critical | 截止时间内提交；超时保留可恢复临时目录 | Critical |
 | `keyframe.jobs` | 事件管理 → 关键帧线程 | 默认 32 个任务 | 拒绝并标记事件不完整，触发 Error；原始事件仍优先 | 尝试完成已接受任务，超时由恢复流程补偿 | Error |
 | `nvme.blocks` | 预处理 → NVMe 写线程 | 默认 2 个时间块/相机 | 停止普通滚动块、记录缺口并报警；不反压采集 | 停止新块，完成当前块或留下可扫描尾块 | Warning/Error |
-| `ipc.outbound[client]` | 服务模块 → IPC 线程 | 128 条且总计 16 MiB/客户端 | 状态按 key 合并；预览 latest-wins；事件/报警推送可丢但客户端通过版本游标补查 | 停止新推送，发送服务停止通知后限时关闭 | Warning |
+| `ipc.outbound[client]` | 服务模块 → IPC 线程 | 128 条且总计 32 MiB/客户端；其中推送最多 32 条 | 状态按 key 合并；预览 latest-wins；事件/报警推送可丢但客户端通过版本游标补查 | 停止新推送，发送服务停止通知后限时关闭 | Warning |
 | `console.previewDecode[i]` | Qt IPC/GUI 事件循环 → JPEG 解码线程 | 每相机 1 个槽 | `latest-wins`，覆盖尚未解码的旧帧 | 断线、暂停或退出时直接清空 | Info |
 | `upload.inflight` | 持久化调度器 → 上传线程 | 每线程 1 个，线程默认 2 | 不从 SQLite 领取更多任务，不丢持久任务 | checkpoint 当前分块，释放租约后退出 | Warning |
 | `plantio.commands` | 服务 → Plant IO | 32 条 | 拒绝普通写并报警；安全动作不能依赖此通道作为唯一手段 | 取消轮询，限时完成/取消当前 I/O | Error |

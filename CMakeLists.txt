@@ -50,6 +50,7 @@ add_subdirectory(src/event)
 add_subdirectory(src/pipeline)
 add_subdirectory(src/storage)
 add_subdirectory(src/uplink)
+add_subdirectory(src/ipc)
 add_subdirectory(src/service)
 add_subdirectory(src/console)
 
@@ -71,7 +72,9 @@ if(BUILD_TESTING)
 endif()
 
 install(RUNTIME_DEPENDENCY_SET paperbreak_service_runtime
-    DIRECTORIES "$<TARGET_FILE_DIR:spdlog::spdlog>"
+    DIRECTORIES
+        "$<TARGET_FILE_DIR:spdlog::spdlog>"
+        "$<TARGET_FILE_DIR:Qt6::Core>"
     PRE_EXCLUDE_REGEXES
         "api-ms-.*"
         "ext-ms-.*"

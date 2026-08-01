@@ -63,12 +63,12 @@ IPC 不持久化请求或推送；配置重载复用 M1-03 的原子仓储。客
 
 ## 实施步骤
 
-- [ ] 1. 新增 IPC 目标、v1 DTO、帧编解码和请求校验。
-- [ ] 2. 实现有界命令执行器、QLocalServer 线程和连接状态。
-- [ ] 3. 实现 Windows peer 鉴权和单实例保护。
-- [ ] 4. 接入三条 system 命令及 ServiceRuntime 生命周期。
-- [ ] 5. 增加编解码、故障、权限、真实本机套接字和停止测试。
-- [ ] 6. 更新协议文档、路线图和验证证据。
+- [x] 1. 新增 IPC 目标、v1 DTO、帧编解码和请求校验。
+- [x] 2. 实现有界命令执行器、QLocalServer 线程和连接状态。
+- [x] 3. 实现 Windows peer 鉴权和单实例保护。
+- [x] 4. 接入三条 system 命令及 ServiceRuntime 生命周期。
+- [x] 5. 增加编解码、故障、权限、真实本机套接字和停止测试。
+- [x] 6. 更新协议文档、路线图和验证证据。
 
 ## 验证计划
 
@@ -99,33 +99,50 @@ LocalService 跨账户、普通用户只读、提升管理员重载和远程命�
 
 ## 验收标准
 
-- [ ] v1 帧协议和三条命令符合文档；
-- [ ] 所有连接、队列、缓冲和截止时间有界；
-- [ ] 畸形、慢速、重复和未授权客户端不拖垮服务；
+- [x] v1 帧协议和三条命令符合文档；
+- [x] 所有连接、队列、缓冲和截止时间有界；
+- [x] 畸形、慢速、重复和未授权客户端不拖垮服务；
 - [ ] 工作线程确定停止，Debug/Release/CTest/格式/静态分析通过；
-- [ ] 文档、路线图和验证证据完整。
+- [x] 文档、路线图和验证证据完整。
 
 ## 进度记录
 
 - 2026-08-01：创建计划，状态 `not-started`；等待 M1-03 完成。
 - 2026-08-01：M1-03 Debug 构建和 17/17 CTest 通过并完成记录；本计划更新为 `in-progress`。
+- 2026-08-01：确认工作区干净并再次完成 Debug 构建和 17/17 CTest；开始实现协议、Windows 对端身份检查和有界服务端。
+- 2026-08-01：完成 IPC v1、Windows 鉴权、三条 system 命令、ServiceRuntime 接入和测试；Debug/Release 均为 17/17 CTest，单元入口 61 项。
+- 2026-08-01：M1-04 新增 C++ 文件定向格式检查及关闭 `/WX` 的全量静态分析通过；全仓质量门禁被 M1-03 既有文件阻断，因此状态保持 `in-progress`。
 
 ## 决策记录
 
-- DEC-001：协议字段采用领域模型的 `ipcProtocolVersion`。
+- DEC-001：线协议版本字段固定为 `protocolVersion`，当前支持值为整数 1。
 - DEC-002：普通本机用户只读，提升管理员可重载配置。
 - DEC-003：断线推送不缓存，客户端后续通过查询重新同步。
+- DEC-004：帧长度字段使用网络字节序；v1 不增加 CRC，依靠固定长度边界和严格 JSON/DTO 校验隔离畸形输入。
+- DEC-005：每客户端总出站上限采用 128 条/32 MiB，推送子队列最多 32 条；固定安全上限不修改配置 schema v1。
+- DEC-006：Windows 原生命名管道身份检查封装在平台层；IPC 公开接口只传递标准 C++ `PeerIdentity`。
 
 ## 意外发现
 
-- 尚无。
+- Windows 本机命名管道调用 `GetNamedPipeClientComputerNameW` 可能返回 `ERROR_PIPE_LOCAL`；该结果明确表示本机客户端，应作为本机身份继续执行令牌模拟。
+- 服务新增 Qt Network 运行时后，安装树扫描需要同时将 Qt Core 目录加入运行时依赖解析目录。
+- 全仓 `format-check` 会在未修改的 `src/config/include/paperbreak/config/basic_config.hpp:207` 失败；静态分析在未修改的 `src/config/src/basic_config.cpp:327` 报 C6262（栈使用 42464 字节），并因 `/WX` 失败。
 
 ## 验证证据
 
 | 日期 | 命令/场景 | 结果 | 证据或限制 |
 | --- | --- | --- | --- |
-| ... | ... | ... | ... |
+| 2026-08-01 | `cmake --build --preset local-windows-vs2026-debug` | 通过 | MSVC Debug 全量构建成功。 |
+| 2026-08-01 | `ctest --preset local-windows-vs2026-debug --output-on-failure` | 17/17 通过 | unit 入口 61 项；包含真实当前账户命名管道令牌冒烟。 |
+| 2026-08-01 | `cmake --build --preset local-windows-vs2026-release` | 通过 | MSVC Release 全量构建成功。 |
+| 2026-08-01 | `ctest --preset local-windows-vs2026-release --output-on-failure` | 17/17 通过 | unit 入口 61 项。 |
+| 2026-08-01 | M1-04 新增 C++ 文件 `clang-format --dry-run --Werror` | 通过 | 新增协议、服务端、平台、命令和测试文件无格式差异。 |
+| 2026-08-01 | `cmake --build --preset local-windows-vs2026-debug --target format-check` | 未通过 | 被未修改的 `basic_config.hpp:207` 阻断。 |
+| 2026-08-01 | 静态分析预设，`PAPERBREAK_WARNINGS_AS_ERRORS=OFF` | 通过 | 全量目标完成；唯一报告为既有 `basic_config.cpp:327` C6262。 |
+| 2026-08-01 | 静态分析预设，默认 `/WX` | 未通过 | 同一既有 C6262 被提升为错误；`paperbreak_ipc` 在失败前已通过分析。 |
+| 2026-08-01 | `git diff --check` | 通过 | 仅 Git 的 LF/CRLF 工作区提示，无空白错误。 |
+| 2026-08-01 | 隔离 Windows 权限/远程场景 | 待验证 | 未执行跨账户、提升管理员和远程管道实机验证；未访问相机或 MVS SDK。 |
 
 ## 完成摘要
 
-完成时填写。
+M1-04 的功能实现、自动化测试和公开文档已完成。由于两项全仓质量门禁被 M1-03 的既有未修改代码阻断，尚不满足完整完成标准，路线图和本计划保持 `in-progress`；未擅自修改范围外文件。

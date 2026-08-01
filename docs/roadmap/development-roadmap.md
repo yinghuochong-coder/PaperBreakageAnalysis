@@ -364,6 +364,10 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M1-04 IPC 帧协议和服务端
 
+状态：`in-progress`
+
+实现证据（2026-08-01）：IPC v1、Windows 本机身份鉴权、单实例保护、三条 system 命令及 ServiceRuntime 接入已实现；Debug/Release 构建和 CTest 均为 17/17，通过的 unit 入口包含 61 项测试。M1-04 新增文件定向格式检查和关闭 `/WX` 的全量静态分析通过。全仓 `format-check` 被未修改的 `basic_config.hpp:207` 阻断，默认静态分析被未修改的 `basic_config.cpp:327` C6262 阻断，因此暂不标记 `completed`。跨账户、提升管理员及远程命名管道场景待隔离 Windows 环境验证；未访问相机或 MVS SDK。
+
 实施：
 
 - 基于 QLocalServer/QLocalSocket 实现仅本机 IPC；
