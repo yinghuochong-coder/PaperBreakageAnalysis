@@ -4,6 +4,7 @@ add_executable(PaperBreakTests
     unit/logging_tests.cpp
     unit/service_runtime_tests.cpp
     unit/windows_control_tests.cpp
+    unit/windows_scm_tests.cpp
     simulation/simulation_baseline_tests.cpp
     hardware/hardware_baseline_tests.cpp)
 target_link_libraries(PaperBreakTests
@@ -27,7 +28,7 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Common*:Result*:Version*:Logging*:BasicConfig*:ServiceRuntime*:WindowsControl*)
+    COMMAND PaperBreakTests --gtest_filter=Common*:Result*:Version*:Logging*:BasicConfig*:ServiceRuntime*:WindowsControl*:WindowsScm*)
 set_tests_properties(unit PROPERTIES LABELS "unit")
 
 add_test(NAME simulation
@@ -79,6 +80,33 @@ add_test(NAME service_rejects_conflicting_modes
         -DEXPECTED_TEXT=SYS_CONFIG_INVALID
         -P "${PROJECT_SOURCE_DIR}/cmake/RunAndCheckExit.cmake")
 set_tests_properties(service_rejects_conflicting_modes PROPERTIES LABELS "integration")
+
+add_test(NAME service_install_requires_config
+    COMMAND "${CMAKE_COMMAND}"
+        "-DPROGRAM=$<TARGET_FILE:PaperBreakEdgeService>"
+        "-DPROGRAM_ARGUMENTS=--install"
+        -DEXPECTED_EXIT=2
+        -DEXPECTED_TEXT=SYS_CONFIG_INVALID
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunAndCheckExit.cmake")
+set_tests_properties(service_install_requires_config PROPERTIES LABELS "integration")
+
+add_test(NAME service_rejects_install_mode_conflict
+    COMMAND "${CMAKE_COMMAND}"
+        "-DPROGRAM=$<TARGET_FILE:PaperBreakEdgeService>"
+        "-DPROGRAM_ARGUMENTS=--install|--uninstall|--config|${CMAKE_CURRENT_SOURCE_DIR}/data/basic-config-valid.json"
+        -DEXPECTED_EXIT=2
+        -DEXPECTED_TEXT=SYS_CONFIG_INVALID
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunAndCheckExit.cmake")
+set_tests_properties(service_rejects_install_mode_conflict PROPERTIES LABELS "integration")
+
+add_test(NAME service_internal_mode_requires_scm
+    COMMAND "${CMAKE_COMMAND}"
+        "-DPROGRAM=$<TARGET_FILE:PaperBreakEdgeService>"
+        "-DPROGRAM_ARGUMENTS=--service|--config|${CMAKE_CURRENT_SOURCE_DIR}/data/basic-config-valid.json"
+        -DEXPECTED_EXIT=1
+        -DEXPECTED_TEXT=SYS_SERVICE_CONTROL_FAILED
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunAndCheckExit.cmake")
+set_tests_properties(service_internal_mode_requires_scm PROPERTIES LABELS "integration")
 
 add_test(NAME qt_console_smoke
     COMMAND "${CMAKE_COMMAND}" -E env

@@ -56,28 +56,43 @@ ctest --preset windows-vs2026-release
 
 | 标签 | 内容 | 默认运行 |
 | --- | --- | --- |
-| `unit` | common、Result、日志与版本 | 是 |
+| `unit` | common、Result、日志、版本、生命周期与 SCM 封装 | 是 |
 | `integration` | 服务/Qt/OpenCV smoke、配置失败诊断、安装路径扫描 | 是 |
 | `simulation` | 不依赖硬件的模拟 lane 基线 | 是 |
 | `hardware-integration` | 目标机、MVS 与实体相机 | 否 |
 
 明确检查硬件测试登记但不执行设备操作时，可使用 `ctest --test-dir <build-dir> -L hardware-integration -V`；M0 占位测试只会报告 skipped，不能作为硬件通过证据。
 
-## 4. 程序 smoke
+## 4. 程序与 Windows 服务
 
-M1-01 的服务命令行有三个互斥模式：
+服务命令行模式互斥：
 
 ```powershell
 PaperBreakEdgeService.exe --version
 PaperBreakEdgeService.exe --validate-config --config '<config.json>'
 PaperBreakEdgeService.exe --console --config '<config.json>'
+PaperBreakEdgeService.exe --install --config '<config.json>'
+PaperBreakEdgeService.exe --uninstall
 ```
 
 `--validate-config` 当前只执行有界基础校验：配置文件必须不超过 1 MiB，是合法 UTF-8 JSON 对象，并包含值为 `1` 的无符号整数 `schemaVersion`。强类型字段、范围、跨字段依赖、原子保存和回滚属于 M1-03。配置路径必须显式传入，尚未固化生产环境默认路径。
 
-控制台模式按 Ctrl+C 受控退出，并把控制台关闭、注销和系统关机信号转换为同一服务停止请求。自动化 smoke 可附加 `--run-for-ms 25`，取值范围为 0～60000 毫秒；该参数只用于控制台测试。退出码为：成功 `0`、命令行或配置错误 `2`、启动或关闭失败 `1`。
+控制台模式按 Ctrl+C 受控退出，并把控制台关闭、注销和系统关机信号转换为同一服务停止请求。自动化 smoke 可附加 `--run-for-ms 25`，取值范围为 0～60000 毫秒；该参数只用于控制台测试。退出码为：成功 `0`、命令行或配置错误 `2`、启动、关闭或 SCM 操作失败 `1`。
 
-SCM 注册、安装/卸载、状态上报和真实 Windows 服务关机集成属于 M1-02，本阶段不实现。
+`--install` 和 `--uninstall` 必须在提升权限的 PowerShell 中运行，程序不会触发 UAC 自提升。安装命令先验证配置并保存其规范化绝对路径；配置文件及父目录必须允许 `NT AUTHORITY\LocalService` 读取。安装是幂等配置收敛，不立即启动服务；卸载同样幂等，运行中服务会先请求停止并最多等待 30 秒。
+
+服务注册为自动启动的独立进程，内部 SCM 启动参数是 `--service --config <absolute-path>`，不供交互运行。SCM 宿主上报 START_PENDING、RUNNING、STOP_PENDING 和 STOPPED，在 pending 阶段每秒更新 checkpoint；接受停止、关机和预关机控制，但回调只提交容量为 1 的停止请求。异常退出恢复延迟为 5、15、60 秒，后续继续使用最后一项，稳定 24 小时后重置失败计数；非崩溃失败也应用该策略，正常停止不触发恢复。
+
+查询注册结果可使用：
+
+```powershell
+sc.exe qc PaperBreakEdgeService
+sc.exe qfailure PaperBreakEdgeService
+sc.exe qfailureflag PaperBreakEdgeService
+sc.exe queryex PaperBreakEdgeService
+```
+
+真实安装、启动、停止、Session 0 和异常恢复必须在隔离 Windows 测试机验证。默认 CTest 只测试可注入的 SCM 封装和手工启动内部模式时的拒绝路径，不修改真实服务数据库。
 
 Qt 客户端直接启动后创建最小系统托盘，右键菜单提供“退出界面”。自动测试使用 `QT_QPA_PLATFORM=offscreen` 验证 Qt 事件循环和确定性退出；托盘实际可见性必须在交互式 Windows 桌面人工观察。
 

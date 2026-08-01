@@ -323,6 +323,16 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M1-02 Windows SCM 集成
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-01
+
+完成日期：2026-08-01
+
+执行记录：`.agent/plans/m1-02-windows-scm-integration.md`
+
 实施：
 
 - 实现 `--install`、`--uninstall`；

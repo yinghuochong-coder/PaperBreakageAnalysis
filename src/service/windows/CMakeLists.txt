@@ -1,5 +1,8 @@
 add_library(paperbreak_windows_service STATIC
-    src/console_control.cpp)
+    src/console_control.cpp
+    src/scm.cpp
+    src/scm_host.cpp
+    src/scm_win32.cpp)
 
 target_link_libraries(paperbreak_windows_service
     PUBLIC

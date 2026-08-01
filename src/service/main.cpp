@@ -3,6 +3,8 @@
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/service/windows/console_control.hpp"
+#include "paperbreak/service/windows/scm.hpp"
+#include "paperbreak/service/windows/scm_host.hpp"
 
 #include <charconv>
 #include <chrono>
@@ -25,6 +27,9 @@ enum class Mode
     none,
     console,
     validate_config,
+    install,
+    uninstall,
+    service,
     version,
 };
 
@@ -48,12 +53,30 @@ paperbreak::Result<Arguments> parse_arguments(const int argc, char* argv[])
     for (int index = 1; index < argc; ++index)
     {
         const std::string_view argument{argv[index]};
-        if (argument == "--console" || argument == "--validate-config" || argument == "--version")
+        if (argument == "--console" || argument == "--validate-config" || argument == "--install" ||
+            argument == "--uninstall" || argument == "--service" || argument == "--version")
         {
-            const Mode requested =
-                argument == "--console"
-                    ? Mode::console
-                    : (argument == "--validate-config" ? Mode::validate_config : Mode::version);
+            Mode requested = Mode::version;
+            if (argument == "--console")
+            {
+                requested = Mode::console;
+            }
+            else if (argument == "--validate-config")
+            {
+                requested = Mode::validate_config;
+            }
+            else if (argument == "--install")
+            {
+                requested = Mode::install;
+            }
+            else if (argument == "--uninstall")
+            {
+                requested = Mode::uninstall;
+            }
+            else if (argument == "--service")
+            {
+                requested = Mode::service;
+            }
             if (arguments.mode != Mode::none)
             {
                 return paperbreak::Result<Arguments>::failure(
@@ -103,22 +126,23 @@ paperbreak::Result<Arguments> parse_arguments(const int argc, char* argv[])
 
     if (arguments.mode == Mode::none)
     {
-        return paperbreak::Result<Arguments>::failure(
-            argument_error("必须指定 --console、--validate-config 或 --version"));
+        return paperbreak::Result<Arguments>::failure(argument_error(
+            "必须指定 --console、--validate-config、--install、--uninstall、--service 或 "
+            "--version"));
     }
-    if (arguments.mode == Mode::version)
+    if (arguments.mode == Mode::version || arguments.mode == Mode::uninstall)
     {
         if (!arguments.config_path.empty() || arguments.run_for_present)
         {
             return paperbreak::Result<Arguments>::failure(
-                argument_error("--version 不能与配置或运行时限参数组合"));
+                argument_error("--version 和 --uninstall 不能与配置或运行时限参数组合"));
         }
         return paperbreak::Result<Arguments>::success(std::move(arguments));
     }
     if (arguments.config_path.empty())
     {
-        return paperbreak::Result<Arguments>::failure(
-            argument_error("--console 和 --validate-config 必须提供 --config <path>"));
+        return paperbreak::Result<Arguments>::failure(argument_error(
+            "--console、--validate-config、--install 和 --service 必须提供 --config <path>"));
     }
     if (arguments.mode != Mode::console && arguments.run_for_present)
     {
@@ -211,9 +235,42 @@ class LoggingLifecycleComponent final : public paperbreak::service::ILifecycleCo
     std::unique_ptr<paperbreak::logging::LoggingRuntime> runtime_;
 };
 
+class HostedRuntime final : public paperbreak::service::windows::IHostedService
+{
+  public:
+    explicit HostedRuntime(
+        std::vector<std::unique_ptr<paperbreak::service::ILifecycleComponent>> components)
+        : runtime_(std::move(components))
+    {
+    }
+
+    [[nodiscard]] paperbreak::Result<paperbreak::service::StartOutcome> start() override
+    {
+        return runtime_.start();
+    }
+
+    void request_stop(const paperbreak::service::StopReason reason) noexcept override
+    {
+        runtime_.request_stop(reason);
+    }
+
+    [[nodiscard]] paperbreak::Result<void> shutdown() override
+    {
+        return runtime_.shutdown();
+    }
+
+  private:
+    paperbreak::service::ServiceRuntime runtime_;
+};
+
 void print_error(const paperbreak::Error& error)
 {
     std::cerr << error.business_code << ": " << error.message;
+    if (error.native_domain.has_value() || error.native_code.has_value())
+    {
+        std::cerr << " [native=" << error.native_domain.value_or("unknown") << ':'
+                  << error.native_code.value_or("unknown") << ']';
+    }
     for (const auto& detail : error.details)
     {
         std::cerr << " [" << detail.key << '=' << detail.value << ']';
@@ -221,26 +278,54 @@ void print_error(const paperbreak::Error& error)
     std::cerr << '\n';
 }
 
-int run_console(const Arguments& arguments)
+paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>
+create_hosted_service(const std::filesystem::path& config_path, const bool validate_config)
 {
     paperbreak::logging::LoggingConfig log_config;
     log_config.directory = std::filesystem::temp_directory_path() / "PaperBreakEdge" / "logs";
     auto logging_result = paperbreak::logging::LoggingRuntime::create(log_config);
     if (!logging_result)
     {
-        print_error(logging_result.error());
-        return 1;
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(logging_result.error());
+    }
+
+    auto logging = std::move(logging_result).value();
+    if (validate_config)
+    {
+        auto config_result = paperbreak::config::validate_basic_config(config_path);
+        if (!config_result)
+        {
+            static_cast<void>(logging->log(
+                paperbreak::logging::Category::service, paperbreak::logging::Level::critical,
+                config_result.error().business_code + ": " + config_result.error().message));
+            static_cast<void>(logging->shutdown());
+            return paperbreak::
+                Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(
+                    config_result.error());
+        }
     }
 
     std::vector<std::unique_ptr<paperbreak::service::ILifecycleComponent>> components;
-    components.push_back(
-        std::make_unique<LoggingLifecycleComponent>(std::move(logging_result).value()));
-    paperbreak::service::ServiceRuntime runtime{std::move(components)};
+    components.push_back(std::make_unique<LoggingLifecycleComponent>(std::move(logging)));
+    return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+        success(std::make_unique<HostedRuntime>(std::move(components)));
+}
+
+int run_console(const Arguments& arguments)
+{
+    auto service_result = create_hosted_service(arguments.config_path, false);
+    if (!service_result)
+    {
+        print_error(service_result.error());
+        return 1;
+    }
+    auto service = std::move(service_result).value();
     StopRequestChannel stop_channel;
 
     auto registration_result = paperbreak::service::windows::ConsoleControlRegistration::create(
-        [&runtime, &stop_channel](const paperbreak::service::StopReason reason) {
-            runtime.request_stop(reason);
+        [&service, &stop_channel](const paperbreak::service::StopReason reason) {
+            service->request_stop(reason);
             stop_channel.request(reason);
         });
     if (!registration_result)
@@ -250,7 +335,7 @@ int run_console(const Arguments& arguments)
     }
     [[maybe_unused]] auto registration = std::move(registration_result).value();
 
-    auto start_result = runtime.start();
+    auto start_result = service->start();
     if (!start_result)
     {
         print_error(start_result.error());
@@ -267,7 +352,7 @@ int run_console(const Arguments& arguments)
     {
         if (!stop_channel.wait_for(arguments.run_for))
         {
-            runtime.request_stop(paperbreak::service::StopReason::test_deadline);
+            service->request_stop(paperbreak::service::StopReason::test_deadline);
         }
     }
     else
@@ -276,10 +361,90 @@ int run_console(const Arguments& arguments)
         static_cast<void>(stop_channel.wait());
     }
 
-    const auto shutdown_result = runtime.shutdown();
+    const auto shutdown_result = service->shutdown();
     if (!shutdown_result)
     {
         print_error(shutdown_result.error());
+        return 1;
+    }
+    return 0;
+}
+
+paperbreak::Result<std::filesystem::path> absolute_config_path(
+    const std::filesystem::path& config_path)
+{
+    std::error_code error_code;
+    auto absolute = std::filesystem::weakly_canonical(config_path, error_code);
+    if (error_code)
+    {
+        auto error = argument_error("无法规范化配置文件绝对路径");
+        error.native_domain = "std::error_code";
+        error.native_code = std::to_string(error_code.value());
+        return paperbreak::Result<std::filesystem::path>::failure(std::move(error));
+    }
+    return paperbreak::Result<std::filesystem::path>::success(std::move(absolute));
+}
+
+int run_install(const Arguments& arguments)
+{
+    auto executable_result = paperbreak::service::windows::current_executable_path();
+    if (!executable_result)
+    {
+        print_error(executable_result.error());
+        return 1;
+    }
+    auto config_result = absolute_config_path(arguments.config_path);
+    if (!config_result)
+    {
+        print_error(config_result.error());
+        return 2;
+    }
+
+    paperbreak::service::windows::ServiceDefinition definition;
+    definition.command_line = paperbreak::service::windows::build_service_command_line(
+        executable_result.value(), config_result.value());
+    auto api = paperbreak::service::windows::make_windows_service_manager_api();
+    paperbreak::service::windows::ServiceManager manager{*api};
+    auto install_result = manager.install(definition);
+    if (!install_result)
+    {
+        print_error(install_result.error());
+        return 1;
+    }
+
+    std::cout << (install_result.value() == paperbreak::service::windows::InstallOutcome::created
+                      ? "Windows 服务安装完成。"
+                      : "Windows 服务配置已收敛。")
+              << '\n';
+    return 0;
+}
+
+int run_uninstall()
+{
+    auto api = paperbreak::service::windows::make_windows_service_manager_api();
+    paperbreak::service::windows::ServiceManager manager{*api};
+    auto uninstall_result = manager.uninstall();
+    if (!uninstall_result)
+    {
+        print_error(uninstall_result.error());
+        return 1;
+    }
+
+    std::cout << (uninstall_result.value() ==
+                          paperbreak::service::windows::UninstallOutcome::removed
+                      ? "Windows 服务卸载完成。"
+                      : "Windows 服务原本不存在。")
+              << '\n';
+    return 0;
+}
+
+int run_service(const Arguments& arguments)
+{
+    auto run_result = paperbreak::service::windows::run_service_dispatcher(
+        [config_path = arguments.config_path] { return create_hosted_service(config_path, true); });
+    if (!run_result)
+    {
+        print_error(run_result.error());
         return 1;
     }
     return 0;
@@ -303,6 +468,15 @@ int main(const int argc, char* argv[])
         return 0;
     }
 
+    if (arguments.mode == Mode::uninstall)
+    {
+        return run_uninstall();
+    }
+    if (arguments.mode == Mode::service)
+    {
+        return run_service(arguments);
+    }
+
     const auto config_result = paperbreak::config::validate_basic_config(arguments.config_path);
     if (!config_result)
     {
@@ -314,6 +488,10 @@ int main(const int argc, char* argv[])
         std::cout << "配置基础校验通过，schemaVersion=" << config_result.value().schema_version
                   << "，bytes=" << config_result.value().file_size_bytes << '\n';
         return 0;
+    }
+    if (arguments.mode == Mode::install)
+    {
+        return run_install(arguments);
     }
     return run_console(arguments);
 }
