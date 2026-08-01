@@ -150,6 +150,7 @@ class ScriptedCameraDevice final : public ICameraDevice
     }
     [[nodiscard]] Result<void> software_trigger() override
     {
+        trigger_calls_.fetch_add(1U);
         return Result<void>::success();
     }
     [[nodiscard]] Result<void> stop_acquisition() override
@@ -169,12 +170,17 @@ class ScriptedCameraDevice final : public ICameraDevice
     {
         return capture_calls_.load();
     }
+    [[nodiscard]] std::size_t trigger_calls() const noexcept
+    {
+        return trigger_calls_.load();
+    }
 
   private:
     CameraDeviceDescriptor descriptor_{"Mock", "MOCK-0001", "192.0.2.1", "mock0"};
     std::vector<CaptureAction> actions_;
     bool repeat_last_{};
     std::atomic<std::size_t> capture_calls_{};
+    std::atomic<std::size_t> trigger_calls_{};
 };
 } // namespace
 
@@ -484,6 +490,25 @@ TEST(CameraAcquisitionWorker, EscalatesConsecutiveTimeoutsWithBoundedContext)
     EXPECT_EQ(snapshot.last_error->business_code, "CAMERA_FRAME_TIMEOUT");
     EXPECT_EQ(snapshot.last_error->source_id, "CAM01");
     EXPECT_EQ(snapshot.last_error->details.back().value, "3");
+}
+
+TEST(CameraAcquisitionWorker, SoftwareTriggerRunsBeforeCaptureAndWaitIsCancellable)
+{
+    ScriptedCameraDevice device{{CaptureAction::success}, true};
+    FrameBufferPool pool{2U, 4U};
+    AcquisitionQueue queue{2U};
+    AcquisitionWorker worker{
+        device,
+        pool,
+        queue,
+        {.camera_id = "CAM01", .receive_timeout = 10ms, .software_trigger_interval = 2s}};
+
+    ASSERT_TRUE(worker.start());
+    ASSERT_TRUE(wait_until([&] { return worker.snapshot().frames_received >= 1U; }));
+    EXPECT_EQ(device.trigger_calls(), device.capture_calls());
+    worker.request_stop();
+    EXPECT_TRUE(worker.join(std::chrono::steady_clock::now() + 200ms));
+    EXPECT_FALSE(worker.snapshot().last_error);
 }
 
 TEST(CameraAcquisitionWorker, StopsBeforePublishingUnexpectedGeometryChange)

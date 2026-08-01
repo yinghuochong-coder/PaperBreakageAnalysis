@@ -94,6 +94,7 @@ struct AcquisitionWorkerOptions final
     std::chrono::milliseconds receive_timeout{std::chrono::seconds{1}};
     std::chrono::milliseconds statistics_window{std::chrono::seconds{1}};
     std::size_t consecutive_timeout_limit{3U};
+    std::optional<std::chrono::milliseconds> software_trigger_interval;
 };
 
 struct AcquisitionWorkerSnapshot final
@@ -142,6 +143,7 @@ class AcquisitionWorker final
     AcquisitionWorkerOptions options_;
     mutable std::mutex mutex_;
     std::condition_variable condition_;
+    std::condition_variable_any trigger_wait_condition_;
     bool started_{};
     bool running_{};
     bool completed_{true};

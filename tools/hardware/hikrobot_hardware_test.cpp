@@ -415,11 +415,15 @@ Json run_stage(ICameraProvider& provider, const Plan& plan, const std::size_t ca
         queues.push_back(std::make_unique<AcquisitionQueue>(plan.queue_capacity));
         workers.push_back(std::make_unique<AcquisitionWorker>(
             *devices.back(), *pools.back(), *queues.back(),
-            AcquisitionWorkerOptions{.camera_id = plan.bindings[index].camera_id,
-                                     .receive_timeout =
-                                         std::chrono::milliseconds{plan.receive_timeout_ms},
-                                     .statistics_window = 1s,
-                                     .consecutive_timeout_limit = 3U}));
+            AcquisitionWorkerOptions{
+                .camera_id = plan.bindings[index].camera_id,
+                .receive_timeout = std::chrono::milliseconds{plan.receive_timeout_ms},
+                .statistics_window = 1s,
+                .consecutive_timeout_limit = 3U,
+                .software_trigger_interval =
+                    plan.parameters.trigger_mode == TriggerMode::software
+                        ? std::optional<std::chrono::milliseconds>{plan.sample_interval_ms}
+                        : std::nullopt}));
         if (auto started = workers.back()->start(); !started)
         {
             stage["error"] = error_json(started.error());
@@ -452,14 +456,6 @@ Json run_stage(ICameraProvider& provider, const Plan& plan, const std::size_t ca
     while (std::chrono::steady_clock::now() < deadline)
     {
         samples.push_back(resource_sample(baseline));
-        if (plan.parameters.trigger_mode == TriggerMode::software)
-        {
-            for (auto& device : devices)
-            {
-                if (auto triggered = device->software_trigger(); !triggered)
-                    stage["triggerErrors"].push_back(error_json(triggered.error()));
-            }
-        }
         std::this_thread::sleep_for(std::chrono::milliseconds{plan.sample_interval_ms});
     }
     cleanup();
@@ -632,6 +628,7 @@ int main(int argc, char** argv)
         }
     }
     record["executionPassed"] = execution_passed;
+    record["hardwareGate"] = execution_passed ? "functional-evidence-passed" : "incomplete";
     record["finishedUtc"] = utc_now();
     if (const auto written = write_record(output_path, record); !written)
         return print_error(written.error(), 3);

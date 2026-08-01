@@ -161,7 +161,9 @@ Result<void> AcquisitionWorker::start()
     if (options_.camera_id.empty() ||
         options_.receive_timeout <= std::chrono::milliseconds::zero() ||
         options_.statistics_window <= std::chrono::milliseconds::zero() ||
-        options_.consecutive_timeout_limit == 0U)
+        options_.consecutive_timeout_limit == 0U ||
+        (options_.software_trigger_interval &&
+         *options_.software_trigger_interval <= std::chrono::milliseconds::zero()))
     {
         return Result<void>::failure(
             acquisition_error("CAMERA_CONFIG_FAILED", Severity::error, "采集工作线程配置无效",
@@ -277,6 +279,8 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
     std::optional<FrameGeometry> expected_geometry;
     std::optional<PixelFormat> expected_pixel_format;
     auto window_started = std::chrono::steady_clock::now();
+    auto next_software_trigger = window_started;
+    std::mutex trigger_wait_mutex;
     const auto publish_rates = [&](const std::chrono::steady_clock::time_point now) {
         const auto elapsed = now - window_started;
         if (elapsed < options_.statistics_window)
@@ -295,6 +299,24 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
     {
         while (!stop_token.stop_requested())
         {
+            if (options_.software_trigger_interval)
+            {
+                std::unique_lock wait_lock{trigger_wait_mutex};
+                if (trigger_wait_condition_.wait_until(
+                        wait_lock, stop_token, next_software_trigger,
+                        [&stop_token] { return stop_token.stop_requested(); }))
+                {
+                    break;
+                }
+                if (auto triggered = device_.software_trigger(); !triggered)
+                {
+                    finish(triggered.error(), sequence_number);
+                    return;
+                }
+                next_software_trigger =
+                    std::chrono::steady_clock::now() + *options_.software_trigger_interval;
+            }
+
             auto acquired = pool_.acquire(stop_token, options_.receive_timeout);
             if (acquired.status == FramePoolAcquireStatus::stopped ||
                 acquired.status == FramePoolAcquireStatus::closed)
