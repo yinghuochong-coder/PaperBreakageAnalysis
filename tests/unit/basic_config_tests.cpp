@@ -31,7 +31,10 @@ class TemporaryDirectory final
         std::error_code ignored;
         std::filesystem::remove_all(path_, ignored);
     }
-    [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+    [[nodiscard]] const std::filesystem::path& path() const noexcept
+    {
+        return path_;
+    }
     [[nodiscard]] std::filesystem::path write(std::string_view name,
                                               std::string_view contents) const
     {
@@ -44,20 +47,20 @@ class TemporaryDirectory final
         stream.write(contents.data(), static_cast<std::streamsize>(contents.size()));
         return file;
     }
+
   private:
     std::filesystem::path path_;
 };
 
 std::string valid_config()
 {
-    const auto path = std::filesystem::path{PAPERBREAK_TEST_SOURCE_DIR} / "data" /
-                      "basic-config-valid.json";
+    const auto path =
+        std::filesystem::path{PAPERBREAK_TEST_SOURCE_DIR} / "data" / "basic-config-valid.json";
     std::ifstream stream{path, std::ios::binary};
     return {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
 }
 
-std::string replace_once(std::string value, const std::string_view from,
-                         const std::string_view to)
+std::string replace_once(std::string value, const std::string_view from, const std::string_view to)
 {
     const auto position = value.find(from);
     EXPECT_NE(position, std::string::npos);
@@ -69,14 +72,12 @@ std::string replace_once(std::string value, const std::string_view from,
 class RecordingAudit final : public paperbreak::config::IConfigAuditSink
 {
   public:
-    paperbreak::Result<void> record(
-        const paperbreak::config::ConfigAuditRecord& record) override
+    paperbreak::Result<void> record(const paperbreak::config::ConfigAuditRecord& record) override
     {
         records.push_back(record);
         if (fail)
             return paperbreak::Result<void>::failure(paperbreak::make_error(
-                "LOG_WRITE_FAILED", paperbreak::Severity::error, "injected", "test",
-                "test.audit"));
+                "LOG_WRITE_FAILED", paperbreak::Severity::error, "injected", "test", "test.audit"));
         return paperbreak::Result<void>::success();
     }
     bool fail{};
@@ -86,7 +87,10 @@ class RecordingAudit final : public paperbreak::config::IConfigAuditSink
 class RecordingApplier final : public paperbreak::config::IConfigApplier
 {
   public:
-    [[nodiscard]] std::string_view name() const noexcept override { return "test-applier"; }
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "test-applier";
+    }
     paperbreak::Result<void> prepare(const paperbreak::config::EdgeConfig&,
                                      const paperbreak::config::EdgeConfig&,
                                      const std::vector<std::string>&) override
@@ -94,23 +98,22 @@ class RecordingApplier final : public paperbreak::config::IConfigApplier
         calls.emplace_back("prepare");
         return paperbreak::Result<void>::success();
     }
-    paperbreak::Result<void> apply_and_readback(
-        const paperbreak::config::EdgeConfig&) override
+    paperbreak::Result<void> apply_and_readback(const paperbreak::config::EdgeConfig&) override
     {
         calls.emplace_back("apply");
         if (fail_apply)
-            return paperbreak::Result<void>::failure(paperbreak::make_error(
-                "CAMERA_CONFIG_FAILED", paperbreak::Severity::error, "injected", "test",
-                "test.apply"));
+            return paperbreak::Result<void>::failure(
+                paperbreak::make_error("CAMERA_CONFIG_FAILED", paperbreak::Severity::error,
+                                       "injected", "test", "test.apply"));
         return paperbreak::Result<void>::success();
     }
     paperbreak::Result<void> commit(const paperbreak::config::EdgeConfig&) override
     {
         calls.emplace_back("commit");
         if (fail_commit)
-            return paperbreak::Result<void>::failure(paperbreak::make_error(
-                "CAMERA_CONFIG_FAILED", paperbreak::Severity::error, "injected", "test",
-                "test.commit"));
+            return paperbreak::Result<void>::failure(
+                paperbreak::make_error("CAMERA_CONFIG_FAILED", paperbreak::Severity::error,
+                                       "injected", "test", "test.commit"));
         return paperbreak::Result<void>::success();
     }
     paperbreak::Result<void> rollback(const paperbreak::config::EdgeConfig&) noexcept override
@@ -128,23 +131,31 @@ class FailingAtomicFileSystem final : public paperbreak::platform::IAtomicFileSy
   public:
     paperbreak::Result<std::string> read_bounded(const std::filesystem::path& path,
                                                  const std::size_t maximum) override
-    { return inner.read_bounded(path, maximum); }
+    {
+        return inner.read_bounded(path, maximum);
+    }
     paperbreak::Result<void> create_directories(const std::filesystem::path& path) override
-    { return inner.create_directories(path); }
+    {
+        return inner.create_directories(path);
+    }
     paperbreak::Result<std::vector<std::filesystem::path>> list_regular_files(
         const std::filesystem::path& path) override
-    { return inner.list_regular_files(path); }
+    {
+        return inner.list_regular_files(path);
+    }
     paperbreak::Result<void> remove_file(const std::filesystem::path& path) override
-    { return inner.remove_file(path); }
+    {
+        return inner.remove_file(path);
+    }
     paperbreak::Result<void> replace_atomically(
         const std::filesystem::path& path, const std::string_view contents,
         const std::optional<std::filesystem::path>& backup) override
     {
         ++replace_calls;
         if (fail_on_replace != 0U && replace_calls == fail_on_replace)
-            return paperbreak::Result<void>::failure(paperbreak::make_error(
-                "SYS_CONFIG_PERSIST_FAILED", paperbreak::Severity::critical, "injected", "test",
-                "test.replace"));
+            return paperbreak::Result<void>::failure(
+                paperbreak::make_error("SYS_CONFIG_PERSIST_FAILED", paperbreak::Severity::critical,
+                                       "injected", "test", "test.replace"));
         return inner.replace_atomically(path, contents, backup);
     }
     paperbreak::platform::WindowsAtomicFileSystem inner;
@@ -167,13 +178,16 @@ TEST(BasicConfig, AcceptsCompleteVersionOneAtUnicodeAndSpacePath)
 TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
 {
     const TemporaryDirectory directory;
-    const auto unknown = directory.write(
-        "unknown.json", replace_once(valid_config(), "\"health\": {", "\"extra\": 1, \"health\": {"));
-    const auto sensitive = directory.write(
-        "secret.json", replace_once(valid_config(), "\"serverUrl\": \"\"", "\"serverUrl\": \"\", \"token\": \"raw\""));
+    const auto unknown =
+        directory.write("unknown.json", replace_once(valid_config(), "\"health\": {",
+                                                     "\"extra\": 1, \"health\": {"));
+    const auto sensitive =
+        directory.write("secret.json", replace_once(valid_config(), "\"serverUrl\": \"\"",
+                                                    "\"serverUrl\": \"\", \"token\": \"raw\""));
     const auto malformed = directory.write("truncated.json", R"({"configSchemaVersion":1)");
-    const auto future = directory.write(
-        "future.json", replace_once(valid_config(), "\"configSchemaVersion\": 1", "\"configSchemaVersion\": 2"));
+    const auto future =
+        directory.write("future.json", replace_once(valid_config(), "\"configSchemaVersion\": 1",
+                                                    "\"configSchemaVersion\": 2"));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(unknown));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(sensitive));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(malformed));
@@ -185,12 +199,15 @@ TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
 TEST(BasicConfig, RejectsCrossFieldAndPathViolations)
 {
     const TemporaryDirectory directory;
-    const auto event = directory.write(
-        "event.json", replace_once(valid_config(), "\"maxEventSeconds\": 60", "\"maxEventSeconds\": 15"));
+    const auto event =
+        directory.write("event.json", replace_once(valid_config(), "\"maxEventSeconds\": 60",
+                                                   "\"maxEventSeconds\": 15"));
     const auto watermarks = directory.write(
-        "watermarks.json", replace_once(valid_config(), "\"criticalFreeSpaceGiB\": 100", "\"criticalFreeSpaceGiB\": 250"));
-    const auto path = directory.write(
-        "path.json", replace_once(valid_config(), "\"eventRoot\": \"数据/事件 文件\"", "\"eventRoot\": \"../escape\""));
+        "watermarks.json", replace_once(valid_config(), "\"criticalFreeSpaceGiB\": 100",
+                                        "\"criticalFreeSpaceGiB\": 250"));
+    const auto path = directory.write("path.json", replace_once(valid_config(),
+                                                                "\"eventRoot\": \"数据/事件 文件\"",
+                                                                "\"eventRoot\": \"../escape\""));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(event));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(watermarks));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(path));
@@ -203,7 +220,8 @@ TEST(BasicConfig, RejectsEmptyMissingDirectoryAndOversizedFiles)
     EXPECT_FALSE(paperbreak::config::validate_basic_config(directory.path() / "missing.json"));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(directory.path()));
     const std::string oversized(paperbreak::config::config_max_bytes + 1U, 'x');
-    EXPECT_FALSE(paperbreak::config::validate_basic_config(directory.write("large.json", oversized)));
+    EXPECT_FALSE(
+        paperbreak::config::validate_basic_config(directory.write("large.json", oversized)));
 }
 
 TEST(ConfigRepository, CommitsHotChangesAndIsIdempotent)
@@ -216,9 +234,11 @@ TEST(ConfigRepository, CommitsHotChangesAndIsIdempotent)
     paperbreak::config::ConfigRepository repository{path, files, audit, {&applier}};
     ASSERT_TRUE(repository.load());
     const auto candidate = replace_once(valid_config(), "\"fps\": 3.0", "\"fps\": 4.0");
-    const auto updated = repository.update(candidate, 1U,
-        {.source = paperbreak::config::ConfigChangeSource::local_file,
-         .actor = "operator", .correlation_id = "req-1"});
+    const auto updated =
+        repository.update(candidate, 1U,
+                          {.source = paperbreak::config::ConfigChangeSource::local_file,
+                           .actor = "operator",
+                           .correlation_id = "req-1"});
     ASSERT_TRUE(updated) << updated.error().message;
     EXPECT_EQ(updated.value().stored_config_revision, 2U);
     EXPECT_EQ(updated.value().effective_config_revision, 2U);
@@ -227,9 +247,11 @@ TEST(ConfigRepository, CommitsHotChangesAndIsIdempotent)
     EXPECT_EQ(applier.calls, (std::vector<std::string>{"prepare", "apply", "commit"}));
 
     auto current_json = paperbreak::config::serialize_config(*updated.value().stored);
-    const auto idempotent = repository.update(current_json, 2U,
-        {.source = paperbreak::config::ConfigChangeSource::local_file,
-         .actor = "operator", .correlation_id = "req-2"});
+    const auto idempotent =
+        repository.update(current_json, 2U,
+                          {.source = paperbreak::config::ConfigChangeSource::local_file,
+                           .actor = "operator",
+                           .correlation_id = "req-2"});
     ASSERT_TRUE(idempotent);
     EXPECT_EQ(idempotent.value().stored_config_revision, 2U);
     EXPECT_EQ(audit.records.size(), 1U);
@@ -293,18 +315,18 @@ TEST(ConfigRepository, RestoresDiskAndRuntimeWhenCommitFails)
     applier.fail_commit = true;
     paperbreak::config::ConfigRepository repository{path, files, audit, {&applier}};
     ASSERT_TRUE(repository.load());
-    const auto result = repository.update(
-        replace_once(valid_config(), "\"fps\": 3.0", "\"fps\": 4.0"), 1U, {});
+    const auto result =
+        repository.update(replace_once(valid_config(), "\"fps\": 3.0", "\"fps\": 4.0"), 1U, {});
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().business_code, "SYS_CONFIG_APPLY_FAILED");
-    EXPECT_EQ(applier.calls,
-              (std::vector<std::string>{"prepare", "apply", "commit", "rollback"}));
+    EXPECT_EQ(applier.calls, (std::vector<std::string>{"prepare", "apply", "commit", "rollback"}));
     ASSERT_TRUE(repository.snapshot());
     EXPECT_EQ(repository.snapshot().value().stored_config_revision, 1U);
     const auto persisted = files.read_bounded(path, paperbreak::config::config_max_bytes);
     ASSERT_TRUE(persisted);
-    EXPECT_EQ(paperbreak::config::parse_config(persisted.value(), directory.path()).value().
-                  config_revision,
+    EXPECT_EQ(paperbreak::config::parse_config(persisted.value(), directory.path())
+                  .value()
+                  .config_revision,
               1U);
 }
 
@@ -336,7 +358,8 @@ TEST(ConfigRepository, RecoversNewestValidHistoryAndIgnoresTemporaryResidue)
     const auto path = directory.write("config.json", "{truncated");
     const auto history = directory.path() / "config.json.history";
     std::filesystem::create_directories(history);
-    const auto valid = replace_once(valid_config(), "\"configRevision\": 1", "\"configRevision\": 7");
+    const auto valid =
+        replace_once(valid_config(), "\"configRevision\": 1", "\"configRevision\": 7");
     std::ofstream{history / "00000000000000000007.json", std::ios::binary} << valid;
     std::ofstream{directory.path() / "config.json.paperbreak.tmp.1.1", std::ios::binary}
         << replace_once(valid, "\"configRevision\": 7", "\"configRevision\": 99");
@@ -360,8 +383,8 @@ TEST(ConfigRepository, AuditFailurePreventsModification)
     paperbreak::config::ConfigRepository repository{path, files, audit};
     ASSERT_TRUE(repository.load());
     audit.fail = true;
-    const auto result = repository.update(
-        replace_once(valid_config(), "\"fps\": 3.0", "\"fps\": 4.0"), 1U, {});
+    const auto result =
+        repository.update(replace_once(valid_config(), "\"fps\": 3.0", "\"fps\": 4.0"), 1U, {});
     ASSERT_FALSE(result);
     EXPECT_EQ(repository.snapshot().value().stored_config_revision, 1U);
 }

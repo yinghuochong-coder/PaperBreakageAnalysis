@@ -80,9 +80,8 @@ struct ConfigSnapshot final
 class ConfigRepository final
 {
   public:
-    ConfigRepository(std::filesystem::path config_path,
-                     platform::IAtomicFileSystem& file_system, IConfigAuditSink& audit_sink,
-                     std::vector<IConfigApplier*> appliers = {},
+    ConfigRepository(std::filesystem::path config_path, platform::IAtomicFileSystem& file_system,
+                     IConfigAuditSink& audit_sink, std::vector<IConfigApplier*> appliers = {},
                      std::size_t history_limit = default_config_history_limit);
 
     [[nodiscard]] Result<ConfigSnapshot> load();

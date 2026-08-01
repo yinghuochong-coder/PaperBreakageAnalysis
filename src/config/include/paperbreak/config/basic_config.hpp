@@ -204,8 +204,8 @@ struct BasicConfigInfo final
 };
 
 /// Parses strict schema v1 and resolves/validates paths against config_directory.
-[[nodiscard]] Result<EdgeConfig> parse_config(std::string_view contents,
-                                              const std::filesystem::path& config_directory) noexcept;
+[[nodiscard]] Result<EdgeConfig> parse_config(
+    std::string_view contents, const std::filesystem::path& config_directory) noexcept;
 [[nodiscard]] std::string serialize_config(const EdgeConfig& config);
 
 /// Performs the complete M1-03 validation while retaining the M1-01 CLI surface.

@@ -96,8 +96,7 @@ Result<std::string> WindowsAtomicFileSystem::read_bounded(const std::filesystem:
     std::string contents(static_cast<std::size_t>(size), '\0');
     if (!stream || !stream.read(contents.data(), static_cast<std::streamsize>(contents.size())))
     {
-        return Result<std::string>::failure(
-            file_error("文件读取不完整", "platform.file.read"));
+        return Result<std::string>::failure(file_error("文件读取不完整", "platform.file.read"));
     }
     return Result<std::string>::success(std::move(contents));
 }
@@ -134,8 +133,8 @@ Result<std::vector<std::filesystem::path>> WindowsAtomicFileSystem::list_regular
     }
     if (error)
     {
-        return Result<std::vector<std::filesystem::path>>::failure(file_error(
-            "无法枚举目录", "platform.file.list", static_cast<DWORD>(error.value())));
+        return Result<std::vector<std::filesystem::path>>::failure(
+            file_error("无法枚举目录", "platform.file.list", static_cast<DWORD>(error.value())));
     }
     return Result<std::vector<std::filesystem::path>>::success(std::move(files));
 }
@@ -146,8 +145,8 @@ Result<void> WindowsAtomicFileSystem::remove_file(const std::filesystem::path& p
     static_cast<void>(std::filesystem::remove(path, error));
     if (error)
     {
-        return Result<void>::failure(file_error("无法删除文件", "platform.file.remove",
-                                                static_cast<DWORD>(error.value())));
+        return Result<void>::failure(
+            file_error("无法删除文件", "platform.file.remove", static_cast<DWORD>(error.value())));
     }
     return Result<void>::success();
 }
@@ -172,8 +171,8 @@ Result<void> WindowsAtomicFileSystem::replace_atomically(
                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr)};
     if (!file.valid())
     {
-        return Result<void>::failure(file_error("无法创建同目录临时文件",
-                                                "platform.file.createTemporary", GetLastError()));
+        return Result<void>::failure(
+            file_error("无法创建同目录临时文件", "platform.file.createTemporary", GetLastError()));
     }
 
     std::size_t written_total = 0U;
@@ -210,9 +209,9 @@ Result<void> WindowsAtomicFileSystem::replace_atomically(
     if (exists_error)
     {
         static_cast<void>(DeleteFileW(temporary.c_str()));
-        return Result<void>::failure(
-            file_error("无法检查原子替换目标", "platform.file.atomicReplace",
-                       static_cast<DWORD>(exists_error.value())));
+        return Result<void>::failure(file_error("无法检查原子替换目标",
+                                                "platform.file.atomicReplace",
+                                                static_cast<DWORD>(exists_error.value())));
     }
     BOOL replaced = FALSE;
     if (exists)

@@ -15,8 +15,8 @@ namespace
 Error repository_error(std::string code, Severity severity, std::string message,
                        std::string operation, bool retryable = false)
 {
-    return make_error(std::move(code), severity, std::move(message), "config",
-                      std::move(operation), retryable);
+    return make_error(std::move(code), severity, std::move(message), "config", std::move(operation),
+                      retryable);
 }
 
 bool same_content(EdgeConfig left, EdgeConfig right)
@@ -105,10 +105,8 @@ std::string audit_value(const EdgeConfig& config, const std::string_view path)
             value = document.at("storage");
         else if (path == "/uplink/transport")
             value = {{"serverUrl", document.at("uplink").at("serverUrl")},
-                     {"credentialReference",
-                      document.at("uplink").at("credentialReference")},
-                     {"certificateReference",
-                      document.at("uplink").at("certificateReference")}};
+                     {"credentialReference", document.at("uplink").at("credentialReference")},
+                     {"certificateReference", document.at("uplink").at("certificateReference")}};
         else if (path == "/uplink/runtime")
             value = {{"enabled", document.at("uplink").at("enabled")},
                      {"heartbeatSeconds", document.at("uplink").at("heartbeatSeconds")}};
@@ -132,9 +130,9 @@ std::string audit_value(const EdgeConfig& config, const std::string_view path)
     }
 }
 
-std::vector<ConfigAuditRecord::Change> make_audit_changes(
-    const EdgeConfig& previous, const EdgeConfig& candidate,
-    const std::vector<std::string>& paths)
+std::vector<ConfigAuditRecord::Change> make_audit_changes(const EdgeConfig& previous,
+                                                          const EdgeConfig& candidate,
+                                                          const std::vector<std::string>& paths)
 {
     std::vector<ConfigAuditRecord::Change> changes;
     changes.reserve(paths.size());
@@ -215,8 +213,8 @@ Result<ConfigSnapshot> ConfigRepository::load()
             candidates.emplace_back(revision.value(), path);
         }
     }
-    std::ranges::sort(candidates, std::greater<>{}, &std::pair<std::uint64_t,
-                                                          std::filesystem::path>::first);
+    std::ranges::sort(candidates, std::greater<>{},
+                      &std::pair<std::uint64_t, std::filesystem::path>::first);
     for (const auto& [revision, path] : candidates)
     {
         auto history_text = file_system_.read_bounded(path, config_max_bytes);
@@ -225,15 +223,15 @@ Result<ConfigSnapshot> ConfigRepository::load()
         auto parsed = parse_text(history_text.value());
         if (!parsed || parsed.value().config_revision != revision)
             continue;
-        ConfigAuditRecord record{.source = ConfigChangeSource::startup_recovery,
-                                 .actor = "service",
-                                 .correlation_id = "startup",
-                                 .previous_revision = 0U,
-                                 .candidate_revision = revision,
-                                 .timestamp = current_utc_timestamp(),
-                                 .changed_paths = {"/"},
-                                 .redacted_changes = {{"/", "<invalid-main-config>",
-                                                       "<recovered-config>"}}};
+        ConfigAuditRecord record{
+            .source = ConfigChangeSource::startup_recovery,
+            .actor = "service",
+            .correlation_id = "startup",
+            .previous_revision = 0U,
+            .candidate_revision = revision,
+            .timestamp = current_utc_timestamp(),
+            .changed_paths = {"/"},
+            .redacted_changes = {{"/", "<invalid-main-config>", "<recovered-config>"}}};
         auto audit_result = audit_sink_.record(record);
         if (!audit_result)
             return Result<ConfigSnapshot>::failure(audit_result.error());
@@ -247,10 +245,9 @@ Result<ConfigSnapshot> ConfigRepository::load()
         return Result<ConfigSnapshot>::success(make_snapshot_locked(true));
     }
 
-    Error error = current_text
-                      ? repository_error("SYS_CONFIG_INVALID", Severity::critical,
-                                         "主配置无效且没有可恢复的历史版本", "config.load")
-                      : current_text.error();
+    Error error = current_text ? repository_error("SYS_CONFIG_INVALID", Severity::critical,
+                                                  "主配置无效且没有可恢复的历史版本", "config.load")
+                               : current_text.error();
     return Result<ConfigSnapshot>::failure(std::move(error));
 }
 
@@ -280,9 +277,9 @@ Result<void> ConfigRepository::persist_locked(const EdgeConfig& candidate)
 {
     if (history_limit_ == 0U)
     {
-        return Result<void>::failure(repository_error(
-            "SYS_CONFIG_PERSIST_FAILED", Severity::critical, "配置历史上限不能为零",
-            "config.persist"));
+        return Result<void>::failure(repository_error("SYS_CONFIG_PERSIST_FAILED",
+                                                      Severity::critical, "配置历史上限不能为零",
+                                                      "config.persist"));
     }
     auto directories = file_system_.create_directories(history_directory());
     if (!directories)
@@ -336,7 +333,8 @@ Result<ConfigSnapshot> ConfigRepository::rollback_to(const std::uint64_t histori
                                                      const std::uint64_t expected_revision,
                                                      const ConfigChangeContext& context)
 {
-    auto historical = file_system_.read_bounded(history_path(historical_revision), config_max_bytes);
+    auto historical =
+        file_system_.read_bounded(history_path(historical_revision), config_max_bytes);
     if (!historical)
         return Result<ConfigSnapshot>::failure(historical.error());
     return update(historical.value(), expected_revision, context);
@@ -350,9 +348,9 @@ Result<ConfigSnapshot> ConfigRepository::update_locked(std::string candidate_jso
     static_cast<void>(restore_disk_on_failure);
     if (!accepting_changes_)
     {
-        return Result<ConfigSnapshot>::failure(repository_error(
-            "SYS_SERVICE_STOPPING", Severity::warning, "服务正在停止，拒绝配置修改",
-            "config.update", true));
+        return Result<ConfigSnapshot>::failure(
+            repository_error("SYS_SERVICE_STOPPING", Severity::warning,
+                             "服务正在停止，拒绝配置修改", "config.update", true));
     }
     if (!stored_ || !effective_)
     {
@@ -364,8 +362,8 @@ Result<ConfigSnapshot> ConfigRepository::update_locked(std::string candidate_jso
         Error error = repository_error("SYS_CONFIG_VERSION_CONFLICT", Severity::warning,
                                        "配置修订与当前版本冲突", "config.update");
         error.details.push_back({"expectedConfigRevision", std::to_string(expected_revision)});
-        error.details.push_back({"currentConfigRevision",
-                                 std::to_string(stored_->config_revision)});
+        error.details.push_back(
+            {"currentConfigRevision", std::to_string(stored_->config_revision)});
         return Result<ConfigSnapshot>::failure(std::move(error));
     }
 
@@ -374,11 +372,11 @@ Result<ConfigSnapshot> ConfigRepository::update_locked(std::string candidate_jso
         return Result<ConfigSnapshot>::failure(parsed.error());
     if (parsed.value().config_revision != expected_revision)
     {
-        Error error = repository_error("SYS_CONFIG_VERSION_CONFLICT", Severity::warning,
-                                       "候选文件修订必须等于 expectedConfigRevision",
-                                       "config.update");
-        error.details.push_back({"candidateConfigRevision",
-                                 std::to_string(parsed.value().config_revision)});
+        Error error =
+            repository_error("SYS_CONFIG_VERSION_CONFLICT", Severity::warning,
+                             "候选文件修订必须等于 expectedConfigRevision", "config.update");
+        error.details.push_back(
+            {"candidateConfigRevision", std::to_string(parsed.value().config_revision)});
         return Result<ConfigSnapshot>::failure(std::move(error));
     }
     if (same_content(*stored_, parsed.value()))
@@ -418,9 +416,9 @@ Result<ConfigSnapshot> ConfigRepository::update_locked(std::string candidate_jso
         auto prepared = applier->prepare(*effective_, effective_candidate, changed);
         if (!prepared)
         {
-            Error error = repository_error("SYS_CONFIG_APPLY_FAILED", Severity::error,
-                                           "配置组件准备失败", "config.prepare",
-                                           prepared.error().retryable);
+            Error error =
+                repository_error("SYS_CONFIG_APPLY_FAILED", Severity::error, "配置组件准备失败",
+                                 "config.prepare", prepared.error().retryable);
             error.details.push_back({"component", std::string{applier->name()}});
             error.details.push_back({"causeBusinessCode", prepared.error().business_code});
             return Result<ConfigSnapshot>::failure(std::move(error));
@@ -438,8 +436,7 @@ Result<ConfigSnapshot> ConfigRepository::update_locked(std::string candidate_jso
             Error error = repository_error("SYS_CONFIG_APPLY_FAILED", Severity::error,
                                            "配置组件应用或回读失败", "config.apply",
                                            applied.error().retryable);
-            error.details.push_back(
-                {"component", std::string{appliers_[applied_count]->name()}});
+            error.details.push_back({"component", std::string{appliers_[applied_count]->name()}});
             error.details.push_back({"causeBusinessCode", applied.error().business_code});
             return Result<ConfigSnapshot>::failure(std::move(error));
         }
@@ -459,21 +456,21 @@ Result<ConfigSnapshot> ConfigRepository::update_locked(std::string candidate_jso
         auto committed = appliers_[committed_count]->commit(effective_candidate);
         if (!committed)
         {
-            auto restore = file_system_.replace_atomically(config_path_, serialize_config(*stored_));
+            auto restore =
+                file_system_.replace_atomically(config_path_, serialize_config(*stored_));
             for (std::size_t rollback = applied_count; rollback > 0U; --rollback)
                 static_cast<void>(appliers_[rollback - 1U]->rollback(*effective_));
             if (!restore)
             {
                 Error error = restore.error();
-                error.details.push_back({"commitComponent",
-                                         std::string{appliers_[committed_count]->name()}});
+                error.details.push_back(
+                    {"commitComponent", std::string{appliers_[committed_count]->name()}});
                 return Result<ConfigSnapshot>::failure(std::move(error));
             }
-            Error error = repository_error("SYS_CONFIG_APPLY_FAILED", Severity::error,
-                                           "配置组件提交失败", "config.commit",
-                                           committed.error().retryable);
-            error.details.push_back(
-                {"component", std::string{appliers_[committed_count]->name()}});
+            Error error =
+                repository_error("SYS_CONFIG_APPLY_FAILED", Severity::error, "配置组件提交失败",
+                                 "config.commit", committed.error().retryable);
+            error.details.push_back({"component", std::string{appliers_[committed_count]->name()}});
             error.details.push_back({"causeBusinessCode", committed.error().business_code});
             return Result<ConfigSnapshot>::failure(std::move(error));
         }

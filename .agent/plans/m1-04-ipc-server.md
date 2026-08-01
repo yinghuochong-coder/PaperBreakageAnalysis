@@ -2,7 +2,7 @@
 
 ## 元数据
 
-- 状态：in-progress
+- 状态：completed
 - 负责人：Codex
 - 创建日期：2026-08-01
 - 最后更新：2026-08-01
@@ -102,7 +102,7 @@ LocalService 跨账户、普通用户只读、提升管理员重载和远程命�
 - [x] v1 帧协议和三条命令符合文档；
 - [x] 所有连接、队列、缓冲和截止时间有界；
 - [x] 畸形、慢速、重复和未授权客户端不拖垮服务；
-- [ ] 工作线程确定停止，Debug/Release/CTest/格式/静态分析通过；
+- [x] 工作线程确定停止，Debug/Release/CTest/格式/静态分析通过；
 - [x] 文档、路线图和验证证据完整。
 
 ## 进度记录
@@ -112,6 +112,7 @@ LocalService 跨账户、普通用户只读、提升管理员重载和远程命�
 - 2026-08-01：确认工作区干净并再次完成 Debug 构建和 17/17 CTest；开始实现协议、Windows 对端身份检查和有界服务端。
 - 2026-08-01：完成 IPC v1、Windows 鉴权、三条 system 命令、ServiceRuntime 接入和测试；Debug/Release 均为 17/17 CTest，单元入口 61 项。
 - 2026-08-01：M1-04 新增 C++ 文件定向格式检查及关闭 `/WX` 的全量静态分析通过；全仓质量门禁被 M1-03 既有文件阻断，因此状态保持 `in-progress`。
+- 2026-08-01：统一修复 7 个既有文件的格式，按顶层配置分区拆分解析函数并消除 C6262；全仓格式、默认静态分析、Debug/Release 和两套 17/17 CTest 均通过，状态更新为 `completed`。
 
 ## 决策记录
 
@@ -126,7 +127,7 @@ LocalService 跨账户、普通用户只读、提升管理员重载和远程命�
 
 - Windows 本机命名管道调用 `GetNamedPipeClientComputerNameW` 可能返回 `ERROR_PIPE_LOCAL`；该结果明确表示本机客户端，应作为本机身份继续执行令牌模拟。
 - 服务新增 Qt Network 运行时后，安装树扫描需要同时将 Qt Core 目录加入运行时依赖解析目录。
-- 全仓 `format-check` 会在未修改的 `src/config/include/paperbreak/config/basic_config.hpp:207` 失败；静态分析在未修改的 `src/config/src/basic_config.cpp:327` 报 C6262（栈使用 42464 字节），并因 `/WX` 失败。
+- 全仓 `format-check` 曾在 M1-03 的 7 个既有文件失败，首个报告为 `basic_config.hpp:207`；默认静态分析曾在 `basic_config.cpp:327` 报 C6262（栈使用 42464 字节）。2026-08-01 已统一格式化并拆分配置解析，两个阻断均已清除。
 
 ## 验证证据
 
@@ -142,7 +143,11 @@ LocalService 跨账户、普通用户只读、提升管理员重载和远程命�
 | 2026-08-01 | 静态分析预设，默认 `/WX` | 未通过 | 同一既有 C6262 被提升为错误；`paperbreak_ipc` 在失败前已通过分析。 |
 | 2026-08-01 | `git diff --check` | 通过 | 仅 Git 的 LF/CRLF 工作区提示，无空白错误。 |
 | 2026-08-01 | 隔离 Windows 权限/远程场景 | 待验证 | 未执行跨账户、提升管理员和远程管道实机验证；未访问相机或 MVS SDK。 |
+| 2026-08-01 | 配置定向测试 `BasicConfig*:ConfigRepository*` | 11/11 通过 | 覆盖严格解析、依赖/路径校验、敏感字段和仓储事务/回滚。 |
+| 2026-08-01 | Debug/Release build + CTest | 通过 | 两套 CTest 均为 17/17；unit 入口各执行 72 项。 |
+| 2026-08-01 | 全仓 `format-check` | 通过 | 使用 VS 2026 clang-format 20.1.8；全部 C++ 文件无格式差异。 |
+| 2026-08-01 | 默认 `/WX` 静态分析 clean build | 通过 | 强制重新分析 `basic_config.cpp`，C6262 已消除且无其他分析告警。 |
 
 ## 完成摘要
 
-M1-04 的功能实现、自动化测试和公开文档已完成。由于两项全仓质量门禁被 M1-03 的既有未修改代码阻断，尚不满足完整完成标准，路线图和本计划保持 `in-progress`；未擅自修改范围外文件。
+M1-04 的功能实现、自动化测试和公开文档已完成。既有全仓格式违规与配置解析 C6262 已修复，Debug/Release、两套 17/17 非硬件 CTest、全仓格式和默认静态分析门禁均通过，路线图和本计划更新为 `completed`。跨账户、提升管理员和远程管道场景仍待隔离 Windows 环境验证；未访问实体相机或 MVS SDK。

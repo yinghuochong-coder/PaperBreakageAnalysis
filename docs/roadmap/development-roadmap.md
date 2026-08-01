@@ -364,9 +364,9 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M1-04 IPC 帧协议和服务端
 
-状态：`in-progress`
+状态：`completed`
 
-实现证据（2026-08-01）：IPC v1、Windows 本机身份鉴权、单实例保护、三条 system 命令及 ServiceRuntime 接入已实现；Debug/Release 构建和 CTest 均为 17/17，通过的 unit 入口包含 61 项测试。M1-04 新增文件定向格式检查和关闭 `/WX` 的全量静态分析通过。全仓 `format-check` 被未修改的 `basic_config.hpp:207` 阻断，默认静态分析被未修改的 `basic_config.cpp:327` C6262 阻断，因此暂不标记 `completed`。跨账户、提升管理员及远程命名管道场景待隔离 Windows 环境验证；未访问相机或 MVS SDK。
+实现证据（2026-08-01）：IPC v1、Windows 本机身份鉴权、单实例保护、三条 system 命令及 ServiceRuntime 接入已实现；配置解析已按顶层分区拆分，既有全仓格式违规和 C6262 栈使用告警均已清除。Debug/Release 构建、全仓 `format-check` 和默认 `/WX` 静态分析通过，两套非硬件 CTest 均为 17/17，通过的 unit 入口包含 72 项测试。跨账户、提升管理员及远程命名管道场景仍待隔离 Windows 环境验证；未访问相机或 MVS SDK。
 
 实施：
 
@@ -382,7 +382,7 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M1-05 Qt IPC 客户端与重连
 
-状态：`in-progress`
+状态：`completed`
 
 负责人：Codex
 
@@ -390,7 +390,7 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 执行记录：`.agent/plans/m1-05-qt-ipc-client-reconnect.md`
 
-实现证据（2026-08-01）：已实现客户端方向 IPC v1 编解码、有界请求、连接代次、超时/取消和带抖动上限的自动重连；Console 状态模型会在每代连接后查询服务状态，断线明确标记过期，退出只关闭客户端 IPC。新增协议、客户端和状态模型定向测试 16 项通过，重复 3 轮共 48 次通过；Debug/Release 构建及完整非硬件 CTest 均为 17/17（单元测试入口 72 项），本任务 C++ 文件格式检查和静态分析通过。全仓 `format-check` 仍被未修改的 `basic_config.hpp:207` 阻断，默认静态分析仍被未修改的 `basic_config.cpp:327` C6262 阻断，因此按约定保持 `in-progress`；详见 ExecPlan 验证证据。
+实现证据（2026-08-01）：已实现客户端方向 IPC v1 编解码、有界请求、连接代次、超时/取消和带抖动上限的自动重连；Console 状态模型会在每代连接后查询服务状态，断线明确标记过期，退出只关闭客户端 IPC。新增协议、客户端和状态模型定向测试 16 项通过，重复 3 轮共 48 次通过；既有全仓格式违规和 C6262 栈使用告警已清除，Debug/Release 构建、全仓 `format-check`、默认 `/WX` 静态分析及两套非硬件 CTest 均通过，CTest 为 17/17（单元测试入口 72 项）。
 
 实施：
 

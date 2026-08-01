@@ -246,12 +246,13 @@ class BufferedConfigAuditSink final : public paperbreak::config::IConfigAuditSin
     [[nodiscard]] paperbreak::Result<void> record(
         const paperbreak::config::ConfigAuditRecord& record) override
     {
-        std::string message = "config-change source=" +
-                              std::string{paperbreak::config::config_change_source_name(record.source)} +
-                              " actor=" + paperbreak::logging::redact_sensitive(record.actor) +
-                              " previousRevision=" + std::to_string(record.previous_revision) +
-                              " candidateRevision=" + std::to_string(record.candidate_revision) +
-                              " correlationId=" + record.correlation_id + " paths=";
+        std::string message =
+            "config-change source=" +
+            std::string{paperbreak::config::config_change_source_name(record.source)} +
+            " actor=" + paperbreak::logging::redact_sensitive(record.actor) +
+            " previousRevision=" + std::to_string(record.previous_revision) +
+            " candidateRevision=" + std::to_string(record.candidate_revision) +
+            " correlationId=" + record.correlation_id + " paths=";
         for (const auto& path : record.changed_paths)
         {
             message += path + ',';
@@ -259,8 +260,8 @@ class BufferedConfigAuditSink final : public paperbreak::config::IConfigAuditSin
         message += " changes=";
         for (const auto& change : record.redacted_changes)
         {
-            message += change.path + ":" + change.previous_value + "->" +
-                       change.candidate_value + ';';
+            message +=
+                change.path + ":" + change.previous_value + "->" + change.candidate_value + ';';
         }
         std::scoped_lock lock{mutex_};
         if (runtime_)
@@ -271,8 +272,8 @@ class BufferedConfigAuditSink final : public paperbreak::config::IConfigAuditSin
         if (pending_.size() >= 64U)
         {
             return paperbreak::Result<void>::failure(paperbreak::make_error(
-                "LOG_WRITE_FAILED", paperbreak::Severity::error,
-                "配置审计启动缓冲已满", "service", "service.configAudit.buffer"));
+                "LOG_WRITE_FAILED", paperbreak::Severity::error, "配置审计启动缓冲已满", "service",
+                "service.configAudit.buffer"));
         }
         pending_.push_back(std::move(message));
         return paperbreak::Result<void>::success();
@@ -322,9 +323,14 @@ class ConfigurationLifecycleComponent final : public paperbreak::service::ILifec
     {
     }
 
-    [[nodiscard]] std::string_view name() const noexcept override { return "configuration"; }
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "configuration";
+    }
     [[nodiscard]] paperbreak::service::ShutdownPhase shutdown_phase() const noexcept override
-    { return paperbreak::service::ShutdownPhase::configuration; }
+    {
+        return paperbreak::service::ShutdownPhase::configuration;
+    }
     [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
     {
         auto result = resources_->repository.snapshot();
@@ -332,15 +338,15 @@ class ConfigurationLifecycleComponent final : public paperbreak::service::ILifec
             return paperbreak::Result<void>::failure(result.error());
         return paperbreak::Result<void>::success();
     }
-    [[nodiscard]] paperbreak::Result<void> request_stop(
-        paperbreak::service::StopReason) override
+    [[nodiscard]] paperbreak::Result<void> request_stop(paperbreak::service::StopReason) override
     {
         resources_->repository.stop_accepting_changes();
         return paperbreak::Result<void>::success();
     }
-    [[nodiscard]] paperbreak::Result<void> join(
-        std::chrono::steady_clock::time_point) override
-    { return paperbreak::Result<void>::success(); }
+    [[nodiscard]] paperbreak::Result<void> join(std::chrono::steady_clock::time_point) override
+    {
+        return paperbreak::Result<void>::success();
+    }
 
   private:
     std::shared_ptr<ConfigurationResources> resources_;
@@ -485,8 +491,8 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     auto loaded = configuration->repository.load();
     if (!loaded)
     {
-        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
-            failure(loaded.error());
+        return paperbreak::Result<
+            std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(loaded.error());
     }
 
     paperbreak::logging::LoggingConfig log_config;
@@ -498,8 +504,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         1024U;
     log_config.max_files_per_day = loaded.value().effective->logging.maximum_files_per_day;
     log_config.queue_capacity = loaded.value().effective->logging.queue_capacity;
-    log_config.minimum_level =
-        logging_level_from_config(loaded.value().effective->logging.level);
+    log_config.minimum_level = logging_level_from_config(loaded.value().effective->logging.level);
     auto logging_result = paperbreak::logging::LoggingRuntime::create(log_config);
     if (!logging_result)
     {
@@ -507,8 +512,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
             failure(logging_result.error());
     }
 
-    std::shared_ptr<paperbreak::logging::LoggingRuntime> logging{
-        std::move(logging_result).value()};
+    std::shared_ptr<paperbreak::logging::LoggingRuntime> logging{std::move(logging_result).value()};
     auto audit_attach = configuration->audit.attach(logging);
     if (!audit_attach)
     {
