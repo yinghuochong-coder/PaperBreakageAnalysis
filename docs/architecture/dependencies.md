@@ -5,7 +5,7 @@
 | 项目 | 值 |
 | --- | --- |
 | 状态 | Accepted |
-| 基线日期 | 2026-07-31 |
+| 基线日期 | 2026-08-01 |
 | 目标平台 | Windows 10/11 x64 |
 | 语言标准 | C++20 |
 | 决策记录 | [ADR-015：Windows 工具链与依赖获取基线](decisions/adr-015-windows-toolchain-dependencies.md) |
@@ -18,7 +18,7 @@
 
 1. 开发与 CI 使用 Visual Studio 2026 stable、MSVC v145、C++20、x64 和动态 MSVC 运行库。
 2. CMake 最低版本为 4.2；当前已验证版本为 4.2.3。CMake 4.2 首次支持 `Visual Studio 18 2026` generator。
-3. Ninja 是 CI 和日常预设的首选生成器；Visual Studio 18 2026 generator 作为受支持的 IDE 入口。
+3. 开发、IDE 和 CI 统一使用 `Visual Studio 18 2026` x64 generator，并分别提供 Debug、Release 和静态分析预设。
 4. Qt 6.10.2、OpenCV 4.12.0、Hikrobot MVS SDK 4.8.0.3 是外部 SDK，不由 vcpkg 下载或重新打包。
 5. spdlog、nlohmann/json、GoogleTest、SQLite3 和可选 zstd 使用 vcpkg manifest mode；版本由提交的 baseline 和 manifest 约束。
 6. 项目文件只引用逻辑变量、CMake imported target 和仓库相对路径。开发机安装根目录只能由环境或不提交的 `CMakeUserPresets.json` 注入。
@@ -32,7 +32,6 @@
 | MSVC Build Tools | v145，当前实证 `cl 19.51.36243` | v145 | `/std:c++20`；链接器不得早于输入库所用工具集 |
 | Windows SDK | VS 2026 stable 通道所带受支持版本 | 支持 Windows 10/11 x64 | 精确版本写入构建元数据，不在源码中绑定开发机安装路径 |
 | CMake | 当前实证 4.2.3 | 4.2 | `cmake_minimum_required(VERSION 4.2)`；支持 VS 2026 generator |
-| Ninja | 当前实证 1.13.2 | VS 2026 随附受支持版本 | 单配置 Debug/Release 预设的首选生成器 |
 | C++ | C++20 | C++20 | 禁止依赖未批准的 C++23/26 行为 |
 | vcpkg tool | VS 随附版本当前实证 2026-03-04 | 能解析锁定 baseline 的受支持版本 | 仅 manifest mode；不依赖全局 classic 安装状态 |
 
@@ -128,15 +127,15 @@ cmake-4.2
 mock-only
 ```
 
-执行器必须安装 VS 2026 stable 的 C++ 工作负载、v145、Windows SDK、CMake 4.2+、Ninja、Qt 6.10.2 和 OpenCV 4.12.0，并能访问锁定 vcpkg registry/cache。默认 lane：
+执行器必须安装 VS 2026 stable 的 C++ 工作负载、v145、Windows SDK、CMake 4.2+、Qt 6.10.2 和 OpenCV 4.12.0，并能访问锁定 vcpkg registry/cache。默认 lane：
 
 - 配置、构建并运行 Debug/Release 的非硬件 CTest；
 - 不要求 MVS SDK、相机、PLC 或上位机在线；
 - 明确禁用 Hikrobot 生产适配器，使用 Mock Camera；
-- 每次作业输出 VS、MSVC、CMake、Ninja、Qt、OpenCV、vcpkg baseline 和直接依赖版本；
+- 每次作业输出 VS、MSVC、CMake、Qt、OpenCV、vcpkg baseline 和直接依赖版本；
 - runner 不满足精确能力时失败，不降级到其他编译器或未锁定依赖。
 
-当前开发机已验证具备 VS 2026 18.6、MSVC v145、CMake 4.2.3、Ninja 1.13.2、Qt 6.10.2 和 OpenCV 4.12.0，可作为 runner 镜像/配置参考。仓库尚无远端和 CI 注册信息，因此这里只确认执行器能力与本机可供给性，不声称 runner 已在某一 CI 平台上线；注册、凭据和 workflow 由 M0-04 完成。
+当前开发机已验证具备 VS 2026 18.6、MSVC v145、CMake 4.2.3、Qt 6.10.2 和 OpenCV 4.12.0，可作为 runner 镜像/配置参考。仓库尚无远端和 CI 注册信息，因此这里只确认执行器能力与本机可供给性，不声称 runner 已在某一 CI 平台上线；注册、凭据和 workflow 由 M0-04 完成。
 
 ### 8.2 硬件 lane
 

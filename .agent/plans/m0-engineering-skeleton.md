@@ -17,7 +17,7 @@
 
 ### 范围内
 
-- CMake 工程、Ninja/VS 2026 预设、vcpkg manifest、安装布局和版本元数据。
+- CMake 工程、VS 2026 Debug/Release 预设、vcpkg manifest、安装布局和版本元数据。
 - M0 指定的库/程序/测试目标及架构要求的独立日志目标。
 - 异步有界日志、模块分类、等级过滤、大小与日期轮转、敏感信息脱敏及确定性关闭。
 - 稳定业务错误对象、保留原始码/上下文的 `Result<T>`。
@@ -35,7 +35,7 @@
 
 - 已检查 `AGENTS.md`、`.agent/PLANS.md`、需求、系统架构、领域模型、错误码、路线图、依赖基线和 ADR-015。
 - 仓库目前无源码、CMake、测试、CI 或 `.gitignore`；工作区开始时干净。
-- 本机发现 CMake 4.2.3、VS 2026 18.6/v145、Qt 6.10.2、OpenCV 4.12.0；Ninja 和 vcpkg 位于 VS 安装内但未在当前 PATH/VCPKG_ROOT 中。
+- 本机发现 CMake 4.2.3、VS 2026 18.6/v145、Qt 6.10.2、OpenCV 4.12.0；vcpkg 位于 VS 安装内但未在当前 PATH/VCPKG_ROOT 中。
 
 ## 前置条件与假设
 
@@ -91,15 +91,15 @@
 ### 构建与测试命令
 
 ```powershell
-cmake --preset windows-msvc-debug
-cmake --build --preset windows-msvc-debug
-ctest --preset windows-msvc-debug
-cmake --preset windows-msvc-release
-cmake --build --preset windows-msvc-release
-ctest --preset windows-msvc-release
+cmake --preset windows-vs2026-debug
+cmake --build --preset windows-vs2026-debug
+ctest --preset windows-vs2026-debug
+cmake --preset windows-vs2026-release
+cmake --build --preset windows-vs2026-release
+ctest --preset windows-vs2026-release
 ```
 
-另运行 VS 2026 generator 配置、安装目标、格式检查和静态分析预设；若工具缺失则记录为限制，不伪报成功。
+另运行安装目标、格式检查和 VS 2026 静态分析预设；若工具缺失则记录为限制，不伪报成功。
 
 ### 人工或硬件验证
 
@@ -115,8 +115,7 @@ ctest --preset windows-msvc-release
 
 ## 验收标准
 
-- [x] Debug/Release 的 Ninja 预设均可配置、构建。
-- [x] VS 2026 x64 generator 可配置。
+- [x] Debug/Release 的 VS 2026 x64 预设均可配置、构建。
 - [x] 所有 M0 目标存在且依赖边界清晰。
 - [x] 服务 console smoke 和 Qt client smoke 通过。
 - [x] 默认 CTest 运行 unit/integration/simulation 且排除 hardware-integration。
@@ -137,7 +136,7 @@ ctest --preset windows-msvc-release
 
 ## 意外发现
 
-- 当前 PowerShell 未设置 `VCPKG_ROOT`、`PAPERBREAK_QT_ROOT`、`OpenCV_DIR`，Ninja 不在 PATH；所需工具/SDK 实际已安装在本机固定位置，可临时注入以验证提交的逻辑入口。
+- 当前 PowerShell 未设置 `VCPKG_ROOT`、`PAPERBREAK_QT_ROOT`、`OpenCV_DIR`；所需工具/SDK 实际已安装在本机固定位置，可临时注入以验证提交的逻辑入口。
 - 本机 OpenCV 包的有效配置目录位于 `build/x64/vc16/lib`，而不是 SDK 根目录；预设继续只接受外部注入的 `OpenCV_DIR`，未固化本机路径。
 - MSVC 静态分析会进入 vcpkg/GoogleTest 外部头文件；静态分析预设关闭测试构建并使用 `/analyze:external-`，确保生产目标自身仍以分析告警为错误。
 - Qt 部署脚本依赖 `find_package(Qt6)` 在调用方作用域生成的变量，因此依赖发现封装由函数调整为宏；安装树随后完成独立启动验证。
@@ -147,13 +146,14 @@ ctest --preset windows-msvc-release
 | 日期 | 命令/场景 | 结果 | 证据或限制 |
 | --- | --- | --- | --- |
 | 2026-08-01 | 基线工具发现 | 已完成 | CMake 4.2.3；VS 18.6；MSVC 14.51；Qt/OpenCV 已安装；环境变量待注入 |
-| 2026-08-01 | `cmake --preset windows-msvc-debug`、构建、`ctest --preset windows-msvc-debug` | 通过 | Debug 构建成功；默认非硬件 CTest 10/10 通过 |
-| 2026-08-01 | `cmake --preset windows-msvc-release`、构建、`ctest --preset windows-msvc-release` | 通过 | Release 构建成功；默认非硬件 CTest 10/10 通过 |
+| 2026-08-01 | 旧 Ninja Debug 预设（现已删除） | 通过 | 修订前 Debug 构建成功；默认非硬件 CTest 10/10 通过 |
+| 2026-08-01 | 旧 Ninja Release 预设（现已删除） | 通过 | 修订前 Release 构建成功；默认非硬件 CTest 10/10 通过 |
 | 2026-08-01 | VS 2026 x64 配置、构建、CTest | 通过 | MSVC v145 构建成功；默认非硬件 CTest 10/10 通过 |
 | 2026-08-01 | `.ci/windows-build.ps1` | 通过 | Debug/Release、JUnit 报告、格式检查和生产目标静态分析均成功 |
 | 2026-08-01 | Release 安装树验证 | 通过 | Qt、MSVC、fmt/spdlog 运行时已部署；路径扫描及两个安装后程序的 `--version` 启动检查通过 |
-| 2026-08-01 | `ctest --test-dir out/build/windows-msvc-debug -L hardware-integration -V` | 跳过 | 占位 GoogleTest 明确报告 1 skipped；未连接 MVS SDK 或实体相机 |
+| 2026-08-01 | 硬件标签占位测试 | 跳过 | 占位 GoogleTest 明确报告 1 skipped；未连接 MVS SDK 或实体相机 |
+| 2026-08-01 | 构建预设修订及 `.ci/windows-build.ps1` | 通过 | 只保留 VS 2026 Debug/Release/静态分析预设；Debug/Release 各 10/10，格式检查及静态分析通过 |
 
 ## 完成摘要
 
-已完成 M0 工程骨架：建立 Windows x64/MSVC/C++20 构建与安装基线、全部目标边界、异步日志与错误/Result/版本基础、服务控制台与 Qt 托盘入口，以及默认不依赖硬件的测试和 CI 入口。自动化验收已通过。交互式 Windows 托盘可见性未人工观察，MVS SDK 和实体相机未测试；这些限制不属于 M0 的自动化硬件无关门禁。
+已完成 M0 工程骨架：建立仅使用 Visual Studio 2026 x64 generator 的 Debug/Release/静态分析构建与安装基线、全部目标边界、异步日志与错误/Result/版本基础、服务控制台与 Qt 托盘入口，以及默认不依赖硬件的测试和 CI 入口。自动化验收已通过。交互式 Windows 托盘可见性未人工观察，MVS SDK 和实体相机未测试；这些限制不属于 M0 的自动化硬件无关门禁。

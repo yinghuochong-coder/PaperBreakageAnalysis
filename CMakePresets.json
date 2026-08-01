@@ -7,53 +7,8 @@
   },
   "configurePresets": [
     {
-      "name": "windows-msvc-base",
+      "name": "windows-vs2026-base",
       "hidden": true,
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/out/build/${presetName}",
-      "installDir": "${sourceDir}/out/install/${presetName}",
-      "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "CMAKE_PREFIX_PATH": "$env{PAPERBREAK_QT_ROOT}",
-        "OpenCV_DIR": "$env{OpenCV_DIR}",
-        "VCPKG_TARGET_TRIPLET": "x64-windows",
-        "VCPKG_HOST_TRIPLET": "x64-windows",
-        "VCPKG_MANIFEST_FEATURES": "tests",
-        "BUILD_TESTING": "ON",
-        "PAPERBREAK_ENABLE_HIKROBOT": "OFF",
-        "PAPERBREAK_WARNINGS_AS_ERRORS": "ON"
-      }
-    },
-    {
-      "name": "windows-msvc-debug",
-      "displayName": "Windows MSVC Debug (Ninja)",
-      "inherits": "windows-msvc-base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
-      }
-    },
-    {
-      "name": "windows-msvc-release",
-      "displayName": "Windows MSVC Release (Ninja)",
-      "inherits": "windows-msvc-base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
-      }
-    },
-    {
-      "name": "windows-msvc-static-analysis",
-      "displayName": "Windows MSVC Static Analysis",
-      "inherits": "windows-msvc-debug",
-      "binaryDir": "${sourceDir}/out/build/${presetName}",
-      "cacheVariables": {
-        "BUILD_TESTING": "OFF",
-        "VCPKG_MANIFEST_FEATURES": "",
-        "PAPERBREAK_ENABLE_STATIC_ANALYSIS": "ON"
-      }
-    },
-    {
-      "name": "windows-vs2026-debug",
-      "displayName": "Visual Studio 2026 x64 Debug",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
       "toolset": "v145",
@@ -70,65 +25,57 @@
         "PAPERBREAK_ENABLE_HIKROBOT": "OFF",
         "PAPERBREAK_WARNINGS_AS_ERRORS": "ON"
       }
+    },
+    {
+      "name": "windows-vs2026-debug",
+      "displayName": "Visual Studio 2026 x64 Debug",
+      "inherits": "windows-vs2026-base",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug"
+      }
+    },
+    {
+      "name": "windows-vs2026-release",
+      "displayName": "Visual Studio 2026 x64 Release",
+      "inherits": "windows-vs2026-base",
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Release"
+      }
+    },
+    {
+      "name": "windows-vs2026-static-analysis",
+      "displayName": "Visual Studio 2026 x64 Static Analysis",
+      "inherits": "windows-vs2026-debug",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "BUILD_TESTING": "OFF",
+        "VCPKG_MANIFEST_FEATURES": "",
+        "PAPERBREAK_ENABLE_STATIC_ANALYSIS": "ON"
+      }
     }
   ],
   "buildPresets": [
     {
-      "name": "windows-msvc-debug",
-      "configurePreset": "windows-msvc-debug",
-      "jobs": 0
-    },
-    {
-      "name": "windows-msvc-release",
-      "configurePreset": "windows-msvc-release",
-      "jobs": 0
-    },
-    {
-      "name": "windows-msvc-static-analysis",
-      "configurePreset": "windows-msvc-static-analysis",
-      "jobs": 0
-    },
-    {
       "name": "windows-vs2026-debug",
       "configurePreset": "windows-vs2026-debug",
+      "configuration": "Debug",
+      "jobs": 0
+    },
+    {
+      "name": "windows-vs2026-release",
+      "configurePreset": "windows-vs2026-release",
+      "configuration": "Release",
+      "jobs": 0
+    },
+    {
+      "name": "windows-vs2026-static-analysis",
+      "configurePreset": "windows-vs2026-static-analysis",
       "configuration": "Debug",
       "jobs": 0
     }
   ],
   "testPresets": [
     {
-      "name": "windows-msvc-debug",
-      "configurePreset": "windows-msvc-debug",
-      "filter": {
-        "exclude": {
-          "label": "hardware-integration"
-        }
-      },
-      "output": {
-        "outputOnFailure": true,
-        "verbosity": "verbose"
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "windows-msvc-release",
-      "configurePreset": "windows-msvc-release",
-      "filter": {
-        "exclude": {
-          "label": "hardware-integration"
-        }
-      },
-      "output": {
-        "outputOnFailure": true,
-        "verbosity": "verbose"
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
       "name": "windows-vs2026-debug",
       "configurePreset": "windows-vs2026-debug",
       "configuration": "Debug",
@@ -138,7 +85,25 @@
         }
       },
       "output": {
-        "outputOnFailure": true
+        "outputOnFailure": true,
+        "verbosity": "verbose"
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "windows-vs2026-release",
+      "configurePreset": "windows-vs2026-release",
+      "configuration": "Release",
+      "filter": {
+        "exclude": {
+          "label": "hardware-integration"
+        }
+      },
+      "output": {
+        "outputOnFailure": true,
+        "verbosity": "verbose"
       },
       "execution": {
         "noTestsAction": "error"

@@ -2,6 +2,7 @@
 
 - 状态：Accepted
 - 日期：2026-07-31
+- 修订日期：2026-08-01（统一为 Visual Studio 2026 generator）
 - 决策者：项目架构基线
 - 关联：G0-03、路线图 DEC-001～DEC-003
 
@@ -19,7 +20,7 @@ Qt 6.10.2 官方 Windows kit 使用 MSVC 2022 构建，Qt 官方支持表也只�
 
 - 使用 Visual Studio 2026 stable、MSVC v145、C++20、x64 和动态 MSVC 运行库；
 - CMake 最低版本提高到 4.2，当前验证基线为 4.2.3；
-- Ninja 作为 CI/日常预设首选生成器，同时支持 Visual Studio 18 2026 generator；
+- 开发、IDE 和 CI 统一使用 Visual Studio 18 2026 x64 generator；分别提供 Debug、Release 和静态分析预设；
 - Qt 使用 6.10.2 `msvc2022_64` 官方动态库，依据 Microsoft ABI 保证由 v145 链接；禁止跨工具集混用 `/GL`/`/LTCG` 产物。
 
 ### 依赖获取
@@ -81,7 +82,7 @@ Qt 6.10.2 官方 Windows kit 使用 MSVC 2022 构建，Qt 官方支持表也只�
 
 M0 将本决策落地时必须证明：
 
-- CMake 4.2+ 能用 Ninja 与 Visual Studio 18 2026 generator 配置 x64；
+- CMake 4.2+ 能用 Visual Studio 18 2026 generator 配置 x64 Debug/Release；
 - v145 能链接并启动 Qt 6.10.2 与 OpenCV 4.12.0 最小程序；
 - Mock-only Debug/Release 构建不发现 MVS；
 - 启用 MVS 的配置只把 SDK include/lib 暴露给 Hikrobot 适配器；

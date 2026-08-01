@@ -2,7 +2,7 @@
 
 ## 1. 支持范围
 
-M0 工程只支持 Windows 10/11 x64、Visual Studio 2026 MSVC v145、C++20 和 CMake 4.2 以上版本。日常及 CI 使用 Ninja 单配置预设；另提供 Visual Studio 18 2026 x64 生成器预设用于 IDE 验证。
+M0 工程只支持 Windows 10/11 x64、Visual Studio 2026 MSVC v145、C++20 和 CMake 4.2 以上版本。日常开发、IDE 和 CI 统一使用 `Visual Studio 18 2026` x64 generator，不提供 Ninja 预设。
 
 默认构建是 Mock-only，不查找 Hikrobot MVS SDK，也不依赖实体相机。`PAPERBREAK_ENABLE_HIKROBOT=ON` 在 M0 会明确失败，因为生产适配器属于 M3。
 
@@ -13,7 +13,7 @@ M0 工程只支持 Windows 10/11 x64、Visual Studio 2026 MSVC v145、C++20 和 
 - Qt 6.10.2 `msvc2022_64`；
 - OpenCV 4.12.0 Windows SDK；
 - Visual Studio 2026 随附或批准版本的 vcpkg；
-- Visual Studio 2026 C++ 工作负载中的 CMake、Ninja 和 clang-format。
+- Visual Studio 2026 C++ 工作负载中的 CMake 和 clang-format。
 
 开源依赖由仓库根目录的 `vcpkg.json` 和固定 `builtin-baseline` 解析。`tests` feature 默认由提交的构建预设启用，zstd feature 默认关闭。禁止用全局 vcpkg classic 安装状态替代 manifest。
 
@@ -39,17 +39,17 @@ $env:OpenCV_DIR = '<OpenCVConfig.cmake-containing-directory>'
 Debug：
 
 ```powershell
-cmake --preset windows-msvc-debug
-cmake --build --preset windows-msvc-debug
-ctest --preset windows-msvc-debug
+cmake --preset windows-vs2026-debug
+cmake --build --preset windows-vs2026-debug
+ctest --preset windows-vs2026-debug
 ```
 
 Release：
 
 ```powershell
-cmake --preset windows-msvc-release
-cmake --build --preset windows-msvc-release
-ctest --preset windows-msvc-release
+cmake --preset windows-vs2026-release
+cmake --build --preset windows-vs2026-release
+ctest --preset windows-vs2026-release
 ```
 
 测试预设默认排除 `hardware-integration` 标签。当前标签为：
@@ -68,7 +68,7 @@ ctest --preset windows-msvc-release
 服务控制台模式：
 
 ```powershell
-out\build\windows-msvc-debug\src\service\PaperBreakEdgeService.exe --console
+out\build\windows-vs2026-debug\src\service\Debug\PaperBreakEdgeService.exe --console
 ```
 
 按 Enter 请求受控退出。自动化 smoke 使用有上限的 `--run-for-ms` 参数。SCM 注册、控制码和 Windows 服务状态上报属于 M1，M0 不实现。
@@ -80,10 +80,10 @@ Qt 客户端直接启动后创建最小系统托盘，右键菜单提供“退�
 ## 5. 格式、静态分析与报告
 
 ```powershell
-cmake --build --preset windows-msvc-debug --target format-check
-cmake --preset windows-msvc-static-analysis
-cmake --build --preset windows-msvc-static-analysis
-ctest --preset windows-msvc-debug --output-junit out/test-results/debug-ctest.xml
+cmake --build --preset windows-vs2026-debug --target format-check
+cmake --preset windows-vs2026-static-analysis
+cmake --build --preset windows-vs2026-static-analysis
+ctest --preset windows-vs2026-debug --output-junit out/test-results/debug-ctest.xml
 ```
 
 格式检查使用 clang-format 的 `--dry-run --Werror`。静态分析预设对生产源码目标启用 MSVC `/analyze` 并跳过 GoogleTest/OpenCV smoke 目标，第三方头由 `/analyze:external-` 排除；普通 Debug/Release 不承担其额外构建成本。所有项目目标默认 `/utf-8 /W4 /WX /permissive-`。
@@ -91,8 +91,9 @@ ctest --preset windows-msvc-debug --output-junit out/test-results/debug-ctest.xm
 ## 6. 安装布局
 
 ```powershell
-cmake --install out\build\windows-msvc-release `
-  --prefix out\install\windows-msvc-release
+cmake --install out\build\windows-vs2026-release `
+  --config Release `
+  --prefix out\install\windows-vs2026-release
 ```
 
 当前安装布局包含 `bin`、`lib` 和 `include`，并通过 CMake/Qt 部署脚本复制服务所需的 vcpkg 动态库、Qt 动态库和 Qt 平台插件。它不制作安装器，也不替代 M9 的签名、完整许可证/SBOM 和企业部署物料。CTest 会从安装树启动两个程序的 `--version` smoke，并扫描产物，拒绝泄漏注入的 Qt、OpenCV 或 vcpkg 根路径。

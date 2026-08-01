@@ -106,17 +106,17 @@
 工程骨架建立后，常规任务至少运行：
 
 ```powershell
-cmake --preset windows-msvc-debug
-cmake --build --preset windows-msvc-debug
-ctest --preset windows-msvc-debug
+cmake --preset windows-vs2026-debug
+cmake --build --preset windows-vs2026-debug
+ctest --preset windows-vs2026-debug
 ```
 
 发布或部署任务还需运行：
 
 ```powershell
-cmake --preset windows-msvc-release
-cmake --build --preset windows-msvc-release
-ctest --preset windows-msvc-release
+cmake --preset windows-vs2026-release
+cmake --build --preset windows-vs2026-release
+ctest --preset windows-vs2026-release
 ```
 
 具体任务可以增加筛选测试、静态分析、故障注入和性能测试，但不得用较小测试集替代该任务约定的验收集。

@@ -28,7 +28,7 @@ cmake --version
 & (Join-Path $env:VCPKG_ROOT 'vcpkg.exe') version
 & (Join-Path $env:PAPERBREAK_QT_ROOT 'bin\qtpaths6.exe') --qt-version
 
-foreach ($preset in @('windows-msvc-debug', 'windows-msvc-release')) {
+foreach ($preset in @('windows-vs2026-debug', 'windows-vs2026-release')) {
     cmake --preset $preset
     if ($LASTEXITCODE -ne 0) { throw "Configure failed for $preset." }
 
@@ -41,10 +41,10 @@ foreach ($preset in @('windows-msvc-debug', 'windows-msvc-release')) {
     if ($LASTEXITCODE -ne 0) { throw "CTest failed for $preset." }
 }
 
-cmake --build --preset windows-msvc-debug --target format-check
+cmake --build --preset windows-vs2026-debug --target format-check
 if ($LASTEXITCODE -ne 0) { throw 'Formatting check failed.' }
 
-cmake --preset windows-msvc-static-analysis
+cmake --preset windows-vs2026-static-analysis
 if ($LASTEXITCODE -ne 0) { throw 'Static-analysis configuration failed.' }
-cmake --build --preset windows-msvc-static-analysis
+cmake --build --preset windows-vs2026-static-analysis
 if ($LASTEXITCODE -ne 0) { throw 'MSVC static analysis failed.' }
