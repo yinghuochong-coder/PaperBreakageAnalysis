@@ -42,6 +42,7 @@ paperbreak_generate_version(PAPERBREAK_VERSION_SOURCE PAPERBREAK_GENERATED_INCLU
 
 add_subdirectory(src/common)
 add_subdirectory(src/logging)
+add_subdirectory(src/config)
 add_subdirectory(src/camera)
 add_subdirectory(src/algorithm)
 add_subdirectory(src/event)

@@ -2,7 +2,7 @@
 
 ## 1. 支持范围
 
-M0 工程只支持 Windows 10/11 x64、Visual Studio 2026 MSVC v145、C++20 和 CMake 4.2 以上版本。日常开发、IDE 和 CI 统一使用 `Visual Studio 18 2026` x64 generator，不提供 Ninja 预设。
+当前工程只支持 Windows 10/11 x64、Visual Studio 2026 MSVC v145、C++20 和 CMake 4.2 以上版本。日常开发、IDE 和 CI 统一使用 `Visual Studio 18 2026` x64 generator，不提供 Ninja 预设。
 
 默认构建是 Mock-only，不查找 Hikrobot MVS SDK，也不依赖实体相机。`PAPERBREAK_ENABLE_HIKROBOT=ON` 在 M0 会明确失败，因为生产适配器属于 M3。
 
@@ -65,13 +65,19 @@ ctest --preset windows-vs2026-release
 
 ## 4. 程序 smoke
 
-服务控制台模式：
+M1-01 的服务命令行有三个互斥模式：
 
 ```powershell
-out\build\windows-vs2026-debug\src\service\Debug\PaperBreakEdgeService.exe --console
+PaperBreakEdgeService.exe --version
+PaperBreakEdgeService.exe --validate-config --config '<config.json>'
+PaperBreakEdgeService.exe --console --config '<config.json>'
 ```
 
-按 Enter 请求受控退出。自动化 smoke 使用有上限的 `--run-for-ms` 参数。SCM 注册、控制码和 Windows 服务状态上报属于 M1，M0 不实现。
+`--validate-config` 当前只执行有界基础校验：配置文件必须不超过 1 MiB，是合法 UTF-8 JSON 对象，并包含值为 `1` 的无符号整数 `schemaVersion`。强类型字段、范围、跨字段依赖、原子保存和回滚属于 M1-03。配置路径必须显式传入，尚未固化生产环境默认路径。
+
+控制台模式按 Ctrl+C 受控退出，并把控制台关闭、注销和系统关机信号转换为同一服务停止请求。自动化 smoke 可附加 `--run-for-ms 25`，取值范围为 0～60000 毫秒；该参数只用于控制台测试。退出码为：成功 `0`、命令行或配置错误 `2`、启动或关闭失败 `1`。
+
+SCM 注册、安装/卸载、状态上报和真实 Windows 服务关机集成属于 M1-02，本阶段不实现。
 
 Qt 客户端直接启动后创建最小系统托盘，右键菜单提供“退出界面”。自动测试使用 `QT_QPA_PLATFORM=offscreen` 验证 Qt 事件循环和确定性退出；托盘实际可见性必须在交互式 Windows 桌面人工观察。
 

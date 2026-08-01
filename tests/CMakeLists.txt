@@ -1,12 +1,18 @@
 add_executable(PaperBreakTests
     unit/common_tests.cpp
+    unit/basic_config_tests.cpp
     unit/logging_tests.cpp
+    unit/service_runtime_tests.cpp
+    unit/windows_control_tests.cpp
     simulation/simulation_baseline_tests.cpp
     hardware/hardware_baseline_tests.cpp)
 target_link_libraries(PaperBreakTests
     PRIVATE
         paperbreak_common
+        paperbreak_config
         paperbreak_logging
+        paperbreak_service_core
+        paperbreak_windows_service
         paperbreak_compiler_options
         GTest::gtest_main)
 set_target_properties(PaperBreakTests PROPERTIES FOLDER "PaperBreak/Tests")
@@ -21,7 +27,7 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Common*:Result*:Version*:Logging*)
+    COMMAND PaperBreakTests --gtest_filter=Common*:Result*:Version*:Logging*:BasicConfig*:ServiceRuntime*:WindowsControl*)
 set_tests_properties(unit PROPERTIES LABELS "unit")
 
 add_test(NAME simulation
@@ -33,10 +39,46 @@ add_test(NAME hardware_baseline
 set_tests_properties(hardware_baseline PROPERTIES LABELS "hardware-integration")
 
 add_test(NAME service_console_smoke
-    COMMAND PaperBreakEdgeService --console --run-for-ms 25)
+    COMMAND PaperBreakEdgeService
+        --console
+        --config "${CMAKE_CURRENT_SOURCE_DIR}/data/basic-config-valid.json"
+        --run-for-ms 25)
 set_tests_properties(service_console_smoke PROPERTIES
     LABELS "integration"
     TIMEOUT 10)
+
+add_test(NAME service_validate_config
+    COMMAND PaperBreakEdgeService
+        --validate-config
+        --config "${CMAKE_CURRENT_SOURCE_DIR}/data/basic-config-valid.json")
+set_tests_properties(service_validate_config PROPERTIES LABELS "integration")
+
+add_test(NAME service_rejects_invalid_config
+    COMMAND "${CMAKE_COMMAND}"
+        "-DPROGRAM=$<TARGET_FILE:PaperBreakEdgeService>"
+        "-DPROGRAM_ARGUMENTS=--validate-config|--config|${CMAKE_CURRENT_SOURCE_DIR}/data/basic-config-invalid.json"
+        -DEXPECTED_EXIT=2
+        -DEXPECTED_TEXT=SYS_CONFIG_INVALID
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunAndCheckExit.cmake")
+set_tests_properties(service_rejects_invalid_config PROPERTIES LABELS "integration")
+
+add_test(NAME service_requires_config_path
+    COMMAND "${CMAKE_COMMAND}"
+        "-DPROGRAM=$<TARGET_FILE:PaperBreakEdgeService>"
+        "-DPROGRAM_ARGUMENTS=--validate-config"
+        -DEXPECTED_EXIT=2
+        -DEXPECTED_TEXT=SYS_CONFIG_INVALID
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunAndCheckExit.cmake")
+set_tests_properties(service_requires_config_path PROPERTIES LABELS "integration")
+
+add_test(NAME service_rejects_conflicting_modes
+    COMMAND "${CMAKE_COMMAND}"
+        "-DPROGRAM=$<TARGET_FILE:PaperBreakEdgeService>"
+        "-DPROGRAM_ARGUMENTS=--console|--validate-config|--config|${CMAKE_CURRENT_SOURCE_DIR}/data/basic-config-valid.json"
+        -DEXPECTED_EXIT=2
+        -DEXPECTED_TEXT=SYS_CONFIG_INVALID
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunAndCheckExit.cmake")
+set_tests_properties(service_rejects_conflicting_modes PROPERTIES LABELS "integration")
 
 add_test(NAME qt_console_smoke
     COMMAND "${CMAKE_COMMAND}" -E env
