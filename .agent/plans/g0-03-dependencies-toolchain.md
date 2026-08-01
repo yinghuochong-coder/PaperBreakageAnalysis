@@ -95,9 +95,9 @@
 ### 构建与测试命令
 
 ```powershell
-cmake --preset windows-msvc-debug
-cmake --build --preset windows-msvc-debug
-ctest --preset windows-msvc-debug
+cmake --preset windows-vs2026-debug
+cmake --build --preset windows-vs2026-debug
+ctest --preset windows-vs2026-debug
 ```
 
 仓库尚无 CMake 工程或预设，本任务不会为绕过缺失而提前实施 M0-01。上述命令预计无法执行，验证证据必须如实记录。
@@ -157,9 +157,9 @@ ctest --preset windows-msvc-debug
 | 2026-07-31 | PowerShell G0-03 文档契约检查 | 通过 | 工具链、外部 SDK、五项依赖、许可证、路径、CI lane、ADR 和 DEC 14/14 检查通过 |
 | 2026-07-31 | 代码围栏、本地链接、提交配置路径和 `git diff --check` | 通过 | 围栏/链接正确；仓库尚无构建配置候选；无空白错误，仅有 Git 的 LF→CRLF 提示 |
 | 2026-07-31 | `cmake --help` | 通过 | 本机 CMake 4.2.3 包含 `Visual Studio 18 2026` generator |
-| 2026-07-31 | `cmake --preset windows-msvc-debug` | 未通过 | 已执行，退出码 1；M0-01 尚未创建 `CMakePresets.json` |
-| 2026-07-31 | `cmake --build --preset windows-msvc-debug` | 未通过 | 已执行，退出码 1；缺少 `CMakePresets.json`，没有可构建工程 |
-| 2026-07-31 | `ctest --preset windows-msvc-debug` | 未通过 | 已执行，退出码 1；缺少 `CMakePresets.json`，没有已配置测试 |
+| 2026-07-31 | `cmake --preset windows-vs2026-debug` | 未通过 | 已执行，退出码 1；M0-01 尚未创建 `CMakePresets.json` |
+| 2026-07-31 | `cmake --build --preset windows-vs2026-debug` | 未通过 | 已执行，退出码 1；缺少 `CMakePresets.json`，没有可构建工程 |
+| 2026-07-31 | `ctest --preset windows-vs2026-debug` | 未通过 | 已执行，退出码 1；缺少 `CMakePresets.json`，没有已配置测试 |
 | 2026-07-31 | CI runner 注册与 workflow | 未执行 | 仓库无 remote/CI 配置；属于 M0-04，不声称 runner 已上线 |
 | 2026-07-31 | 实体相机/MVS SDK 运行或硬件测试 | 未执行 | 本任务只读取 SDK 版本，不实现或运行适配器 |
 

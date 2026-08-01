@@ -95,9 +95,9 @@
 ### 构建与测试命令
 
 ```powershell
-cmake --preset windows-msvc-debug
-cmake --build --preset windows-msvc-debug
-ctest --preset windows-msvc-debug
+cmake --preset windows-vs2026-debug
+cmake --build --preset windows-vs2026-debug
+ctest --preset windows-vs2026-debug
 ```
 
 当前没有 CMake 工程或预设，且本任务仅修改 Markdown。上述命令预计无法执行；验证证据必须如实记录“未执行”及原因。

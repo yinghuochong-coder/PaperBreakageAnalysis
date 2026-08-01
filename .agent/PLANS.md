@@ -106,9 +106,9 @@ ExecPlan 用于复杂、跨模块、并发、持久化、外部 SDK 或需要故
 ### 构建与测试命令
 
 ```powershell
-cmake --preset windows-msvc-debug
-cmake --build --preset windows-msvc-debug
-ctest --preset windows-msvc-debug
+cmake --preset windows-vs2026-debug
+cmake --build --preset windows-vs2026-debug
+ctest --preset windows-vs2026-debug
 ```
 
 ### 人工或硬件验证

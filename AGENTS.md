@@ -46,9 +46,9 @@
 典型命令：
 
 ```powershell
-cmake --preset windows-msvc-debug
-cmake --build --preset windows-msvc-debug
-ctest --preset windows-msvc-debug
+cmake --preset windows-vs2026-debug
+cmake --build --preset windows-vs2026-debug
+ctest --preset windows-vs2026-debug
 ```
 
 如果这些预设尚不存在，仅在当前分配的任务确实需要时才创建它们。
