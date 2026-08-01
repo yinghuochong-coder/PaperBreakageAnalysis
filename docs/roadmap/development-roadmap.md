@@ -566,6 +566,18 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M3-01 SDK 构建隔离和 RAII 封装
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-01
+
+完成日期：2026-08-01
+
+执行记录：`.agent/plans/m3-01-sdk-build-isolation-raii.md`
+
+完成证据（2026-08-01）：已将 MVS Development/Runtime 查找、4.8.0.3 文件版本校验、x64 include/lib/dll、安装部署和 SDK API 限制在独立 `paperbreak_camera_hikrobot` 目标；实现设备信息深拷贝、设备句柄与取流会话 RAII、稳定业务错误/native code 翻译及捕获标准/未知异常的 `noexcept` C 回调边界。默认 OFF 的 Debug/Release Mock-only 构建及非硬件 CTest 18/18 通过；使用本机 MVS SDK/Runtime 4.8.0.3 的 ON 配置 Debug/Release 非硬件 CTest 19/19 通过，其中适配层专用入口含 11 项伪 API/版本 smoke 测试；格式、SDK 边界扫描、安装树路径泄漏扫描、缺 SDK 预期配置失败和 MSVC 静态分析通过。未枚举、连接或取流实体相机，未执行驱动、目标机、带宽和拔线验证，且未开始 M3-02。
+
 实施：
 
 - 以 CMake 选项启用 Hikrobot 适配器；

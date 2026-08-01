@@ -45,7 +45,7 @@ Qt 6.10 官方 Windows 支持表只列 MSVC 2022。项目使用 Qt 官方 `msvc2
 | --- | --- | --- | --- | --- |
 | Qt | 6.10.2 `msvc2022_64` | 必需：Core、Gui、Widgets、Network；Concurrent 仅在具体 target 有批准用途时启用 | Qt 官方安装器；由 `PAPERBREAK_QT_ROOT` 或用户预设加入 `CMAKE_PREFIX_PATH` | 商业许可，或满足适用模块 LGPLv3/GPLv3 条款；未确认许可路径前不得发布 |
 | OpenCV | 4.12.0 | 首期只批准 core、imgproc、imgcodecs；新增模块需记录理由 | OpenCV 官方 Windows SDK/批准的内部镜像；通过 `OpenCV_DIR` 注入 | Apache-2.0；发布时保留 NOTICE/许可证及实际打包模块的第三方通知 |
-| Hikrobot MVS SDK | Development/Runtime 4.8.0.3 | 枚举、参数、取流、错误翻译，仅限 Hikrobot 适配器 | 供应商安装器/批准的内部镜像；通过 `PAPERBREAK_MVS_ROOT` 注入 | 供应商专有条款；SDK 与 Runtime 分发权必须在 M9 发布前书面确认 |
+| Hikrobot MVS SDK | Development/Runtime 4.8.0.3 | 枚举、参数、取流、错误翻译，仅限 Hikrobot 适配器 | 供应商安装器/批准的内部镜像；通过 `PAPERBREAK_MVS_ROOT` 和 `PAPERBREAK_MVS_RUNTIME_DIR` 分别注入 Development 与 x64 Runtime | 供应商专有条款；随安装器提供的第三方许可通知必须保留，SDK 与 Runtime 分发权必须在 M9 发布前书面确认 |
 
 补充规则：
 
@@ -55,6 +55,18 @@ Qt 6.10 官方 Windows 支持表只列 MSVC 2022。项目使用 Qt 官方 `msvc2
 - MVS 头文件、库目录、DLL 和 API 只允许进入 `paperbreak_camera_hikrobot` 的私有编译/链接/部署属性。
 - 默认 Mock 构建不能要求 MVS 已安装。启用生产适配器时，缺少或版本不匹配必须在配置阶段失败。
 - 外部 SDK 不提交到 `external/`、Git LFS、Release 配置或源代码树。
+
+### 4.1 Hikrobot MVS 构建与运行时部署
+
+`PAPERBREAK_ENABLE_HIKROBOT` 默认关闭；关闭时不读取任何 MVS 路径，也不创建或链接生产适配器。启用时：
+
+- `PAPERBREAK_MVS_ROOT` 可以指向 MVS 安装根或 `Development` 根；未显式设置时允许读取供应商安装器创建的 `MVCAM_COMMON_RUNENV`；
+- `PAPERBREAK_MVS_RUNTIME_DIR` 必须指向包含 `MvCameraControl.dll` 的 x64 Runtime 目录，不能依赖 PATH 中碰巧先出现的 Win32/未知版本 DLL；
+- 配置阶段要求 `MvCameraControl.h`、`MvErrorDefine.h`、`Libraries/win64/MvCameraControl.lib` 和 x64 `MvCameraControl.dll` 全部存在，并读取 DLL 文件版本拒绝非 4.8.0.3；适配层测试还调用 `MV_CC_GetSDKVersion()` 验证实际加载版本；
+- MVS include、import library、Runtime DLL 和 C API 只属于 `src/camera/hikrobot` 中的私有 imported target；安装时 DLL 复制到应用 `bin`，运行不依赖开发机绝对路径；
+- MVS Runtime 通常还依赖供应商驱动和同目录运行时组件。M3-01 只验证核心 DLL 的构建/加载，完整 Runtime 文件清单、驱动安装、签名、离线包和目标机启动由 M3-05/M9 固化。
+
+供应商安装目录中的许可通知（当前安装器文件名 `CLIENT_MVS_Win_license_notice.txt`）列出 Runtime 内嵌的 MIT、LGPL、BSD、zlib、libpng、IJG 等第三方组件。发布包必须随实际 Runtime 文件保留对应通知/许可证并在 SBOM 中逐项登记；供应商专有 SDK/Runtime 的复制和再分发授权必须由采购/法务书面确认。本文不是法律意见，授权未确认时发布门禁保持阻塞。
 
 ## 5. vcpkg 直接依赖
 
@@ -101,6 +113,7 @@ M0 创建 `vcpkg.json` 时必须提交 `builtin-baseline`，并验证下表的�
 | Qt kit 根目录 | `PAPERBREAK_QT_ROOT` / `CMAKE_PREFIX_PATH` | 否 |
 | OpenCV CMake 目录 | `OpenCV_DIR` | 否 |
 | MVS Development 根目录 | `PAPERBREAK_MVS_ROOT` | 否 |
+| MVS x64 Runtime 目录 | `PAPERBREAK_MVS_RUNTIME_DIR` | 否 |
 | vcpkg 根目录 | `VCPKG_ROOT` 或 CI toolchain 设置 | 否 |
 | vcpkg baseline/triplet | `vcpkg.json` / 项目预设 | 是 |
 

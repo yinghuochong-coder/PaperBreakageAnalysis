@@ -4,7 +4,7 @@
 
 当前工程只支持 Windows 10/11 x64、Visual Studio 2026 MSVC v145、C++20 和 CMake 4.2 以上版本。日常开发、IDE 和 CI 统一使用 `Visual Studio 18 2026` x64 generator，不提供 Ninja 预设。
 
-默认构建是 Mock-only，不查找 Hikrobot MVS SDK，也不依赖实体相机。`PAPERBREAK_ENABLE_HIKROBOT=ON` 在 M0 会明确失败，因为生产适配器属于 M3。
+默认构建是 Mock-only，不查找 Hikrobot MVS SDK，也不依赖实体相机。`PAPERBREAK_ENABLE_HIKROBOT=ON` 会创建独立 `paperbreak_camera_hikrobot` 目标；当前 M3-01 只提供 SDK 构建隔离、RAII 生命周期基元和回调异常边界，不包含设备发现映射、参数读写或生产取流。
 
 ## 2. 依赖准备
 
@@ -26,6 +26,16 @@ $env:OpenCV_DIR = '<OpenCVConfig.cmake-containing-directory>'
 ```
 
 也可以在被 `.gitignore` 排除的 `CMakeUserPresets.json` 中设置这些值。不要把本机盘符、用户名或 SDK 绝对路径加入 `CMakePresets.json`、源码、默认配置或发布产物。
+
+需要构建 Hikrobot 适配器时，另行注入批准的 MVS 4.8.0.3 Development 和 x64 Runtime：
+
+```powershell
+$env:PAPERBREAK_MVS_ROOT = '<MVS-Development-or-install-root>'
+$env:PAPERBREAK_MVS_RUNTIME_DIR = '<MVS-Runtime-Win64-x64-directory>'
+cmake --preset windows-vs2026-debug -DPAPERBREAK_ENABLE_HIKROBOT=ON
+```
+
+配置会逐项检查头文件、x64 import library、Runtime DLL 及 DLL 文件版本。Runtime DLL 随启用的适配器安装到 `bin`；不得把 Win32 Runtime 目录或开发机绝对路径写入提交预设。`hikrobot_adapter_unit` 使用伪 C API 验证 RAII/回调并调用真实 `MV_CC_GetSDKVersion()` 做 4.8.0.3 link smoke，不访问相机。实体相机发现、连接、取流与拔线测试不属于该测试。
 
 从普通 PowerShell 构建前，先进入 VS 2026 x64 开发环境：
 

@@ -188,7 +188,16 @@ add_test(NAME missing_dependency_diagnostic
         -P "${PROJECT_SOURCE_DIR}/cmake/ExpectConfigureFailure.cmake")
 set_tests_properties(missing_dependency_diagnostic PROPERTIES LABELS "integration")
 
+add_test(NAME hikrobot_sdk_boundary
+    COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+        -P "${PROJECT_SOURCE_DIR}/src/camera/hikrobot/cmake/CheckSdkBoundary.cmake")
+set_tests_properties(hikrobot_sdk_boundary PROPERTIES LABELS "integration")
+
 set(path_scan_inputs "$ENV{PAPERBREAK_QT_ROOT}|${OpenCV_DIR}|$ENV{VCPKG_ROOT}")
+if(PAPERBREAK_ENABLE_HIKROBOT)
+    string(APPEND path_scan_inputs "|${PAPERBREAK_MVS_ROOT}|${PAPERBREAK_MVS_RUNTIME_DIR}")
+endif()
 add_test(NAME install_tree_no_sdk_path_leaks
     COMMAND "${CMAKE_COMMAND}"
         "-DBUILD_DIR=${PROJECT_BINARY_DIR}"

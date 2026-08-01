@@ -14,3 +14,7 @@ install(TARGETS paperbreak_camera ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
 add_subdirectory(mock)
+
+if(PAPERBREAK_ENABLE_HIKROBOT)
+    add_subdirectory(hikrobot)
+endif()
