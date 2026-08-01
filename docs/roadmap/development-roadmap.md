@@ -440,6 +440,18 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M2-01 相机接口和领域模型
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-01
+
+完成日期：2026-08-01
+
+执行记录：`.agent/plans/m2-01-camera-interface-domain-model.md`
+
+完成证据（2026-08-01）：已实现厂商无关 `ICameraProvider`/`ICameraDevice`、能力与参数快照、序列号绑定和参数校验、固定容量 `FrameBuffer`、完整帧元数据与零拷贝只读 `FrameView`；新增 9 项相机单元测试。Debug/Release、格式检查和 MSVC 静态分析构建通过，非硬件 CTest 17/17 通过，unit 入口共 96 项测试。未访问 MVS SDK 或实体相机，硬件验证留待 M3。
+
 实施：
 
 - 定义 `ICameraProvider`、`ICameraDevice`、能力描述、参数快照和业务错误；

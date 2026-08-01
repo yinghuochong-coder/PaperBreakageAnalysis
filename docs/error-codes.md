@@ -129,7 +129,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `CAMERA_NOT_FOUND` | Error | 是 | 绑定的实体相机未枚举到；该路进入断开/恢复，其他路继续 |
 | `CAMERA_OPEN_FAILED` | Error | 是 | 设备打开失败且不是更明确的访问拒绝；保留 MVS 原始码 |
 | `CAMERA_ACCESS_DENIED` | Error | 是 | 相机被占用或权限不足；不得紧循环重试 |
-| `CAMERA_CONFIG_FAILED` | Error | 视参数 | 参数写入或回读不一致；恢复旧快照或进入 Faulted |
+| `CAMERA_CONFIG_FAILED` | Error | 视参数 | 参数不受设备能力支持、范围/步进/组合非法、发现重复序列号，或参数写入/回读不一致；拒绝写入、恢复旧快照或进入 Faulted，并以 `reason` 区分具体原因 |
 | `CAMERA_STREAM_START_FAILED` | Error | 是 | 开始取流失败；关闭本次句柄后按状态机恢复 |
 | `CAMERA_DISCONNECTED` | Warning | 是 | 活跃设备掉线；当前路进入 Recovering |
 | `CAMERA_FRAME_TIMEOUT` | Warning | 是 | 截止时间内未接收帧；计数并按连续阈值升级报警 |
