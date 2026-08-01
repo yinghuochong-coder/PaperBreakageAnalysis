@@ -119,7 +119,17 @@ payload 必须且只能包含非负整数 `expectedConfigRevision`。服务以�
 requestId 作为 correlationId、`ConfigChangeSource::local_ipc`（审计序列化为 `local-ipc`）作为来源调用配置仓储。修订冲突返回
 `SYS_CONFIG_VERSION_CONFLICT`；校验、应用或持久化失败保持最后有效配置。
 
-## 5. 兼容和错误行为
+## 5. Qt 客户端连接语义
+
+- 客户端状态为 `stopped`、`connecting`、`connected` 或 `retry-wait`；每次连接尝试分配新的单调递增连接代次；
+- 首次立即连接，失败后从 250 ms 开始指数退避，最大 10 秒，并应用 ±20% 抖动；收到有效服务消息或稳定连接 5 秒后重置退避；
+- 客户端最多保留 128 个在途请求和 32 MiB 待发送数据；达到上限返回 `IPC_BUSY`，断线期间不缓存新请求；
+- 默认连接截止时间为 2 秒，请求截止时间为 5 秒。显式取消返回 `IPC_REQUEST_CANCELLED`，超时返回 `IPC_REQUEST_TIMEOUT`；
+- 请求句柄同时包含 requestId 和连接代次。断线以 `IPC_CONNECTION_LOST` 完成该代请求，旧 socket 回调、未知 requestId 和迟到响应不能修改新连接状态；
+- 请求不跨连接自动重放。Qt 状态模型在每次新连接后重新发起幂等的 `system.getStatus`，同步完成前及断线后将服务状态标为过期；
+- 客户端停止只 abort 自身 QLocalSocket、定时器和在途请求，不发送服务停止命令。
+
+## 6. 兼容和错误行为
 
 - 当前只支持 `protocolVersion=1`；其他版本返回 `IPC_PROTOCOL_VERSION_UNSUPPORTED`，写完响应后关闭；
 - 未知命令或字段返回 `IPC_REQUEST_INVALID`；重复 ID 返回 `IPC_REQUEST_CONFLICT`；

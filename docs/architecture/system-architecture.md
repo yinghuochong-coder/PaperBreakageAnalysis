@@ -198,10 +198,11 @@ Qt 桌面客户端只承担：
 | `paperbreak_plant_io` | `IPlantIoAdapter` 和生产信号模型 | common | 具体未批准协议 |
 | `paperbreak_monitoring` | 指标、报警、健康快照和诊断接口 | common、logging 接口 | UI、MVS |
 | `paperbreak_ipc` | 版本化 IPC 编解码、Server/Client 传输 | common、platform_windows、Qt Core/Network、nlohmann/json | Widgets、MVS、业务实现 |
+| `paperbreak_console_model` | 客户端连接/服务状态快照、代次和过期语义 | common、ipc、JSON | Widgets、相机/存储/算法实现、MVS |
 | `paperbreak_service_core` | ServiceRuntime、用例编排、命令处理和生命周期 | 上述业务接口，不依赖具体适配器 | Widgets、MVS C API、具体网络/数据库句柄 |
 | `paperbreak_windows_service` | SCM 宿主与 Win32 服务适配 | service_core、platform_windows、common | 业务模块内部实现 |
 | `PaperBreakEdgeService` | Bootstrap、选择宿主、装配依赖、进程入口 | service_core、windows_service、批准的具体适配器 | Widgets |
-| `PaperBreakEdgeConsole` | Qt UI、状态模型和 IPC Client | common、ipc、Qt Widgets/Gui | camera/storage/algorithm 实现、MVS |
+| `PaperBreakEdgeConsole` | Qt UI、托盘和状态模型展示 | common、console_model、logging、Qt Widgets/Gui | camera/storage/algorithm 实现、MVS |
 
 M0 路线图中的聚合名称可以作为以上目标的 `ALIAS` 或聚合目标，但不能把实现合并成一个目标从而破坏依赖检查。
 

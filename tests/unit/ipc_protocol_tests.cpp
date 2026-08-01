@@ -160,3 +160,96 @@ TEST(IpcProtocol, SerializesStableNestedErrorAndPushWithoutRequestId)
     EXPECT_EQ(push_json.at("messageType"), "push");
     EXPECT_FALSE(push_json.contains("requestId"));
 }
+
+TEST(IpcProtocol, EncodesRequestAndDecodesServerMessages)
+{
+    paperbreak::ipc::RequestMessage request{.request_id = "019870f2-6c80-7a31-9b52-6e3b9ca1d88f",
+                                            .command = "system.getStatus",
+                                            .timestamp = "2026-08-01T12:00:00.123Z",
+                                            .payload_json = R"({"probe":true})",
+                                            .binary = {std::byte{0x42}}};
+    auto encoded_request = paperbreak::ipc::encode_request(request);
+    ASSERT_TRUE(encoded_request);
+    auto decoded_request = paperbreak::ipc::decode_request(encoded_request.value());
+    ASSERT_TRUE(decoded_request);
+    EXPECT_EQ(decoded_request.value().request_id, request.request_id);
+    const Json expected_payload{{"probe", true}};
+    EXPECT_EQ(Json::parse(decoded_request.value().payload_json), expected_payload);
+    EXPECT_EQ(decoded_request.value().binary, request.binary);
+
+    paperbreak::ipc::ResponseMessage response{.request_id = request.request_id,
+                                              .success = true,
+                                              .timestamp = request.timestamp,
+                                              .payload_json = R"({"state":"running"})",
+                                              .error = std::nullopt,
+                                              .binary = {std::byte{0x24}}};
+    auto response_frame = paperbreak::ipc::encode_response(response);
+    ASSERT_TRUE(response_frame);
+    auto server_response = paperbreak::ipc::decode_server_message(response_frame.value());
+    ASSERT_TRUE(server_response);
+    ASSERT_TRUE(std::holds_alternative<paperbreak::ipc::ResponseMessage>(server_response.value()));
+    const auto& decoded_response =
+        std::get<paperbreak::ipc::ResponseMessage>(server_response.value());
+    EXPECT_TRUE(decoded_response.success);
+    EXPECT_EQ(decoded_response.binary, response.binary);
+
+    auto push_frame =
+        paperbreak::ipc::encode_push({.event_name = "status.changed",
+                                      .timestamp = request.timestamp,
+                                      .payload_json = R"({"serviceState":"stop-requested"})",
+                                      .binary = {},
+                                      .coalescing_key = "status.changed"});
+    ASSERT_TRUE(push_frame);
+    auto server_push = paperbreak::ipc::decode_server_message(push_frame.value());
+    ASSERT_TRUE(server_push);
+    ASSERT_TRUE(std::holds_alternative<paperbreak::ipc::PushMessage>(server_push.value()));
+    EXPECT_EQ(std::get<paperbreak::ipc::PushMessage>(server_push.value()).coalescing_key,
+              "status.changed");
+}
+
+TEST(IpcProtocol, DecodesPublicErrorAndRejectsMalformedServerMessages)
+{
+    auto error = paperbreak::make_error("IPC_BUSY", paperbreak::Severity::warning, "busy", "ipc",
+                                        "ipc.test", true);
+    error.details.push_back({"queue", "client"});
+    paperbreak::ipc::ResponseMessage failure{.request_id = "019870f2-6c80-7a31-9b52-6e3b9ca1d88f",
+                                             .success = false,
+                                             .timestamp = "2026-08-01T12:00:00.123Z",
+                                             .payload_json = "{}",
+                                             .error = error,
+                                             .binary = {}};
+    auto frame = paperbreak::ipc::encode_response(failure);
+    ASSERT_TRUE(frame);
+    auto decoded = paperbreak::ipc::decode_response(frame.value());
+    ASSERT_TRUE(decoded);
+    ASSERT_TRUE(decoded.value().error.has_value());
+    EXPECT_EQ(decoded.value().error->business_code, "IPC_BUSY");
+    ASSERT_EQ(decoded.value().error->details.size(), 1U);
+
+    Json unknown = Json::parse(frame.value().header_json);
+    unknown["surprise"] = true;
+    auto unknown_result =
+        paperbreak::ipc::decode_response({.header_json = unknown.dump(), .binary = {}});
+    ASSERT_FALSE(unknown_result);
+    EXPECT_EQ(unknown_result.error().business_code, "IPC_PROTOCOL_ERROR");
+
+    Json bad_timestamp = Json::parse(frame.value().header_json);
+    bad_timestamp["timestamp"] = "invalid";
+    EXPECT_FALSE(
+        paperbreak::ipc::decode_response({.header_json = bad_timestamp.dump(), .binary = {}}));
+
+    Json bad_error = Json::parse(frame.value().header_json);
+    bad_error["error"]["severity"] = "Unknown";
+    EXPECT_FALSE(paperbreak::ipc::decode_response({.header_json = bad_error.dump(), .binary = {}}));
+
+    auto version_push = paperbreak::ipc::encode_push({.event_name = "status.changed",
+                                                      .timestamp = "2026-08-01T12:00:00.123Z",
+                                                      .payload_json = "{}"});
+    ASSERT_TRUE(version_push);
+    Json push_header = Json::parse(version_push.value().header_json);
+    push_header["protocolVersion"] = 2;
+    auto version_result =
+        paperbreak::ipc::decode_push({.header_json = push_header.dump(), .binary = {}});
+    ASSERT_FALSE(version_result);
+    EXPECT_EQ(version_result.error().business_code, "IPC_PROTOCOL_VERSION_UNSUPPORTED");
+}

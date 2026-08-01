@@ -132,6 +132,129 @@ std::string severity_name(const Severity severity)
     return "Error";
 }
 
+std::optional<Severity> parse_severity(const std::string_view value)
+{
+    if (value == "Info")
+    {
+        return Severity::info;
+    }
+    if (value == "Warning")
+    {
+        return Severity::warning;
+    }
+    if (value == "Error")
+    {
+        return Severity::error;
+    }
+    if (value == "Critical")
+    {
+        return Severity::critical;
+    }
+    return std::nullopt;
+}
+
+bool has_only_fields(const Json& document, const std::unordered_set<std::string>& allowed)
+{
+    return std::ranges::all_of(
+        document.items(), [&allowed](const auto& item) { return allowed.contains(item.key()); });
+}
+
+Result<void> validate_protocol_version(const Json& header,
+                                       const std::optional<std::string>& request_id)
+{
+    if (!header.contains("protocolVersion") || !(header["protocolVersion"].is_number_unsigned() ||
+                                                 header["protocolVersion"].is_number_integer()))
+    {
+        return Result<void>::failure(ipc_error("IPC_PROTOCOL_ERROR",
+                                               "IPC 消息缺少整数 protocolVersion",
+                                               "ipc.decode.version", request_id));
+    }
+    const bool unsigned_version = header["protocolVersion"].is_number_unsigned();
+    const std::uint64_t positive_version =
+        unsigned_version ? header["protocolVersion"].get<std::uint64_t>() : 0U;
+    const std::int64_t signed_version =
+        unsigned_version ? 0 : header["protocolVersion"].get<std::int64_t>();
+    const bool supported = unsigned_version
+                               ? positive_version == protocol_version
+                               : signed_version == static_cast<std::int64_t>(protocol_version);
+    if (supported)
+    {
+        return Result<void>::success();
+    }
+
+    Error error = ipc_error("IPC_PROTOCOL_VERSION_UNSUPPORTED", "IPC 协议版本不受支持",
+                            "ipc.decode.version", request_id);
+    error.details.push_back({"supportedMinimum", std::to_string(protocol_version)});
+    error.details.push_back({"supportedMaximum", std::to_string(protocol_version)});
+    error.details.push_back({"receivedVersion", unsigned_version ? std::to_string(positive_version)
+                                                                 : std::to_string(signed_version)});
+    return Result<void>::failure(std::move(error));
+}
+
+Result<void> parse_public_error(const Json& document, const std::optional<std::string>& request_id,
+                                Error& output)
+{
+    static const std::unordered_set<std::string> allowed_fields{
+        "businessCode", "severity",  "message",   "module",   "operation",
+        "details",      "retryable", "timestamp", "sourceId", "correlationId"};
+    if (!document.is_object() || !has_only_fields(document, allowed_fields) ||
+        !document.contains("businessCode") || !document["businessCode"].is_string() ||
+        !document.contains("severity") || !document["severity"].is_string() ||
+        !document.contains("message") || !document["message"].is_string() ||
+        !document.contains("module") || !document["module"].is_string() ||
+        !document.contains("operation") || !document["operation"].is_string() ||
+        !document.contains("details") || !document["details"].is_object() ||
+        !document.contains("retryable") || !document["retryable"].is_boolean() ||
+        !document.contains("timestamp") || !document["timestamp"].is_string() ||
+        !is_rfc3339_timestamp(document["timestamp"].get_ref<const std::string&>()) ||
+        (document.contains("sourceId") && !document["sourceId"].is_string()) ||
+        (document.contains("correlationId") && !document["correlationId"].is_string()))
+    {
+        return Result<void>::failure(
+            ipc_error("IPC_PROTOCOL_ERROR", "IPC 错误对象无效", "ipc.decode.error", request_id));
+    }
+    const auto severity = parse_severity(document["severity"].get_ref<const std::string&>());
+    if (!severity.has_value() || document["details"].size() > 32U)
+    {
+        return Result<void>::failure(
+            ipc_error("IPC_PROTOCOL_ERROR", "IPC 错误对象无效", "ipc.decode.error", request_id));
+    }
+
+    Error error{.business_code = document["businessCode"].get<std::string>(),
+                .severity = severity.value(),
+                .message = document["message"].get<std::string>(),
+                .module = document["module"].get<std::string>(),
+                .operation = document["operation"].get<std::string>(),
+                .retryable = document["retryable"].get<bool>(),
+                .timestamp = document["timestamp"].get<std::string>()};
+    if (error.business_code.empty() || error.message.empty() || error.module.empty() ||
+        error.operation.empty())
+    {
+        return Result<void>::failure(
+            ipc_error("IPC_PROTOCOL_ERROR", "IPC 错误对象无效", "ipc.decode.error", request_id));
+    }
+    for (const auto& [key, value] : document["details"].items())
+    {
+        if (key.empty() || key.size() > 64U || !value.is_string() ||
+            value.get_ref<const std::string&>().size() > 512U)
+        {
+            return Result<void>::failure(ipc_error("IPC_PROTOCOL_ERROR", "IPC 错误详情无效",
+                                                   "ipc.decode.error", request_id));
+        }
+        error.details.push_back({key, value.get<std::string>()});
+    }
+    if (document.contains("sourceId"))
+    {
+        error.source_id = document["sourceId"].get<std::string>();
+    }
+    if (document.contains("correlationId"))
+    {
+        error.correlation_id = document["correlationId"].get<std::string>();
+    }
+    output = std::move(error);
+    return Result<void>::success();
+}
+
 Result<Json> parse_payload_object(const std::string_view payload, const std::string_view operation)
 {
     Json document = Json::parse(payload, nullptr, false);
@@ -273,6 +396,25 @@ Result<std::vector<std::byte>> encode_frame(const Frame& frame)
     return Result<std::vector<std::byte>>::success(std::move(output));
 }
 
+Result<Frame> encode_request(const RequestMessage& request)
+{
+    if (!is_canonical_uuid(request.request_id) || request.command.empty() ||
+        request.command.size() > 128U || !is_rfc3339_timestamp(request.timestamp))
+    {
+        return Result<Frame>::failure(ipc_error(
+            "IPC_REQUEST_INVALID", "IPC 请求 DTO 不满足协议不变量", "ipc.encode.request"));
+    }
+    auto payload = parse_payload_object(request.payload_json, "ipc.encode.request");
+    if (!payload)
+    {
+        return Result<Frame>::failure(payload.error());
+    }
+    Json header{{"protocolVersion", protocol_version}, {"messageType", "request"},
+                {"requestId", request.request_id},     {"command", request.command},
+                {"timestamp", request.timestamp},      {"payload", std::move(payload).value()}};
+    return encode_json_message(std::move(header), request.binary);
+}
+
 Result<RequestMessage> decode_request(const Frame& frame)
 {
     Json header = Json::parse(frame.header_json, nullptr, false);
@@ -381,7 +523,8 @@ Result<Frame> encode_response(const ResponseMessage& response)
 {
     if (!is_canonical_uuid(response.request_id) ||
         (response.success && response.error.has_value()) ||
-        (!response.success && !response.error.has_value()))
+        (!response.success && !response.error.has_value()) ||
+        !is_rfc3339_timestamp(response.timestamp))
     {
         return Result<Frame>::failure(ipc_error(
             "SYS_INTERNAL_ERROR", "IPC 响应 DTO 不满足协议不变量", "ipc.encode.response"));
@@ -398,9 +541,77 @@ Result<Frame> encode_response(const ResponseMessage& response)
     return encode_json_message(std::move(header), response.binary);
 }
 
+Result<ResponseMessage> decode_response(const Frame& frame)
+{
+    Json header = Json::parse(frame.header_json, nullptr, false);
+    if (header.is_discarded() || !header.is_object())
+    {
+        return Result<ResponseMessage>::failure(
+            ipc_error("IPC_PROTOCOL_ERROR", "IPC header 不是有效 JSON 对象", "ipc.decode.header"));
+    }
+    std::optional<std::string> request_id;
+    if (header.contains("requestId") && header["requestId"].is_string())
+    {
+        const std::string candidate = header["requestId"].get<std::string>();
+        if (is_canonical_uuid(candidate))
+        {
+            request_id = candidate;
+        }
+    }
+    static const std::unordered_set<std::string> allowed_fields{
+        "protocolVersion", "messageType", "requestId", "timestamp",
+        "success",         "payload",     "error",     "extensions"};
+    auto version = validate_protocol_version(header, request_id);
+    if (!version)
+    {
+        return Result<ResponseMessage>::failure(version.error());
+    }
+    if (!has_only_fields(header, allowed_fields) || !header.contains("messageType") ||
+        !header["messageType"].is_string() ||
+        header["messageType"].get_ref<const std::string&>() != "response" ||
+        !request_id.has_value() || !header.contains("timestamp") ||
+        !header["timestamp"].is_string() ||
+        !is_rfc3339_timestamp(header["timestamp"].get_ref<const std::string&>()) ||
+        !header.contains("success") || !header["success"].is_boolean() ||
+        !header.contains("payload") || !header["payload"].is_object() ||
+        !header.contains("error") ||
+        (header.contains("extensions") && !header["extensions"].is_object()))
+    {
+        return Result<ResponseMessage>::failure(
+            ipc_error("IPC_PROTOCOL_ERROR", "IPC 响应结构无效", "ipc.decode.response", request_id));
+    }
+    const bool success = header["success"].get<bool>();
+    std::optional<Error> error;
+    if (success)
+    {
+        if (!header["error"].is_null())
+        {
+            return Result<ResponseMessage>::failure(ipc_error(
+                "IPC_PROTOCOL_ERROR", "成功响应不能包含错误", "ipc.decode.response", request_id));
+        }
+    }
+    else
+    {
+        Error parsed_error;
+        auto parsed = parse_public_error(header["error"], request_id, parsed_error);
+        if (!parsed)
+        {
+            return Result<ResponseMessage>::failure(parsed.error());
+        }
+        error = std::move(parsed_error);
+    }
+    return Result<ResponseMessage>::success({.request_id = request_id.value(),
+                                             .success = success,
+                                             .timestamp = header["timestamp"].get<std::string>(),
+                                             .payload_json = header["payload"].dump(),
+                                             .error = std::move(error),
+                                             .binary = frame.binary});
+}
+
 Result<Frame> encode_push(const PushMessage& push)
 {
-    if (push.event_name.empty() || push.event_name.size() > 128U)
+    if (push.event_name.empty() || push.event_name.size() > 128U ||
+        !is_rfc3339_timestamp(push.timestamp))
     {
         return Result<Frame>::failure(
             ipc_error("IPC_REQUEST_INVALID", "IPC 推送 eventName 无效", "ipc.encode.push"));
@@ -416,6 +627,75 @@ Result<Frame> encode_push(const PushMessage& push)
                 {"timestamp", push.timestamp},
                 {"payload", std::move(payload).value()}};
     return encode_json_message(std::move(header), push.binary);
+}
+
+Result<PushMessage> decode_push(const Frame& frame)
+{
+    Json header = Json::parse(frame.header_json, nullptr, false);
+    if (header.is_discarded() || !header.is_object())
+    {
+        return Result<PushMessage>::failure(
+            ipc_error("IPC_PROTOCOL_ERROR", "IPC header 不是有效 JSON 对象", "ipc.decode.header"));
+    }
+    static const std::unordered_set<std::string> allowed_fields{
+        "protocolVersion", "messageType", "eventName", "timestamp", "payload", "extensions"};
+    auto version = validate_protocol_version(header, std::nullopt);
+    if (!version)
+    {
+        return Result<PushMessage>::failure(version.error());
+    }
+    if (!has_only_fields(header, allowed_fields) || !header.contains("messageType") ||
+        !header["messageType"].is_string() ||
+        header["messageType"].get_ref<const std::string&>() != "push" ||
+        !header.contains("eventName") || !header["eventName"].is_string() ||
+        header["eventName"].get_ref<const std::string&>().empty() ||
+        header["eventName"].get_ref<const std::string&>().size() > 128U ||
+        !header.contains("timestamp") || !header["timestamp"].is_string() ||
+        !is_rfc3339_timestamp(header["timestamp"].get_ref<const std::string&>()) ||
+        !header.contains("payload") || !header["payload"].is_object() ||
+        (header.contains("extensions") && !header["extensions"].is_object()))
+    {
+        return Result<PushMessage>::failure(
+            ipc_error("IPC_PROTOCOL_ERROR", "IPC 推送结构无效", "ipc.decode.push"));
+    }
+    const std::string event_name = header["eventName"].get<std::string>();
+    return Result<PushMessage>::success({.event_name = event_name,
+                                         .timestamp = header["timestamp"].get<std::string>(),
+                                         .payload_json = header["payload"].dump(),
+                                         .binary = frame.binary,
+                                         .coalescing_key = event_name});
+}
+
+Result<ServerMessage> decode_server_message(const Frame& frame)
+{
+    Json header = Json::parse(frame.header_json, nullptr, false);
+    if (header.is_discarded() || !header.is_object() || !header.contains("messageType") ||
+        !header["messageType"].is_string())
+    {
+        return Result<ServerMessage>::failure(
+            ipc_error("IPC_PROTOCOL_ERROR", "IPC 服务消息类型无效", "ipc.decode.server"));
+    }
+    const std::string& type = header["messageType"].get_ref<const std::string&>();
+    if (type == "response")
+    {
+        auto response = decode_response(frame);
+        if (!response)
+        {
+            return Result<ServerMessage>::failure(response.error());
+        }
+        return Result<ServerMessage>::success(std::move(response).value());
+    }
+    if (type == "push")
+    {
+        auto push = decode_push(frame);
+        if (!push)
+        {
+            return Result<ServerMessage>::failure(push.error());
+        }
+        return Result<ServerMessage>::success(std::move(push).value());
+    }
+    return Result<ServerMessage>::failure(ipc_error(
+        "IPC_PROTOCOL_ERROR", "IPC 服务消息类型必须是 response 或 push", "ipc.decode.server"));
 }
 
 } // namespace paperbreak::ipc

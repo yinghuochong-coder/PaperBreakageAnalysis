@@ -1,7 +1,24 @@
+add_library(paperbreak_console_model STATIC
+    src/client_state_store.cpp)
+target_link_libraries(paperbreak_console_model
+    PUBLIC
+        paperbreak_common
+        paperbreak_ipc
+        paperbreak_compiler_options
+    PRIVATE
+        nlohmann_json::nlohmann_json)
+target_include_directories(paperbreak_console_model
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+set_target_properties(paperbreak_console_model PROPERTIES
+    OUTPUT_NAME paperbreak_console_model
+    FOLDER "PaperBreak/Libraries")
+
 add_executable(PaperBreakEdgeConsole WIN32 main.cpp)
 target_link_libraries(PaperBreakEdgeConsole
     PRIVATE
         paperbreak_common
+        paperbreak_console_model
         paperbreak_logging
         paperbreak_compiler_options
         Qt6::Core

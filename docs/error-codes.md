@@ -176,6 +176,10 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `IPC_REQUEST_CONFLICT` | Warning | 否 | 通用资源版本冲突；事件和配置优先使用各自专用码 |
 | `IPC_BUSY` | Warning | 是 | 有界控制队列暂时无法接受请求；调用方按建议延迟重试 |
 | `IPC_UNAUTHORIZED` | Error | 否 | 客户端身份或权限不允许该命令 |
+| `IPC_NOT_CONNECTED` | Warning | 是 | 客户端当前未连接；不缓存请求，调用方可在新连接后重新发起 |
+| `IPC_CONNECTION_LOST` | Warning | 是 | 已接受请求因本机连接中断而失败；不得自动重放可能有副作用的请求 |
+| `IPC_REQUEST_TIMEOUT` | Warning | 是 | 客户端请求超过单调时钟截止时间；移出在途表并忽略迟到响应 |
+| `IPC_REQUEST_CANCELLED` | Info | 否 | 调用方取消请求或客户端停止；请求只完成一次 |
 
 ### 4.7 上位机连接与上传
 

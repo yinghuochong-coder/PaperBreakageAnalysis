@@ -1,4 +1,5 @@
 add_library(paperbreak_ipc STATIC
+    src/client.cpp
     src/protocol.cpp
     src/server.cpp)
 

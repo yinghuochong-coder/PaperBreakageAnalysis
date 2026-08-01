@@ -1,4 +1,5 @@
 #include "paperbreak/common/version.hpp"
+#include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/logging/logging.hpp"
 
 #include <QAction>
@@ -55,9 +56,13 @@ int main(int argc, char* argv[])
     auto logging = std::move(logging_result).value();
 
     QMenu tray_menu;
+    QAction status_action(QStringLiteral("后台服务：正在初始化"), &tray_menu);
+    status_action.setEnabled(false);
     QAction about_action(QStringLiteral("关于 PaperBreakEdge"), &tray_menu);
     about_action.setEnabled(false);
     QAction quit_action(QStringLiteral("退出界面"), &tray_menu);
+    tray_menu.addAction(&status_action);
+    tray_menu.addSeparator();
     tray_menu.addAction(&about_action);
     tray_menu.addSeparator();
     tray_menu.addAction(&quit_action);
@@ -68,6 +73,46 @@ int main(int argc, char* argv[])
     tray.setContextMenu(&tray_menu);
     QObject::connect(&quit_action, &QAction::triggered, &application, &QApplication::quit);
     tray.show();
+
+    paperbreak::console::ClientStateStore state_store(
+        [&status_action, &tray](const paperbreak::console::ClientStateSnapshot& snapshot) {
+            QString text;
+            switch (snapshot.connection.state)
+            {
+            case paperbreak::ipc::ClientConnectionState::stopped:
+                text = QStringLiteral("后台服务：客户端已停止");
+                break;
+            case paperbreak::ipc::ClientConnectionState::connecting:
+                text = QStringLiteral("后台服务：连接中");
+                break;
+            case paperbreak::ipc::ClientConnectionState::retry_wait:
+                text = QStringLiteral("后台服务连接中断（状态已过期）");
+                break;
+            case paperbreak::ipc::ClientConnectionState::connected:
+                if (snapshot.service_status_stale || !snapshot.service_status.has_value())
+                {
+                    text = QStringLiteral("后台服务：已连接，状态同步中");
+                }
+                else
+                {
+                    text = QStringLiteral("后台服务状态：%1")
+                               .arg(QString::fromStdString(snapshot.service_status->service_state));
+                }
+                break;
+            }
+            status_action.setText(text);
+            tray.setToolTip(QStringLiteral("PaperBreakEdge Console — %1").arg(text));
+        });
+    auto client_start = state_store.start();
+    if (!client_start)
+    {
+        static_cast<void>(logging->log(paperbreak::logging::Category::ui,
+                                       paperbreak::logging::Level::error,
+                                       "PaperBreakEdgeConsole IPC client failed to start"));
+        tray.hide();
+        static_cast<void>(logging->shutdown());
+        return 1;
+    }
 
     if (has_argument(argc, argv, "--smoke-test") && !tray.isVisible())
     {
@@ -85,6 +130,7 @@ int main(int argc, char* argv[])
     }
 
     const int result = application.exec();
+    state_store.stop();
     tray.hide();
     static_cast<void>(logging->log(paperbreak::logging::Category::ui,
                                    paperbreak::logging::Level::info,

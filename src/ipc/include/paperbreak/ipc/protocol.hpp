@@ -8,12 +8,15 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <variant>
 #include <vector>
 
 namespace paperbreak::ipc
 {
 
 inline constexpr std::uint32_t protocol_version = 1U;
+inline constexpr std::string_view default_server_name = "PaperBreakEdgeService.Ipc";
 inline constexpr std::size_t frame_prefix_bytes = 8U;
 inline constexpr std::size_t maximum_header_bytes = 1024U * 1024U;
 inline constexpr std::size_t maximum_binary_bytes = 16U * 1024U * 1024U;
@@ -58,6 +61,8 @@ struct PushMessage final
     std::string coalescing_key;
 };
 
+using ServerMessage = std::variant<ResponseMessage, PushMessage>;
+
 class FrameDecoder final
 {
   public:
@@ -70,8 +75,12 @@ class FrameDecoder final
 };
 
 [[nodiscard]] Result<std::vector<std::byte>> encode_frame(const Frame& frame);
+[[nodiscard]] Result<Frame> encode_request(const RequestMessage& request);
 [[nodiscard]] Result<RequestMessage> decode_request(const Frame& frame);
 [[nodiscard]] Result<Frame> encode_response(const ResponseMessage& response);
+[[nodiscard]] Result<ResponseMessage> decode_response(const Frame& frame);
 [[nodiscard]] Result<Frame> encode_push(const PushMessage& push);
+[[nodiscard]] Result<PushMessage> decode_push(const Frame& frame);
+[[nodiscard]] Result<ServerMessage> decode_server_message(const Frame& frame);
 
 } // namespace paperbreak::ipc

@@ -9,12 +9,9 @@
 #include <memory>
 #include <stop_token>
 #include <string>
-#include <string_view>
 
 namespace paperbreak::ipc
 {
-
-inline constexpr std::string_view default_server_name = "PaperBreakEdgeService.Ipc";
 
 struct PeerIdentity final
 {

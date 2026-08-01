@@ -2,6 +2,8 @@ add_executable(PaperBreakTests
     test_main.cpp
     unit/common_tests.cpp
     unit/basic_config_tests.cpp
+    unit/client_state_store_tests.cpp
+    unit/ipc_client_tests.cpp
     unit/ipc_protocol_tests.cpp
     unit/ipc_server_tests.cpp
     unit/logging_tests.cpp
@@ -14,6 +16,7 @@ add_executable(PaperBreakTests
 target_link_libraries(PaperBreakTests
     PRIVATE
         paperbreak_common
+        paperbreak_console_model
         paperbreak_config
         paperbreak_platform_windows
         paperbreak_logging
@@ -46,7 +49,7 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Common*:Result*:Version*:Logging*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
+    COMMAND PaperBreakTests --gtest_filter=Common*:Result*:Version*:Logging*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
 set_tests_properties(unit PROPERTIES LABELS "unit")
 
 add_test(NAME simulation
