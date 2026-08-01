@@ -21,6 +21,23 @@ cmake --build --preset local-windows-vs2026-release --target PaperBreakCameraHar
 
 记录 Windows 版本、CPU/内存、MVS 4.8.0.3、网卡型号/驱动/协商速率、交换机型号/端口速率、相机供电与拓扑。关闭 MVS GUI 或其他可能独占相机的程序。
 
+相机网段不得同时配置在多个活动接口上。当前目标拓扑为：
+
+- Realtek 相机网卡保持 `192.168.11.102/24`；当前只读探测到的相机地址为 `192.168.11.117`，相机绑定仍以序列号为准；
+- Siemens PLCSIM 虚拟网卡使用独立的 `192.168.12.0/24`，建议主机地址 `192.168.12.222/24`，不配置默认网关；
+- 依赖 PLCSIM 旧地址的仿真配置由操作者同步修改，工具不自动禁用网卡或改写系统网络设置。
+
+调整后先执行只读路由清点，确认只有 Realtek 接口拥有 `192.168.11.0/24` 直连路由，且 PLCSIM 不再提供默认路由：
+
+```powershell
+Get-NetIPAddress -AddressFamily IPv4 |
+  Where-Object InterfaceAlias -in @('以太网', '以太网 2')
+Get-NetRoute -AddressFamily IPv4 |
+  Where-Object DestinationPrefix -in @('192.168.11.0/24', '192.168.12.0/24', '0.0.0.0/0')
+```
+
+若两个接口仍处于 `192.168.11.0/24`，不得开始项目探测后的参数或取流测试。仅修改接口 metric 或添加主机路由不能消除 GigE 广播发现歧义，也不得通过代码静默合并同序列号条目。
+
 ```powershell
 PaperBreakCameraHardwareTest.exe --probe --output records\probe-<rig>-<UTC>.json
 ```
