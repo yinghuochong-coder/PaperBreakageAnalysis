@@ -278,6 +278,29 @@ TEST(ConfigRepository, ReportsVersionConflictAndPendingRestartWithoutApplyingSto
               updated.value().pending_restart_paths.end());
 }
 
+TEST(ConfigRepository, RegistersDynamicApplierIdempotentlyAndRejectsAfterStop)
+{
+    const TemporaryDirectory directory;
+    const auto path = directory.write("config.json", valid_config());
+    paperbreak::platform::WindowsAtomicFileSystem files;
+    RecordingAudit audit;
+    RecordingApplier applier;
+    paperbreak::config::ConfigRepository repository{path, files, audit};
+    ASSERT_TRUE(repository.load());
+    ASSERT_TRUE(repository.register_applier(applier));
+    ASSERT_TRUE(repository.register_applier(applier));
+
+    const auto candidate = replace_once(valid_config(), "\"fps\": 3.0", "\"fps\": 4.0");
+    ASSERT_TRUE(repository.update(candidate, 1U, {}));
+    EXPECT_EQ(applier.calls, (std::vector<std::string>{"prepare", "apply", "commit"}));
+
+    RecordingApplier late_applier;
+    repository.stop_accepting_changes();
+    const auto rejected = repository.register_applier(late_applier);
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().business_code, "SYS_SERVICE_STOPPING");
+}
+
 TEST(ConfigRepository, RollsBackAppliedComponentsOnApplyAndPersistenceFailures)
 {
     const TemporaryDirectory directory;

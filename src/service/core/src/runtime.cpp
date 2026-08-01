@@ -350,8 +350,8 @@ std::vector<std::size_t> ServiceRuntime::shutdown_order() const
 {
     constexpr std::array phases{ShutdownPhase::configuration, ShutdownPhase::acquisition,
                                 ShutdownPhase::processing,    ShutdownPhase::event,
-                                ShutdownPhase::uplink,        ShutdownPhase::ipc,
-                                ShutdownPhase::logging};
+                                ShutdownPhase::uplink,        ShutdownPhase::monitoring,
+                                ShutdownPhase::ipc,           ShutdownPhase::logging};
     std::vector<std::size_t> ordered;
     ordered.reserve(started_indices_.size());
     for (const ShutdownPhase phase : phases)
@@ -404,6 +404,8 @@ std::string_view shutdown_phase_name(const ShutdownPhase phase) noexcept
         return "event";
     case ShutdownPhase::uplink:
         return "uplink";
+    case ShutdownPhase::monitoring:
+        return "monitoring";
     case ShutdownPhase::ipc:
         return "ipc";
     case ShutdownPhase::logging:

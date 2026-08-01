@@ -94,6 +94,7 @@ class ConfigRepository final
                                                      std::uint64_t expected_revision,
                                                      const ConfigChangeContext& context);
     [[nodiscard]] Result<ConfigSnapshot> snapshot() const;
+    [[nodiscard]] Result<void> register_applier(IConfigApplier& applier);
     void stop_accepting_changes() noexcept;
 
   private:

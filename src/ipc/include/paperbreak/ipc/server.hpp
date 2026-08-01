@@ -63,6 +63,24 @@ struct IpcServerOptions final
     std::chrono::milliseconds shutdown_flush_timeout{std::chrono::milliseconds{250}};
 };
 
+struct IpcServerMetrics final
+{
+    std::uint64_t active_connections{};
+    std::uint64_t in_flight_requests{};
+    std::uint64_t command_queue_depth{};
+    std::uint64_t command_queue_high_watermark{};
+    std::uint64_t publish_queue_depth{};
+    std::uint64_t publish_queue_high_watermark{};
+    std::uint64_t outbound_messages{};
+    std::uint64_t outbound_bytes{};
+    std::uint64_t requests_total{};
+    std::uint64_t responses_total{};
+    std::uint64_t protocol_errors_total{};
+    std::uint64_t pushes_dropped_total{};
+    double average_request_duration_ms{};
+    double maximum_request_duration_ms{};
+};
+
 class IpcServer final
 {
   public:
@@ -81,6 +99,7 @@ class IpcServer final
     [[nodiscard]] Result<void> join(std::chrono::steady_clock::time_point deadline);
     [[nodiscard]] bool try_publish(PushMessage push,
                                    PushPolicy policy = PushPolicy::drop_newest) noexcept;
+    [[nodiscard]] IpcServerMetrics metrics_snapshot() const noexcept;
 
   private:
     class Impl;

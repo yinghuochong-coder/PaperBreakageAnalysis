@@ -111,7 +111,18 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `LOG_INITIALIZATION_FAILED` | Error | 视 I/O | 日志目录创建、日志文件打开或后台运行时初始化失败；保留文件系统原始码和逻辑日志目录，不得静默退化 |
 | `LOG_WRITE_FAILED` | Error | 视 I/O | 已初始化日志运行时无法接受、写入或刷新日志；记录受限诊断并进入可观测降级，不得把日志失败升级为业务成功 |
 
-### 4.2 相机
+### 4.2 监测与报警
+
+| 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
+| --- | --- | ---: | --- |
+| `SYS_MONITORING_SAMPLE_FAILED` | Warning | 是 | 一个健康指标源采样失败；保留其他来源快照，按来源合并报警并在恢复后清除 |
+| `SYS_CPU_USAGE_HIGH` | Warning | 是 | 进程 CPU 使用率跨越配置阈值；仅在状态跨越时 raise/clear |
+| `SYS_MEMORY_USAGE_HIGH` | Warning | 是 | 系统内存使用率跨越配置阈值；仅在状态跨越时 raise/clear |
+| `MONITORING_RECORD_INVALID` | Error | 否 | 指标、报警、详情或监测配置字段违反类型、字符或长度边界；拒绝该次变更并保留旧快照 |
+| `MONITORING_CAPACITY_EXCEEDED` | Error | 否 | 指标、指标源或活动报警达到固定容量；拒绝新增项，活动报警不得淘汰 |
+| `ALARM_NOT_FOUND` | Error | 否 | 确认的 alarmId 不存在或已经从进程内历史淘汰；调用方应重新查询报警事实源 |
+
+### 4.3 相机
 
 | 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
 | --- | --- | ---: | --- |
@@ -125,7 +136,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `CAMERA_FRAME_INCOMPLETE` | Warning | 否 | 当前帧不完整；丢弃/隔离该帧，不对同一帧重试 |
 | `CAMERA_FRAME_FORMAT_CHANGED` | Error | 视配置 | 运行中尺寸或像素格式意外改变；暂停该路并重新校验缓冲预算 |
 
-### 4.3 管线与算法
+### 4.4 管线与算法
 
 | 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
 | --- | --- | ---: | --- |
@@ -136,7 +147,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `ALGORITHM_PROCESS_FAILED` | Error | 否 | 单帧处理异常；跳过该帧，持续失败时降级算法 |
 | `ALGORITHM_DEADLINE_EXCEEDED` | Warning | 否 | 单帧或队列处理超过预算；按策略跳帧/降级，不反压采集 |
 
-### 4.4 事件与存储
+### 4.5 事件与存储
 
 | 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
 | --- | --- | ---: | --- |
@@ -154,7 +165,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `STORAGE_IO_FAILED` | Error | 视 I/O | 非事件特定的文件系统读写/刷新/重命名失败 |
 | `STORAGE_CHECKSUM_MISMATCH` | Error | 视来源 | 通用存储对象读回校验失败；隔离对象并触发恢复 |
 
-### 4.5 数据库
+### 4.6 数据库
 
 | 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
 | --- | --- | ---: | --- |
@@ -165,7 +176,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `DATABASE_SCHEMA_UNSUPPORTED` | Critical | 否 | 数据库版本高于应用支持范围或迁移链缺失 |
 | `DATABASE_RECONCILE_FAILED` | Error | 是 | 事件目录与索引对账未完成；保留文件事实并继续受限恢复 |
 
-### 4.6 IPC
+### 4.7 IPC
 
 | 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
 | --- | --- | ---: | --- |
@@ -181,7 +192,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `IPC_REQUEST_TIMEOUT` | Warning | 是 | 客户端请求超过单调时钟截止时间；移出在途表并忽略迟到响应 |
 | `IPC_REQUEST_CANCELLED` | Info | 否 | 调用方取消请求或客户端停止；请求只完成一次 |
 
-### 4.7 上位机连接与上传
+### 4.8 上位机连接与上传
 
 | 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
 | --- | --- | ---: | --- |

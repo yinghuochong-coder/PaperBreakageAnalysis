@@ -180,7 +180,7 @@ Qt 桌面客户端只承担：
 | --- | --- | --- | --- |
 | `paperbreak_common` | 领域基础类型、时间、错误、Result、版本、通用有界容器 | C++ 标准库、批准的基础依赖 | Widgets、MVS、SCM、具体上传协议 |
 | `paperbreak_platform` | 文件原子替换、ACL、凭据、进程指标和服务控制等窄平台端口 | common | Win32 头文件和具体平台实现 |
-| `paperbreak_platform_windows` | Windows 平台端口实现 | platform、common、Windows API | 业务状态、Widgets、MVS |
+| `paperbreak_platform_windows` | Windows 平台端口及系统健康指标源实现 | platform、common、monitoring 接口、Windows API | 业务状态、Widgets、MVS |
 | `paperbreak_config` | 强类型配置、schema 校验、版本、原子存储 | common、JSON、受控平台文件适配 | 相机实现、UI、上传实现 |
 | `paperbreak_logging` | 日志门面、分类、脱敏、滚动和刷新 | common、spdlog | 业务模块反向依赖 |
 | `paperbreak_camera` | 相机接口、能力、状态机、FramePacket、管理器 | common、monitoring 接口 | MVS 头文件、Widgets |
@@ -822,7 +822,7 @@ timestamp         墙上时间
 
 ### 17.2 报警
 
-`AlarmRegistry` 是活动报警的单一状态源，支持 raise、合并、clear、ack 和历史落库。报警推送可能丢失，但 UI 可按版本/游标查询恢复。托盘通知只是辅助。
+`AlarmRegistry` 是活动报警的单一状态源，支持 raise、合并、clear 和 ack。M1-06 将活动报警和已清除历史分别限制为 1024/4096 条，并只保留在进程内；M5-07 再接入 SQLite 历史持久化。报警推送可能丢失，但 UI 可按版本/游标查询恢复。托盘通知只是辅助。
 
 至少覆盖需求列出的相机离线/占用/超时/帧率、算法积压、画面异常、配置、磁盘、NVMe、数据库、事件、上位机、上传、PLC 和系统时间异常。
 
@@ -830,6 +830,7 @@ timestamp         墙上时间
 
 - 分类：service、camera、algorithm、event、storage、uplink、ipc、ui、audit、performance；
 - 异步、有界、按日期和大小滚动；
+- 日志后台线程同时维护默认 2048 条的结构化近期日志环；IPC 查询只复制有界内存快照，不读取滚动文件；
 - 每条含时间、线程、模块、业务码和关联 ID；
 - 高频帧不逐帧写普通日志，改用指标和限频摘要；
 - 关键事件有独立事件日志；

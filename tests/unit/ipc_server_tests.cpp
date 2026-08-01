@@ -276,6 +276,28 @@ TEST(IpcServer, ServesRequestAndRejectsDuplicateRequestId)
     stop_server(server);
 }
 
+TEST(IpcServer, ExposesThreadSafeBoundedMetricsSnapshot)
+{
+    auto options = unique_options();
+    paperbreak::ipc::IpcServer server{std::make_shared<EchoHandler>(),
+                                      std::make_unique<FixedAuthorizer>(), options};
+    ASSERT_TRUE(server.start());
+    QLocalSocket socket;
+    ASSERT_TRUE(connect_socket(socket, options.server_name));
+    ASSERT_TRUE(send_frame(socket, request_frame("019870f2-6c80-7a31-9b52-6e3b9ca1d899")));
+    static_cast<void>(read_header(socket));
+
+    const auto running = server.metrics_snapshot();
+    EXPECT_EQ(running.active_connections, 1U);
+    EXPECT_EQ(running.requests_total, 1U);
+    EXPECT_GE(running.responses_total, 1U);
+    EXPECT_GE(running.command_queue_high_watermark, 1U);
+    EXPECT_GE(running.maximum_request_duration_ms, 0.0);
+
+    stop_server(server);
+    EXPECT_EQ(server.metrics_snapshot().active_connections, 0U);
+}
+
 TEST(IpcServer, DisconnectsSlowIncompleteFrameOnAbsoluteDeadline)
 {
     auto options = unique_options();

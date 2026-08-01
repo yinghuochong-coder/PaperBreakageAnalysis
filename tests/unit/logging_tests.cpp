@@ -2,12 +2,14 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <regex>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -126,4 +128,92 @@ TEST(Logging, RedactsJsonAndKeyValueForms)
     EXPECT_EQ(redacted.find("abc"), std::string::npos);
     EXPECT_EQ(redacted.find("xyz"), std::string::npos);
     EXPECT_EQ(redacted.find("hunter2"), std::string::npos);
+}
+
+TEST(Logging, KeepsBoundedStructuredRecentRecordsAndFiltersTail)
+{
+    TemporaryDirectory temporary;
+    paperbreak::logging::LoggingConfig config;
+    config.directory = temporary.path();
+    config.recent_record_capacity = 3U;
+    auto created = paperbreak::logging::LoggingRuntime::create(config);
+    ASSERT_TRUE(created);
+    auto runtime = std::move(created).value();
+    ASSERT_TRUE(runtime->log(paperbreak::logging::Category::service,
+                             paperbreak::logging::Level::info, "one"));
+    ASSERT_TRUE(runtime->log(paperbreak::logging::Category::camera,
+                             paperbreak::logging::Level::warning, "token=secret two"));
+    ASSERT_TRUE(runtime->log(paperbreak::logging::Category::service,
+                             paperbreak::logging::Level::error, "three"));
+    ASSERT_TRUE(runtime->log(paperbreak::logging::Category::service,
+                             paperbreak::logging::Level::critical, "four"));
+    ASSERT_TRUE(runtime->shutdown());
+
+    auto all = runtime->tail({.limit = 10U});
+    ASSERT_EQ(all.records.size(), 3U);
+    EXPECT_TRUE(all.truncated);
+    EXPECT_EQ(all.records.front().message.find("secret"), std::string::npos);
+    auto filtered = runtime->tail({.categories = {paperbreak::logging::Category::camera},
+                                   .minimum_level = paperbreak::logging::Level::warning,
+                                   .limit = 10U});
+    ASSERT_EQ(filtered.records.size(), 1U);
+    EXPECT_EQ(filtered.records.front().category, paperbreak::logging::Category::camera);
+    auto cursor =
+        runtime->tail({.after_sequence = filtered.records.front().sequence, .limit = 10U});
+    ASSERT_EQ(cursor.records.size(), 2U);
+    EXPECT_FALSE(cursor.truncated);
+    auto overwritten = runtime->tail({.after_sequence = 0U, .limit = 10U});
+    EXPECT_TRUE(overwritten.truncated);
+}
+
+TEST(Logging, ConcurrentShutdownDoesNotRaceWithProducers)
+{
+    TemporaryDirectory temporary;
+    paperbreak::logging::LoggingConfig config;
+    config.directory = temporary.path();
+    auto created = paperbreak::logging::LoggingRuntime::create(config);
+    ASSERT_TRUE(created);
+    auto runtime = std::move(created).value();
+    std::jthread producer([&](std::stop_token) {
+        for (int index = 0; index < 1000; ++index)
+        {
+            static_cast<void>(runtime->log(paperbreak::logging::Category::performance,
+                                           paperbreak::logging::Level::info, "sample"));
+        }
+    });
+    ASSERT_TRUE(runtime->shutdown());
+    producer.join();
+    EXPECT_TRUE(runtime->shutdown());
+}
+
+TEST(Logging, SupportsConcurrentTailQueriesWhileProducing)
+{
+    TemporaryDirectory temporary;
+    paperbreak::logging::LoggingConfig config;
+    config.directory = temporary.path();
+    config.recent_record_capacity = 64U;
+    auto created = paperbreak::logging::LoggingRuntime::create(config);
+    ASSERT_TRUE(created);
+    auto runtime = std::move(created).value();
+    std::atomic_bool failed{false};
+    std::jthread producer([&](std::stop_token) {
+        for (int index = 0; index < 500; ++index)
+        {
+            if (!runtime->log(paperbreak::logging::Category::performance,
+                              paperbreak::logging::Level::info, "sample"))
+            {
+                failed.store(true, std::memory_order_relaxed);
+            }
+        }
+    });
+    for (int index = 0; index < 500; ++index)
+    {
+        if (runtime->tail({.limit = 20U}).records.size() > 20U)
+        {
+            failed.store(true, std::memory_order_relaxed);
+        }
+    }
+    producer.join();
+    ASSERT_TRUE(runtime->shutdown());
+    EXPECT_FALSE(failed.load(std::memory_order_relaxed));
 }

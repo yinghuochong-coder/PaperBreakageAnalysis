@@ -1,3 +1,5 @@
+#include "paperbreak/logging/logging.hpp"
+#include "paperbreak/monitoring/monitoring.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/service/system_commands.hpp"
 
@@ -193,4 +195,97 @@ TEST(SystemCommand, ReloadIsIdempotentAndInvalidConfigPreservesActiveSnapshot)
     ASSERT_TRUE(snapshot);
     EXPECT_EQ(snapshot.value().stored_config_revision, 1U);
     EXPECT_EQ(snapshot.value().effective_config_revision, 1U);
+}
+
+TEST(SystemCommand, QueriesMetricsAlarmsLogsAndRequiresAdministratorToAcknowledge)
+{
+    CommandFixture fixture;
+    auto metrics = std::make_shared<paperbreak::monitoring::MetricRegistry>();
+    ASSERT_TRUE(metrics->replace_source(
+        "system", {{.name = "process.cpu.percent", .value = 12.5, .unit = "percent"}}));
+    auto alarms = std::make_shared<paperbreak::monitoring::AlarmRegistry>();
+    auto raised = alarms->raise_alarm({.code = "SYS_CPU_USAGE_HIGH",
+                                       .severity = paperbreak::Severity::warning,
+                                       .source = "process",
+                                       .message = "cpu high"});
+    ASSERT_TRUE(raised);
+
+    paperbreak::logging::LoggingConfig log_config;
+    log_config.directory = fixture.temp.path / "logs";
+    auto created = paperbreak::logging::LoggingRuntime::create(log_config);
+    ASSERT_TRUE(created);
+    std::shared_ptr<paperbreak::logging::LoggingRuntime> logging{std::move(created).value()};
+    ASSERT_TRUE(logging->log(paperbreak::logging::Category::service,
+                             paperbreak::logging::Level::warning, "recent marker"));
+    ASSERT_TRUE(logging->shutdown());
+
+    paperbreak::service::SystemCommandService commands{fixture.repository, fixture.status, metrics,
+                                                       alarms, logging};
+    auto metric_result = commands.handle(
+        fixture.request("system.getMetrics", R"({"prefixes":["process."],"limit":10})"), reader,
+        {});
+    ASSERT_TRUE(metric_result);
+    const Json metric_json = Json::parse(metric_result.value().payload_json);
+    ASSERT_EQ(metric_json.at("metrics").size(), 1U);
+    EXPECT_TRUE(metric_json.at("metrics").front().at("value").is_number_float());
+
+    auto list_result =
+        commands.handle(fixture.request("alarm.list", R"({"active":true,"limit":10})"), reader, {});
+    ASSERT_TRUE(list_result);
+    const Json alarm_list = Json::parse(list_result.value().payload_json);
+    ASSERT_EQ(alarm_list.at("alarms").size(), 1U);
+    EXPECT_FALSE(alarm_list.at("alarms").front().at("acknowledged").get<bool>());
+
+    const std::string acknowledge_payload = Json{{"alarmId", raised.value().alarm_id}}.dump();
+    auto denied =
+        commands.handle(fixture.request("alarm.acknowledge", acknowledge_payload), reader, {});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
+    auto acknowledged = commands.handle(fixture.request("alarm.acknowledge", acknowledge_payload),
+                                        administrator, {});
+    ASSERT_TRUE(acknowledged);
+    EXPECT_TRUE(Json::parse(acknowledged.value().payload_json).at("acknowledged").get<bool>());
+
+    auto logs = commands.handle(
+        fixture.request("log.tail", R"({"categories":["service"],"limit":10})"), reader, {});
+    ASSERT_TRUE(logs);
+    const Json log_tail = Json::parse(logs.value().payload_json);
+    ASSERT_EQ(log_tail.at("records").size(), 1U);
+    EXPECT_EQ(log_tail.at("records").front().at("message"), "recent marker");
+
+    auto invalid = commands.handle(fixture.request("alarm.list", R"({"limit":201})"), reader, {});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
+
+    const std::vector<std::pair<std::string, std::string>> invalid_requests{
+        {"system.getMetrics", R"({"prefixes":"process."})"},
+        {"system.getMetrics", R"({"unknown":1})"},
+        {"alarm.list", R"({"active":"true"})"},
+        {"alarm.list", R"({"minimumSeverity":"warning"})"},
+        {"log.tail", R"({"afterSequence":-1})"},
+        {"log.tail", R"({"categories":["unknown"]})"},
+        {"log.tail", R"({"limit":0})"},
+        {"alarm.acknowledge",
+         acknowledge_payload.substr(0, acknowledge_payload.size() - 1U) + R"(,"extra":true})"}};
+    for (const auto& [command, payload] : invalid_requests)
+    {
+        const auto result = commands.handle(fixture.request(command, payload), administrator, {});
+        ASSERT_FALSE(result) << command << ' ' << payload;
+        EXPECT_EQ(result.error().business_code, "IPC_REQUEST_INVALID");
+    }
+
+    ASSERT_TRUE(alarms->raise_alarm({.code = "SYS_MEMORY_USAGE_HIGH",
+                                     .severity = paperbreak::Severity::warning,
+                                     .source = "system",
+                                     .message = "memory high"}));
+    ASSERT_TRUE(alarms->raise_alarm({.code = "STORAGE_LOW_SPACE",
+                                     .severity = paperbreak::Severity::warning,
+                                     .source = "event",
+                                     .message = "disk low"}));
+    auto page = commands.handle(fixture.request("alarm.list", R"({"limit":2})"), reader, {});
+    ASSERT_TRUE(page);
+    const Json page_json = Json::parse(page.value().payload_json);
+    EXPECT_EQ(page_json.at("alarms").size(), 2U);
+    EXPECT_TRUE(page_json.at("truncated").get<bool>());
+    EXPECT_TRUE(page_json.at("nextBeforeAlarmId").is_number_integer());
 }

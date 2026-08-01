@@ -140,36 +140,21 @@ TEST(ServiceRuntime, StartsInRegistrationOrderAndStopsInPhaseOrder)
     components.push_back(component("processing", ShutdownPhase::processing, calls));
     components.push_back(component("acquisition", ShutdownPhase::acquisition, calls));
     components.push_back(component("uplink", ShutdownPhase::uplink, calls));
+    components.push_back(component("monitoring", ShutdownPhase::monitoring, calls));
     paperbreak::service::ServiceRuntime runtime{std::move(components)};
 
     ASSERT_TRUE(runtime.start());
     runtime.request_stop(StopReason::service_stop);
     ASSERT_TRUE(runtime.shutdown());
 
-    const std::vector<std::string> expected{"start:ipc",
-                                            "start:config-a",
-                                            "start:logging",
-                                            "start:config-b",
-                                            "start:event",
-                                            "start:processing",
-                                            "start:acquisition",
-                                            "start:uplink",
-                                            "request:config-b",
-                                            "request:config-a",
-                                            "request:acquisition",
-                                            "request:processing",
-                                            "request:event",
-                                            "request:uplink",
-                                            "request:ipc",
-                                            "request:logging",
-                                            "join:config-b",
-                                            "join:config-a",
-                                            "join:acquisition",
-                                            "join:processing",
-                                            "join:event",
-                                            "join:uplink",
-                                            "join:ipc",
-                                            "join:logging"};
+    const std::vector<std::string> expected{
+        "start:ipc",          "start:config-a",   "start:logging",     "start:config-b",
+        "start:event",        "start:processing", "start:acquisition", "start:uplink",
+        "start:monitoring",   "request:config-b", "request:config-a",  "request:acquisition",
+        "request:processing", "request:event",    "request:uplink",    "request:monitoring",
+        "request:ipc",        "request:logging",  "join:config-b",     "join:config-a",
+        "join:acquisition",   "join:processing",  "join:event",        "join:uplink",
+        "join:monitoring",    "join:ipc",         "join:logging"};
     EXPECT_EQ(calls, expected);
     EXPECT_EQ(runtime.state(), paperbreak::service::ServiceState::stopped);
 }

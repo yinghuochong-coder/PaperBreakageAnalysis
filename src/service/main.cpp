@@ -2,7 +2,9 @@
 #include "paperbreak/config/basic_config.hpp"
 #include "paperbreak/config/config_repository.hpp"
 #include "paperbreak/logging/logging.hpp"
+#include "paperbreak/monitoring/monitoring.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
+#include "paperbreak/platform/system_metrics.hpp"
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/service/system_commands.hpp"
 #include "paperbreak/service/windows/console_control.hpp"
@@ -11,6 +13,9 @@
 
 #include <QCoreApplication>
 
+#include <nlohmann/json.hpp>
+
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <condition_variable>
@@ -313,6 +318,7 @@ struct ConfigurationResources final
     paperbreak::platform::WindowsAtomicFileSystem files;
     BufferedConfigAuditSink audit;
     paperbreak::config::ConfigRepository repository;
+    std::vector<std::shared_ptr<paperbreak::config::IConfigApplier>> dynamic_appliers;
 };
 
 class ConfigurationLifecycleComponent final : public paperbreak::service::ILifecycleComponent
@@ -387,6 +393,42 @@ class IpcLifecycleComponent final : public paperbreak::service::ILifecycleCompon
     std::shared_ptr<paperbreak::ipc::IpcServer> server_;
 };
 
+class MonitoringLifecycleComponent final : public paperbreak::service::ILifecycleComponent
+{
+  public:
+    explicit MonitoringLifecycleComponent(
+        std::shared_ptr<paperbreak::monitoring::HealthMonitor> monitor)
+        : monitor_(std::move(monitor))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "monitoring";
+    }
+    [[nodiscard]] paperbreak::service::ShutdownPhase shutdown_phase() const noexcept override
+    {
+        return paperbreak::service::ShutdownPhase::monitoring;
+    }
+    [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
+    {
+        return monitor_->start();
+    }
+    [[nodiscard]] paperbreak::Result<void> request_stop(paperbreak::service::StopReason) override
+    {
+        monitor_->request_stop();
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> join(
+        const std::chrono::steady_clock::time_point deadline) override
+    {
+        return monitor_->join(deadline);
+    }
+
+  private:
+    std::shared_ptr<paperbreak::monitoring::HealthMonitor> monitor_;
+};
+
 std::filesystem::path path_from_utf8(const std::string_view value)
 {
     std::u8string converted;
@@ -394,6 +436,208 @@ std::filesystem::path path_from_utf8(const std::string_view value)
     for (const unsigned char byte : value)
         converted.push_back(static_cast<char8_t>(byte));
     return std::filesystem::path{converted};
+}
+
+std::filesystem::path resolve_config_path(const std::filesystem::path& config_path,
+                                          const std::string_view value)
+{
+    auto path = path_from_utf8(value);
+    if (path.is_relative())
+    {
+        path = config_path.parent_path() / path;
+    }
+    return path.lexically_normal();
+}
+
+paperbreak::monitoring::HealthMonitorOptions monitoring_options_from_config(
+    const paperbreak::config::EdgeConfig& config)
+{
+    paperbreak::monitoring::HealthMonitorOptions options;
+    options.sample_interval = std::chrono::milliseconds{config.health.sample_interval_ms};
+    options.cpu_warning_percent = config.health.cpu_warning_percent;
+    options.memory_warning_percent = config.health.memory_warning_percent;
+    options.disks = {
+        {.metric_name = "disk.system.free_gib",
+         .source = "system",
+         .warning_free_gib = static_cast<double>(config.storage.warning_free_space_gib),
+         .critical_free_gib = static_cast<double>(config.storage.critical_free_space_gib),
+         .stop_free_gib = static_cast<double>(config.storage.stop_free_space_gib)},
+        {.metric_name = "disk.event.free_gib",
+         .source = "event",
+         .warning_free_gib = static_cast<double>(config.storage.warning_free_space_gib),
+         .critical_free_gib = static_cast<double>(config.storage.critical_free_space_gib),
+         .stop_free_gib = static_cast<double>(config.storage.stop_free_space_gib)},
+        {.metric_name = "disk.cache.free_gib",
+         .source = "cache",
+         .warning_free_gib = static_cast<double>(config.storage.warning_free_space_gib),
+         .critical_free_gib = static_cast<double>(config.storage.critical_free_space_gib),
+         .stop_free_gib = static_cast<double>(config.storage.stop_free_space_gib)},
+        {.metric_name = "disk.log.free_gib",
+         .source = "log",
+         .warning_free_gib = static_cast<double>(config.storage.warning_free_space_gib),
+         .critical_free_gib = static_cast<double>(config.storage.critical_free_space_gib),
+         .stop_free_gib = static_cast<double>(config.storage.stop_free_space_gib)}};
+    return options;
+}
+
+class MonitoringConfigApplier final : public paperbreak::config::IConfigApplier
+{
+  public:
+    explicit MonitoringConfigApplier(std::shared_ptr<paperbreak::monitoring::HealthMonitor> monitor)
+        : monitor_(std::move(monitor))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "monitoring";
+    }
+    [[nodiscard]] paperbreak::Result<void> prepare(const paperbreak::config::EdgeConfig& current,
+                                                   const paperbreak::config::EdgeConfig& candidate,
+                                                   const std::vector<std::string>&) override
+    {
+        previous_ = monitoring_options_from_config(current);
+        candidate_ = monitoring_options_from_config(candidate);
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> apply_and_readback(
+        const paperbreak::config::EdgeConfig&) override
+    {
+        if (!candidate_.has_value())
+        {
+            return paperbreak::Result<void>::failure(paperbreak::make_error(
+                "SYS_CONFIG_APPLY_FAILED", paperbreak::Severity::error,
+                "健康监测配置没有完成预应用", "monitoring", "monitoring.config.apply"));
+        }
+        return monitor_->reconfigure(candidate_.value());
+    }
+    [[nodiscard]] paperbreak::Result<void> commit(const paperbreak::config::EdgeConfig&) override
+    {
+        previous_.reset();
+        candidate_.reset();
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> rollback(
+        const paperbreak::config::EdgeConfig& previous) noexcept override
+    {
+        auto options = previous_.value_or(monitoring_options_from_config(previous));
+        previous_.reset();
+        candidate_.reset();
+        return monitor_->reconfigure(std::move(options));
+    }
+
+  private:
+    std::shared_ptr<paperbreak::monitoring::HealthMonitor> monitor_;
+    std::optional<paperbreak::monitoring::HealthMonitorOptions> previous_;
+    std::optional<paperbreak::monitoring::HealthMonitorOptions> candidate_;
+};
+
+class IpcMetricSource final : public paperbreak::monitoring::IMetricSource
+{
+  public:
+    explicit IpcMetricSource(std::weak_ptr<paperbreak::ipc::IpcServer> server)
+        : server_(std::move(server))
+    {
+    }
+    [[nodiscard]] std::string_view source_name() const noexcept override
+    {
+        return "ipc";
+    }
+    [[nodiscard]] paperbreak::Result<std::vector<paperbreak::monitoring::MetricPoint>> collect(
+        std::stop_token) noexcept override
+    {
+        auto server = server_.lock();
+        if (!server)
+        {
+            return paperbreak::Result<std::vector<paperbreak::monitoring::MetricPoint>>::failure(
+                paperbreak::make_error("SYS_MONITORING_SAMPLE_FAILED",
+                                       paperbreak::Severity::warning, "IPC 指标源已失效",
+                                       "monitoring", "monitoring.ipc.collect", true));
+        }
+        const auto metrics = server->metrics_snapshot();
+        using Point = paperbreak::monitoring::MetricPoint;
+        return paperbreak::Result<std::vector<Point>>::success(
+            {{.name = "ipc.connections.active",
+              .value = metrics.active_connections,
+              .unit = "count"},
+             {.name = "ipc.requests.in_flight",
+              .value = metrics.in_flight_requests,
+              .unit = "count"},
+             {.name = "ipc.command_queue.depth",
+              .value = metrics.command_queue_depth,
+              .unit = "count"},
+             {.name = "ipc.command_queue.high_watermark",
+              .value = metrics.command_queue_high_watermark,
+              .unit = "count"},
+             {.name = "ipc.publish_queue.depth",
+              .value = metrics.publish_queue_depth,
+              .unit = "count"},
+             {.name = "ipc.publish_queue.high_watermark",
+              .value = metrics.publish_queue_high_watermark,
+              .unit = "count"},
+             {.name = "ipc.outbound.messages", .value = metrics.outbound_messages, .unit = "count"},
+             {.name = "ipc.outbound.bytes", .value = metrics.outbound_bytes, .unit = "bytes"},
+             {.name = "ipc.requests.total", .value = metrics.requests_total, .unit = "count"},
+             {.name = "ipc.responses.total", .value = metrics.responses_total, .unit = "count"},
+             {.name = "ipc.protocol_errors.total",
+              .value = metrics.protocol_errors_total,
+              .unit = "count"},
+             {.name = "ipc.pushes.dropped_total",
+              .value = metrics.pushes_dropped_total,
+              .unit = "count"},
+             {.name = "ipc.request_duration.average_ms",
+              .value = metrics.average_request_duration_ms,
+              .unit = "milliseconds"},
+             {.name = "ipc.request_duration.maximum_ms",
+              .value = metrics.maximum_request_duration_ms,
+              .unit = "milliseconds"}});
+    }
+
+  private:
+    std::weak_ptr<paperbreak::ipc::IpcServer> server_;
+};
+
+class DatabasePlaceholderMetricSource final : public paperbreak::monitoring::IMetricSource
+{
+  public:
+    [[nodiscard]] std::string_view source_name() const noexcept override
+    {
+        return "database";
+    }
+    [[nodiscard]] paperbreak::Result<std::vector<paperbreak::monitoring::MetricPoint>> collect(
+        std::stop_token) noexcept override
+    {
+        using Point = paperbreak::monitoring::MetricPoint;
+        return paperbreak::Result<std::vector<Point>>::success(
+            {{.name = "database.available", .value = false, .unit = "boolean"},
+             {.name = "database.state", .value = std::string{"not-initialized"}, .unit = "state"},
+             {.name = "database.schema.version",
+              .value = std::uint64_t{0U},
+              .unit = "version",
+              .available = false}});
+    }
+};
+
+nlohmann::json alarm_push_json(const paperbreak::monitoring::AlarmChange& change)
+{
+    nlohmann::json details = nlohmann::json::object();
+    for (const auto& detail : change.alarm.details)
+    {
+        details[detail.key] = detail.value;
+    }
+    return {{"registryRevision", change.registry_revision},
+            {"alarmId", change.alarm.alarm_id},
+            {"revision", change.alarm.revision},
+            {"code", change.alarm.code},
+            {"severity", paperbreak::monitoring::severity_name(change.alarm.severity)},
+            {"source", change.alarm.source},
+            {"firstOccurredAt", change.alarm.first_occurred_at},
+            {"lastOccurredAt", change.alarm.last_occurred_at},
+            {"active", change.alarm.active},
+            {"occurrenceCount", change.alarm.occurrence_count},
+            {"message", change.alarm.message},
+            {"details", std::move(details)},
+            {"acknowledged", change.alarm.acknowledged}};
 }
 
 paperbreak::logging::Level logging_level_from_config(
@@ -496,9 +740,8 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     }
 
     paperbreak::logging::LoggingConfig log_config;
-    log_config.directory = path_from_utf8(loaded.value().effective->logging.directory);
-    if (log_config.directory.is_relative())
-        log_config.directory = config_path.parent_path() / log_config.directory;
+    log_config.directory =
+        resolve_config_path(config_path, loaded.value().effective->logging.directory);
     log_config.max_file_size_bytes =
         static_cast<std::size_t>(loaded.value().effective->logging.maximum_file_size_mib) * 1024U *
         1024U;
@@ -521,14 +764,88 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
             failure(audit_attach.error());
     }
 
+    auto status = std::make_shared<paperbreak::service::ServiceStatusStore>();
+    auto metrics = std::make_shared<paperbreak::monitoring::MetricRegistry>();
+    auto alarms = std::make_shared<paperbreak::monitoring::AlarmRegistry>();
+    auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
+        configuration->repository, status, metrics, alarms, logging);
+    auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(commands);
+
+    auto monitor = std::make_shared<paperbreak::monitoring::HealthMonitor>(
+        metrics, alarms, monitoring_options_from_config(*loaded.value().effective));
+    auto system_volume = paperbreak::platform::windows_system_volume();
+    if (!system_volume)
+    {
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(system_volume.error());
+    }
+    std::vector<paperbreak::platform::DiskMetricPath> disk_paths{
+        {.label = "system", .path = system_volume.value()},
+        {.label = "event",
+         .path = resolve_config_path(config_path, loaded.value().effective->storage.event_root)},
+        {.label = "cache",
+         .path = resolve_config_path(config_path, loaded.value().effective->storage.cache_root)},
+        {.label = "log", .path = log_config.directory}};
+    const std::array<std::shared_ptr<paperbreak::monitoring::IMetricSource>, 3U> sources{
+        paperbreak::platform::make_windows_system_metric_source(std::move(disk_paths)),
+        std::make_shared<IpcMetricSource>(ipc_server),
+        std::make_shared<DatabasePlaceholderMetricSource>()};
+    for (const auto& source : sources)
+    {
+        auto registered = monitor->register_source(source);
+        if (!registered)
+        {
+            static_cast<void>(logging->shutdown());
+            return paperbreak::
+                Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(
+                    registered.error());
+        }
+    }
+
+    auto monitoring_applier = std::make_shared<MonitoringConfigApplier>(monitor);
+    auto registered_applier = configuration->repository.register_applier(*monitoring_applier);
+    if (!registered_applier)
+    {
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(registered_applier.error());
+    }
+    configuration->dynamic_appliers.push_back(monitoring_applier);
+
+    const std::weak_ptr<paperbreak::ipc::IpcServer> weak_server = ipc_server;
+    status->set_observer([weak_server](const paperbreak::service::ServiceStatusSnapshot& snapshot) {
+        if (auto server = weak_server.lock())
+        {
+            nlohmann::json payload{
+                {"serviceState", paperbreak::service::service_state_name(snapshot.state)},
+                {"acceptingWrites", snapshot.accepting_writes}};
+            static_cast<void>(server->try_publish({.event_name = "status.changed",
+                                                   .timestamp = paperbreak::current_utc_timestamp(),
+                                                   .payload_json = payload.dump(),
+                                                   .binary = {},
+                                                   .coalescing_key = "status.changed"},
+                                                  paperbreak::ipc::PushPolicy::coalesce_latest));
+        }
+    });
+    alarms->set_observer([weak_server](const paperbreak::monitoring::AlarmChange& change) {
+        if (auto server = weak_server.lock())
+        {
+            static_cast<void>(server->try_publish(
+                {.event_name = std::string{paperbreak::monitoring::alarm_change_name(change.kind)},
+                 .timestamp = paperbreak::current_utc_timestamp(),
+                 .payload_json = alarm_push_json(change).dump(),
+                 .binary = {},
+                 .coalescing_key = {}},
+                paperbreak::ipc::PushPolicy::drop_newest));
+        }
+    });
+
     std::vector<std::unique_ptr<paperbreak::service::ILifecycleComponent>> components;
     components.push_back(std::make_unique<ConfigurationLifecycleComponent>(configuration));
     components.push_back(std::make_unique<LoggingLifecycleComponent>(logging));
-    auto status = std::make_shared<paperbreak::service::ServiceStatusStore>();
-    auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
-        configuration->repository, status);
-    auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(commands);
     components.push_back(std::make_unique<IpcLifecycleComponent>(ipc_server));
+    components.push_back(std::make_unique<MonitoringLifecycleComponent>(monitor));
     return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
         success(std::make_unique<HostedRuntime>(std::move(components), std::move(status)));
 }

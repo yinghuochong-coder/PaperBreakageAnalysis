@@ -4,10 +4,15 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdint>
+#include <initializer_list>
+#include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace paperbreak::service
 {
@@ -90,10 +95,270 @@ bool has_only_field(const Json& object, const std::string_view field)
     return object.size() == 1U && object.contains(std::string{field});
 }
 
+bool has_only_fields(const Json& object, const std::initializer_list<std::string_view> fields)
+{
+    for (auto iterator = object.begin(); iterator != object.end(); ++iterator)
+    {
+        const std::string key = iterator.key();
+        if (std::none_of(fields.begin(), fields.end(),
+                         [&key](const std::string_view allowed) { return key == allowed; }))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+Json metric_value_json(const monitoring::MetricValue& value)
+{
+    return std::visit([](const auto& item) { return Json(item); }, value);
+}
+
+Json metric_json(const monitoring::MetricPoint& point)
+{
+    return {{"name", point.name},
+            {"value", metric_value_json(point.value)},
+            {"unit", point.unit},
+            {"available", point.available}};
+}
+
+Json details_json(const std::vector<ErrorDetail>& details)
+{
+    Json result = Json::object();
+    for (const auto& detail : details)
+    {
+        result[detail.key] = detail.value;
+    }
+    return result;
+}
+
+Json alarm_json(const monitoring::AlarmRecord& alarm)
+{
+    return {{"alarmId", alarm.alarm_id},
+            {"revision", alarm.revision},
+            {"code", alarm.code},
+            {"severity", monitoring::severity_name(alarm.severity)},
+            {"source", alarm.source},
+            {"firstOccurredAt", alarm.first_occurred_at},
+            {"lastOccurredAt", alarm.last_occurred_at},
+            {"active", alarm.active},
+            {"occurrenceCount", alarm.occurrence_count},
+            {"message", alarm.message},
+            {"details", details_json(alarm.details)},
+            {"acknowledged", alarm.acknowledged}};
+}
+
+Json log_json(const logging::RecentLogRecord& record)
+{
+    return {{"sequence", record.sequence},
+            {"timestamp", record.timestamp},
+            {"threadId", record.thread_id},
+            {"category", logging::category_name(record.category)},
+            {"level", logging::level_name(record.level)},
+            {"message", record.message}};
+}
+
+Result<std::size_t> bounded_limit(const Json& payload, const std::size_t default_value,
+                                  const std::size_t maximum, const std::string_view operation)
+{
+    if (!payload.contains("limit"))
+    {
+        return Result<std::size_t>::success(default_value);
+    }
+    const Json& value = payload["limit"];
+    if (!(value.is_number_unsigned() || value.is_number_integer()))
+    {
+        return Result<std::size_t>::failure(command_error(
+            "IPC_REQUEST_INVALID", Severity::error, "limit 必须是正整数", std::string{operation}));
+    }
+    const auto signed_value = value.is_number_unsigned() ? 1 : value.get<std::int64_t>();
+    const std::uint64_t parsed = value.is_number_unsigned()
+                                     ? value.get<std::uint64_t>()
+                                     : static_cast<std::uint64_t>(signed_value);
+    if ((!value.is_number_unsigned() && signed_value <= 0) || parsed == 0U || parsed > maximum)
+    {
+        return Result<std::size_t>::failure(command_error(
+            "IPC_REQUEST_INVALID", Severity::error, "limit 超出允许范围", std::string{operation}));
+    }
+    return Result<std::size_t>::success(static_cast<std::size_t>(parsed));
+}
+
+Result<ipc::CommandResponse> metrics_response(const Json& payload,
+                                              monitoring::MetricRegistry& registry)
+{
+    if (!has_only_fields(payload, {"prefixes", "limit"}))
+    {
+        return Result<ipc::CommandResponse>::failure(
+            command_error("IPC_REQUEST_INVALID", Severity::error, "system.getMetrics 包含未知字段",
+                          "ipc.system.getMetrics"));
+    }
+    monitoring::MetricQuery query;
+    auto limit = bounded_limit(payload, 256U, 256U, "ipc.system.getMetrics");
+    if (!limit)
+        return Result<ipc::CommandResponse>::failure(limit.error());
+    query.limit = limit.value();
+    if (payload.contains("prefixes"))
+    {
+        const Json& prefixes = payload["prefixes"];
+        if (!prefixes.is_array() || prefixes.size() > 16U)
+        {
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "prefixes 必须是最多 16 项的数组", "ipc.system.getMetrics"));
+        }
+        for (const auto& prefix : prefixes)
+        {
+            if (!prefix.is_string() || prefix.get_ref<const std::string&>().empty() ||
+                prefix.get_ref<const std::string&>().size() > 64U)
+            {
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error, "指标前缀无效",
+                                  "ipc.system.getMetrics"));
+            }
+            query.prefixes.push_back(prefix.get<std::string>());
+        }
+    }
+    const auto result = registry.query(query);
+    Json metrics = Json::array();
+    for (const auto& point : result.snapshot.metrics)
+        metrics.push_back(metric_json(point));
+    Json response{{"snapshotVersion", result.snapshot.version},
+                  {"sampledAt", result.snapshot.sampled_at},
+                  {"metrics", std::move(metrics)},
+                  {"truncated", result.truncated}};
+    return Result<ipc::CommandResponse>::success({.payload_json = response.dump(), .binary = {}});
+}
+
+Result<ipc::CommandResponse> alarm_list_response(const Json& payload,
+                                                 monitoring::AlarmRegistry& registry)
+{
+    if (!has_only_fields(payload,
+                         {"active", "minimumSeverity", "source", "beforeAlarmId", "limit"}))
+    {
+        return Result<ipc::CommandResponse>::failure(command_error(
+            "IPC_REQUEST_INVALID", Severity::error, "alarm.list 包含未知字段", "ipc.alarm.list"));
+    }
+    monitoring::AlarmQuery query;
+    auto limit = bounded_limit(payload, 100U, 200U, "ipc.alarm.list");
+    if (!limit)
+        return Result<ipc::CommandResponse>::failure(limit.error());
+    query.limit = limit.value();
+    if (payload.contains("active"))
+    {
+        if (!payload["active"].is_boolean())
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error, "active 必须是布尔值", "ipc.alarm.list"));
+        query.active = payload["active"].get<bool>();
+    }
+    if (payload.contains("minimumSeverity"))
+    {
+        if (!payload["minimumSeverity"].is_string())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "minimumSeverity 必须是字符串", "ipc.alarm.list"));
+        query.minimum_severity =
+            monitoring::parse_severity(payload["minimumSeverity"].get<std::string>());
+        if (!query.minimum_severity.has_value())
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error, "minimumSeverity 无效", "ipc.alarm.list"));
+    }
+    if (payload.contains("source"))
+    {
+        if (!payload["source"].is_string() ||
+            payload["source"].get_ref<const std::string&>().empty() ||
+            payload["source"].get_ref<const std::string&>().size() > 128U)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error, "source 无效", "ipc.alarm.list"));
+        query.source = payload["source"].get<std::string>();
+    }
+    if (payload.contains("beforeAlarmId"))
+    {
+        if (!payload["beforeAlarmId"].is_number_unsigned())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "beforeAlarmId 必须是无符号整数", "ipc.alarm.list"));
+        query.before_alarm_id = payload["beforeAlarmId"].get<std::uint64_t>();
+    }
+    const auto result = registry.query(query);
+    Json alarms = Json::array();
+    for (const auto& alarm : result.alarms)
+        alarms.push_back(alarm_json(alarm));
+    Json response{{"registryRevision", result.registry_revision},
+                  {"alarms", std::move(alarms)},
+                  {"truncated", result.truncated}};
+    response["nextBeforeAlarmId"] = result.next_before_alarm_id.has_value()
+                                        ? Json(result.next_before_alarm_id.value())
+                                        : Json{};
+    return Result<ipc::CommandResponse>::success({.payload_json = response.dump(), .binary = {}});
+}
+
+Result<ipc::CommandResponse> log_tail_response(const Json& payload,
+                                               const logging::LoggingRuntime& runtime)
+{
+    if (!has_only_fields(payload, {"afterSequence", "categories", "minimumLevel", "limit"}))
+    {
+        return Result<ipc::CommandResponse>::failure(command_error(
+            "IPC_REQUEST_INVALID", Severity::error, "log.tail 包含未知字段", "ipc.log.tail"));
+    }
+    logging::RecentLogQuery query;
+    auto limit = bounded_limit(payload, 100U, 200U, "ipc.log.tail");
+    if (!limit)
+        return Result<ipc::CommandResponse>::failure(limit.error());
+    query.limit = limit.value();
+    if (payload.contains("afterSequence"))
+    {
+        if (!payload["afterSequence"].is_number_unsigned())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "afterSequence 必须是无符号整数", "ipc.log.tail"));
+        query.after_sequence = payload["afterSequence"].get<std::uint64_t>();
+    }
+    if (payload.contains("categories"))
+    {
+        const Json& categories = payload["categories"];
+        if (!categories.is_array() || categories.size() > 10U)
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "categories 必须是最多 10 项的数组", "ipc.log.tail"));
+        for (const auto& item : categories)
+        {
+            if (!item.is_string())
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error, "日志分类无效", "ipc.log.tail"));
+            const auto parsed = logging::parse_category(item.get<std::string>());
+            if (!parsed.has_value())
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error, "日志分类无效", "ipc.log.tail"));
+            query.categories.push_back(parsed.value());
+        }
+    }
+    if (payload.contains("minimumLevel"))
+    {
+        if (!payload["minimumLevel"].is_string())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_REQUEST_INVALID", Severity::error, "minimumLevel 必须是字符串",
+                              "ipc.log.tail"));
+        query.minimum_level = logging::parse_level(payload["minimumLevel"].get<std::string>());
+        if (!query.minimum_level.has_value())
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error, "minimumLevel 无效", "ipc.log.tail"));
+    }
+    const auto result = runtime.tail(query);
+    Json records = Json::array();
+    for (const auto& record : result.records)
+        records.push_back(log_json(record));
+    Json response{{"firstAvailableSequence", result.first_available_sequence},
+                  {"latestSequence", result.latest_sequence},
+                  {"records", std::move(records)},
+                  {"truncated", result.truncated}};
+    return Result<ipc::CommandResponse>::success({.payload_json = response.dump(), .binary = {}});
+}
+
 } // namespace
 
 void ServiceStatusStore::set_state(const ServiceState state)
 {
+    std::function<void(const ServiceStatusSnapshot&)> observer;
     if (state == ServiceState::starting)
     {
         std::scoped_lock lock{mutex_};
@@ -103,6 +368,26 @@ void ServiceStatusStore::set_state(const ServiceState state)
         }
     }
     state_.store(state, std::memory_order_release);
+    {
+        std::scoped_lock lock{mutex_};
+        observer = observer_;
+    }
+    if (observer)
+    {
+        try
+        {
+            observer(snapshot());
+        }
+        catch (...)
+        {
+        }
+    }
+}
+
+void ServiceStatusStore::set_observer(std::function<void(const ServiceStatusSnapshot&)> observer)
+{
+    std::scoped_lock lock{mutex_};
+    observer_ = std::move(observer);
 }
 
 ServiceStatusSnapshot ServiceStatusStore::snapshot() const
@@ -118,8 +403,12 @@ ServiceStatusSnapshot ServiceStatusStore::snapshot() const
 }
 
 SystemCommandService::SystemCommandService(config::ConfigRepository& repository,
-                                           std::shared_ptr<ServiceStatusStore> status)
-    : repository_(repository), status_(std::move(status))
+                                           std::shared_ptr<ServiceStatusStore> status,
+                                           std::shared_ptr<monitoring::MetricRegistry> metrics,
+                                           std::shared_ptr<monitoring::AlarmRegistry> alarms,
+                                           std::shared_ptr<logging::LoggingRuntime> logging)
+    : repository_(repository), status_(std::move(status)), metrics_(std::move(metrics)),
+      alarms_(std::move(alarms)), logging_(std::move(logging))
 {
 }
 
@@ -152,6 +441,52 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
                               "system.getVersion payload 必须为空", "ipc.system.getVersion"));
         }
         return version_response();
+    }
+    if (request.command == "system.getMetrics")
+    {
+        if (!metrics_)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "SYS_INTERNAL_ERROR", Severity::error, "指标服务未装配", "ipc.system.getMetrics"));
+        return metrics_response(payload.value(), *metrics_);
+    }
+    if (request.command == "alarm.list")
+    {
+        if (!alarms_)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "SYS_INTERNAL_ERROR", Severity::error, "报警服务未装配", "ipc.alarm.list"));
+        return alarm_list_response(payload.value(), *alarms_);
+    }
+    if (request.command == "log.tail")
+    {
+        if (!logging_)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "SYS_INTERNAL_ERROR", Severity::error, "日志服务未装配", "ipc.log.tail"));
+        return log_tail_response(payload.value(), *logging_);
+    }
+    if (request.command == "alarm.acknowledge")
+    {
+        if (!peer.local || !peer.authenticated || !peer.administrator)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_UNAUTHORIZED", Severity::error, "alarm.acknowledge 要求提升后的本机管理员身份",
+                "ipc.alarm.acknowledge"));
+        if (stop_token.stop_requested())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_SERVICE_STOPPING", Severity::warning,
+                              "服务正在停止，拒绝报警确认", "ipc.alarm.acknowledge", true));
+        if (!has_only_field(payload.value(), "alarmId") ||
+            !payload.value()["alarmId"].is_number_unsigned() ||
+            payload.value()["alarmId"].get<std::uint64_t>() == 0U)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error,
+                "alarm.acknowledge 必须且只能包含正整数 alarmId", "ipc.alarm.acknowledge"));
+        if (!alarms_)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "SYS_INTERNAL_ERROR", Severity::error, "报警服务未装配", "ipc.alarm.acknowledge"));
+        auto acknowledged = alarms_->acknowledge(payload.value()["alarmId"].get<std::uint64_t>());
+        if (!acknowledged)
+            return Result<ipc::CommandResponse>::failure(acknowledged.error());
+        return Result<ipc::CommandResponse>::success(
+            {.payload_json = alarm_json(acknowledged.value()).dump(), .binary = {}});
     }
     if (request.command != "system.reloadConfig")
     {

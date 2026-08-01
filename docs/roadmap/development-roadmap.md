@@ -404,6 +404,16 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M1-06 健康、报警和近期日志基础
 
+状态：`completed`
+
+负责人：Codex
+
+开始/完成日期：2026-08-01
+
+执行记录：`.agent/plans/m1-06-health-alarm-log.md`
+
+实现证据（2026-08-01）：新增 `paperbreak_monitoring`，完成 1024 项/64 来源指标注册表、1024 活动/4096 历史报警登记表、Windows/进程/四类目录卷采样、IPC 指标、默认 2048 条近期日志环、健康线程热更新与确定性关闭，以及四条 IPC 命令和四类状态/报警推送。数据库在 M5 前明确报告 `not-initialized`。Debug/Release `/WX` 构建、两套非硬件 CTest、全仓 `format-check`、默认 MSVC 静态分析和 `git diff --check` 均通过；两套 CTest 均为 17/17，unit 入口 87 项。未执行实体相机、MVS SDK、SCM 重启或目标机性能测试。
+
 实施：
 
 - 建立线程安全的指标快照、报警登记表和状态推送接口；

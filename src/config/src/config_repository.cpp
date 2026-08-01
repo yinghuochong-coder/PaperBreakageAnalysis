@@ -495,6 +495,23 @@ Result<ConfigSnapshot> ConfigRepository::snapshot() const
     return Result<ConfigSnapshot>::success(make_snapshot_locked());
 }
 
+Result<void> ConfigRepository::register_applier(IConfigApplier& applier)
+{
+    std::scoped_lock lock{mutex_};
+    if (std::find(appliers_.begin(), appliers_.end(), &applier) != appliers_.end())
+    {
+        return Result<void>::success();
+    }
+    if (!accepting_changes_)
+    {
+        return Result<void>::failure(repository_error("SYS_SERVICE_STOPPING", Severity::warning,
+                                                      "配置仓储已停止接受应用器",
+                                                      "config.registerApplier", true));
+    }
+    appliers_.push_back(&applier);
+    return Result<void>::success();
+}
+
 void ConfigRepository::stop_accepting_changes() noexcept
 {
     std::scoped_lock lock{mutex_};

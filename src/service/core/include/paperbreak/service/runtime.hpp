@@ -47,6 +47,7 @@ enum class ShutdownPhase
     processing,
     event,
     uplink,
+    monitoring,
     ipc,
     logging,
 };

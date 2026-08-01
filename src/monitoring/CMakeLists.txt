@@ -1,26 +1,21 @@
-add_library(paperbreak_service_core STATIC
-    src/runtime.cpp
-    src/system_commands.cpp)
+add_library(paperbreak_monitoring STATIC
+    src/monitoring.cpp)
 
-target_link_libraries(paperbreak_service_core
+target_link_libraries(paperbreak_monitoring
     PUBLIC
         paperbreak_common
-        paperbreak_config
-        paperbreak_ipc
         paperbreak_logging
-        paperbreak_monitoring
         paperbreak_compiler_options)
-target_link_libraries(paperbreak_service_core PRIVATE nlohmann_json::nlohmann_json)
-target_include_directories(paperbreak_service_core
+target_include_directories(paperbreak_monitoring
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
-set_target_properties(paperbreak_service_core PROPERTIES
-    OUTPUT_NAME paperbreak_service_core
+set_target_properties(paperbreak_monitoring PROPERTIES
+    OUTPUT_NAME paperbreak_monitoring
     FOLDER "PaperBreak/Libraries")
 
-install(TARGETS paperbreak_service_core
+install(TARGETS paperbreak_monitoring
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

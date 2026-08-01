@@ -236,9 +236,12 @@ class IpcServer::Impl final
                 std::scoped_lock lock{publish_mutex_};
                 if (publish_queue_.size() >= options_.publish_ingress_capacity)
                 {
+                    pushes_dropped_total_.fetch_add(1U, std::memory_order_relaxed);
                     return false;
                 }
                 publish_queue_.push_back({std::move(push), policy});
+                publish_queue_depth_.store(publish_queue_.size(), std::memory_order_relaxed);
+                update_high_watermark(publish_queue_high_watermark_, publish_queue_.size());
                 if (!publish_posted_)
                 {
                     publish_posted_ = true;
@@ -248,8 +251,11 @@ class IpcServer::Impl final
             if (schedule && !post_event([this] { drain_publishes(); }))
             {
                 std::scoped_lock lock{publish_mutex_};
+                const auto dropped = static_cast<std::uint64_t>(publish_queue_.size());
                 publish_queue_.clear();
+                publish_queue_depth_.store(0U, std::memory_order_relaxed);
                 publish_posted_ = false;
+                pushes_dropped_total_.fetch_add(dropped, std::memory_order_relaxed);
                 return false;
             }
             return true;
@@ -260,13 +266,69 @@ class IpcServer::Impl final
         }
     }
 
+    [[nodiscard]] IpcServerMetrics metrics_snapshot() const noexcept
+    {
+        const std::uint64_t durations = completed_request_count_.load(std::memory_order_relaxed);
+        const std::uint64_t total_microseconds =
+            request_duration_total_us_.load(std::memory_order_relaxed);
+        return {.active_connections = active_connections_.load(std::memory_order_relaxed),
+                .in_flight_requests = in_flight_requests_.load(std::memory_order_relaxed),
+                .command_queue_depth = command_queue_depth_.load(std::memory_order_relaxed),
+                .command_queue_high_watermark =
+                    command_queue_high_watermark_.load(std::memory_order_relaxed),
+                .publish_queue_depth = publish_queue_depth_.load(std::memory_order_relaxed),
+                .publish_queue_high_watermark =
+                    publish_queue_high_watermark_.load(std::memory_order_relaxed),
+                .outbound_messages = outbound_messages_.load(std::memory_order_relaxed),
+                .outbound_bytes = outbound_bytes_.load(std::memory_order_relaxed),
+                .requests_total = requests_total_.load(std::memory_order_relaxed),
+                .responses_total = responses_total_.load(std::memory_order_relaxed),
+                .protocol_errors_total = protocol_errors_total_.load(std::memory_order_relaxed),
+                .pushes_dropped_total = pushes_dropped_total_.load(std::memory_order_relaxed),
+                .average_request_duration_ms = durations == 0U
+                                                   ? 0.0
+                                                   : static_cast<double>(total_microseconds) /
+                                                         static_cast<double>(durations) / 1000.0,
+                .maximum_request_duration_ms =
+                    static_cast<double>(request_duration_max_us_.load(std::memory_order_relaxed)) /
+                    1000.0};
+    }
+
   private:
     struct QueuedCommand final
     {
         std::uint64_t connection_id{};
         RequestMessage request;
         PeerIdentity peer;
+        std::chrono::steady_clock::time_point queued_at;
     };
+
+    static void update_high_watermark(std::atomic_uint64_t& target,
+                                      const std::size_t value) noexcept
+    {
+        std::uint64_t previous = target.load(std::memory_order_relaxed);
+        const auto candidate = static_cast<std::uint64_t>(value);
+        while (candidate > previous &&
+               !target.compare_exchange_weak(previous, candidate, std::memory_order_relaxed))
+        {
+        }
+    }
+
+    void update_outbound_metrics() noexcept
+    {
+        std::uint64_t messages = 0U;
+        std::uint64_t bytes = 0U;
+        for (const auto& [identifier, client] : clients_)
+        {
+            static_cast<void>(identifier);
+            messages +=
+                static_cast<std::uint64_t>(client->responses.size() + client->pushes.size() +
+                                           (client->active.has_value() ? 1U : 0U));
+            bytes += static_cast<std::uint64_t>(client->outbound_bytes);
+        }
+        outbound_messages_.store(messages, std::memory_order_relaxed);
+        outbound_bytes_.store(bytes, std::memory_order_relaxed);
+    }
 
     struct QueuedPublish final
     {
@@ -401,6 +463,9 @@ class IpcServer::Impl final
             client->socket->deleteLater();
         }
         clients_.clear();
+        active_connections_.store(0U, std::memory_order_relaxed);
+        in_flight_requests_.store(0U, std::memory_order_relaxed);
+        update_outbound_metrics();
         {
             std::scoped_lock lock{event_pointer_mutex_};
             event_dispatcher_ = nullptr;
@@ -433,6 +498,7 @@ class IpcServer::Impl final
             auto client = std::make_unique<Client>();
             client->socket = socket;
             clients_.emplace(identifier, std::move(client));
+            active_connections_.store(clients_.size(), std::memory_order_relaxed);
             QObject::connect(socket, &QLocalSocket::readyRead, event_dispatcher_,
                              [this, identifier] { read_client(identifier); });
             QObject::connect(socket, &QLocalSocket::bytesWritten, event_dispatcher_,
@@ -478,6 +544,7 @@ class IpcServer::Impl final
             auto decoded = client.decoder.append(bytes);
             if (!decoded)
             {
+                protocol_errors_total_.fetch_add(1U, std::memory_order_relaxed);
                 abort_client(identifier);
                 return;
             }
@@ -507,6 +574,7 @@ class IpcServer::Impl final
         auto request = decode_request(frame);
         if (!request)
         {
+            protocol_errors_total_.fetch_add(1U, std::memory_order_relaxed);
             const Error& error = request.error();
             if (!error.correlation_id.has_value())
             {
@@ -561,7 +629,8 @@ class IpcServer::Impl final
 
         QueuedCommand command{.connection_id = identifier,
                               .request = std::move(request).value(),
-                              .peer = client.peer.value()};
+                              .peer = client.peer.value(),
+                              .queued_at = std::chrono::steady_clock::now()};
         {
             std::scoped_lock lock{command_mutex_};
             if (!accepting_commands_.load(std::memory_order_acquire) ||
@@ -577,6 +646,10 @@ class IpcServer::Impl final
             }
             ++client.in_flight;
             command_queue_.push_back(std::move(command));
+            requests_total_.fetch_add(1U, std::memory_order_relaxed);
+            in_flight_requests_.fetch_add(1U, std::memory_order_relaxed);
+            command_queue_depth_.store(command_queue_.size(), std::memory_order_relaxed);
+            update_high_watermark(command_queue_high_watermark_, command_queue_.size());
         }
         command_condition_.notify_one();
     }
@@ -637,6 +710,7 @@ class IpcServer::Impl final
                 }
                 command = std::move(command_queue_.front());
                 command_queue_.pop_front();
+                command_queue_depth_.store(command_queue_.size(), std::memory_order_relaxed);
             }
 
             Result<CommandResponse> handled = Result<CommandResponse>::failure(server_error(
@@ -669,12 +743,20 @@ class IpcServer::Impl final
                 error.correlation_id = command.request.request_id;
                 response.error = std::move(error);
             }
+            const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - command.queued_at);
+            const auto duration_us =
+                static_cast<std::uint64_t>(std::max<std::int64_t>(duration.count(), 0));
+            request_duration_total_us_.fetch_add(duration_us, std::memory_order_relaxed);
+            completed_request_count_.fetch_add(1U, std::memory_order_relaxed);
+            update_high_watermark(request_duration_max_us_, static_cast<std::size_t>(duration_us));
             static_cast<void>(post_event([this, identifier = command.connection_id,
                                           response = std::move(response)]() mutable {
                 auto iterator = clients_.find(identifier);
                 if (iterator != clients_.end() && iterator->second->in_flight > 0U)
                 {
                     --iterator->second->in_flight;
+                    in_flight_requests_.fetch_sub(1U, std::memory_order_relaxed);
                     enqueue_response(identifier, std::move(response), false);
                 }
             }));
@@ -716,6 +798,8 @@ class IpcServer::Impl final
         client.outbound_bytes += static_cast<std::size_t>(bytes.size());
         client.responses.push_back(
             {.bytes = std::move(bytes), .kind = OutboundKind::response, .key = {}});
+        responses_total_.fetch_add(1U, std::memory_order_relaxed);
+        update_outbound_metrics();
         client.close_after_flush = client.close_after_flush || close_after;
         pump_client(identifier);
     }
@@ -759,16 +843,23 @@ class IpcServer::Impl final
                 {
                     client.outbound_bytes = without_previous + replacement;
                     existing->bytes = bytes;
+                    update_outbound_metrics();
+                }
+                else
+                {
+                    pushes_dropped_total_.fetch_add(1U, std::memory_order_relaxed);
                 }
                 return;
             }
         }
         if (!can_enqueue(client, static_cast<std::size_t>(bytes.size()), OutboundKind::push))
         {
+            pushes_dropped_total_.fetch_add(1U, std::memory_order_relaxed);
             return;
         }
         client.outbound_bytes += static_cast<std::size_t>(bytes.size());
         client.pushes.push_back({.bytes = bytes, .kind = OutboundKind::push, .key = key});
+        update_outbound_metrics();
     }
 
     void drain_publishes()
@@ -785,6 +876,7 @@ class IpcServer::Impl final
                 }
                 queued = std::move(publish_queue_.front());
                 publish_queue_.pop_front();
+                publish_queue_depth_.store(publish_queue_.size(), std::memory_order_relaxed);
             }
             publish_on_event(queued.push, queued.policy);
         }
@@ -867,6 +959,7 @@ class IpcServer::Impl final
         {
             client.outbound_bytes -= static_cast<std::size_t>(client.active->bytes.size());
             client.active.reset();
+            update_outbound_metrics();
             pump_client(identifier);
         }
     }
@@ -948,7 +1041,14 @@ class IpcServer::Impl final
             return;
         }
         iterator->second->socket->deleteLater();
+        const std::size_t client_in_flight = iterator->second->in_flight;
         clients_.erase(iterator);
+        active_connections_.store(clients_.size(), std::memory_order_relaxed);
+        if (client_in_flight > 0U)
+        {
+            in_flight_requests_.fetch_sub(client_in_flight, std::memory_order_relaxed);
+        }
+        update_outbound_metrics();
     }
 
     std::shared_ptr<IRequestHandler> handler_;
@@ -988,6 +1088,22 @@ class IpcServer::Impl final
     std::unordered_map<std::uint64_t, std::unique_ptr<Client>> clients_;
     std::uint64_t next_connection_id_{1U};
     bool finish_scheduled_{};
+
+    std::atomic_uint64_t active_connections_{};
+    std::atomic_uint64_t in_flight_requests_{};
+    std::atomic_uint64_t command_queue_depth_{};
+    std::atomic_uint64_t command_queue_high_watermark_{};
+    std::atomic_uint64_t publish_queue_depth_{};
+    std::atomic_uint64_t publish_queue_high_watermark_{};
+    std::atomic_uint64_t outbound_messages_{};
+    std::atomic_uint64_t outbound_bytes_{};
+    std::atomic_uint64_t requests_total_{};
+    std::atomic_uint64_t responses_total_{};
+    std::atomic_uint64_t protocol_errors_total_{};
+    std::atomic_uint64_t pushes_dropped_total_{};
+    std::atomic_uint64_t completed_request_count_{};
+    std::atomic_uint64_t request_duration_total_us_{};
+    std::atomic_uint64_t request_duration_max_us_{};
 };
 
 IpcServer::IpcServer(std::shared_ptr<IRequestHandler> handler,
@@ -1016,6 +1132,11 @@ Result<void> IpcServer::join(const std::chrono::steady_clock::time_point deadlin
 bool IpcServer::try_publish(PushMessage push, const PushPolicy policy) noexcept
 {
     return impl_->try_publish(std::move(push), policy);
+}
+
+IpcServerMetrics IpcServer::metrics_snapshot() const noexcept
+{
+    return impl_->metrics_snapshot();
 }
 
 } // namespace paperbreak::ipc
