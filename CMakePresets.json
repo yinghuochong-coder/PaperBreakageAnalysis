@@ -43,6 +43,22 @@
       }
     },
     {
+      "name": "windows-vs2026-hikrobot-debug",
+      "displayName": "Visual Studio 2026 x64 Debug with Hikrobot MVS",
+      "inherits": "windows-vs2026-debug",
+      "cacheVariables": {
+        "PAPERBREAK_ENABLE_HIKROBOT": "ON"
+      }
+    },
+    {
+      "name": "windows-vs2026-hikrobot-release",
+      "displayName": "Visual Studio 2026 x64 Release with Hikrobot MVS",
+      "inherits": "windows-vs2026-release",
+      "cacheVariables": {
+        "PAPERBREAK_ENABLE_HIKROBOT": "ON"
+      }
+    },
+    {
       "name": "windows-vs2026-static-analysis",
       "displayName": "Visual Studio 2026 x64 Static Analysis",
       "inherits": "windows-vs2026-debug",
@@ -64,6 +80,18 @@
     {
       "name": "windows-vs2026-release",
       "configurePreset": "windows-vs2026-release",
+      "configuration": "Release",
+      "jobs": 0
+    },
+    {
+      "name": "windows-vs2026-hikrobot-debug",
+      "configurePreset": "windows-vs2026-hikrobot-debug",
+      "configuration": "Debug",
+      "jobs": 0
+    },
+    {
+      "name": "windows-vs2026-hikrobot-release",
+      "configurePreset": "windows-vs2026-hikrobot-release",
       "configuration": "Release",
       "jobs": 0
     },
@@ -95,6 +123,40 @@
     {
       "name": "windows-vs2026-release",
       "configurePreset": "windows-vs2026-release",
+      "configuration": "Release",
+      "filter": {
+        "exclude": {
+          "label": "hardware-integration"
+        }
+      },
+      "output": {
+        "outputOnFailure": true,
+        "verbosity": "verbose"
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "windows-vs2026-hikrobot-debug",
+      "configurePreset": "windows-vs2026-hikrobot-debug",
+      "configuration": "Debug",
+      "filter": {
+        "exclude": {
+          "label": "hardware-integration"
+        }
+      },
+      "output": {
+        "outputOnFailure": true,
+        "verbosity": "verbose"
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "windows-vs2026-hikrobot-release",
+      "configurePreset": "windows-vs2026-hikrobot-release",
       "configuration": "Release",
       "filter": {
         "exclude": {

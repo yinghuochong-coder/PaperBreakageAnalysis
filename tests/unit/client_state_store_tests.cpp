@@ -125,7 +125,7 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
             ++list_requests;
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json =
-                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"pixelFormat":"Mono8","triggerMode":"Continuous"}}]})",
+                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"pixelFormat":"Mono8","triggerMode":"Continuous"}}],"storedConfigRevision":7,"topologyRestartRequired":false})",
                  .binary = {}});
         }
         ++operation_requests;
@@ -133,8 +133,8 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
         return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
             {.payload_json =
                  request.command == "camera.discover"
-                     ? R"({"devices":[{"model":"Mock","serialNumber":"MOCK-01","ip":"127.0.0.1","transportId":"mock0"}]})"
-                 : request.command == "camera.updateConfig"
+                     ? R"({"devices":[{"model":"Mock","serialNumber":"MOCK-01","ip":"127.0.0.1","networkInterface":"mock0","exclusiveAccessAvailable":true}]})"
+                 : request.command == "camera.updateConfig" || request.command == "camera.bind"
                      ? R"({"saved":true,"dispatched":true,"applied":true,"restartRequired":false})"
                      : R"({"state":"connected"})",
              .binary = {}});
@@ -379,12 +379,20 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     paperbreak::console::CameraClient client([&](const auto& snapshot) { latest = snapshot; },
                                              client_options(name));
     ASSERT_TRUE(client.start());
-    ASSERT_TRUE(wait_until([&] { return !latest.stale && latest.cameras.size() == 1U; }));
+    ASSERT_TRUE(wait_until([&] {
+        return !latest.stale && latest.cameras.size() == 1U &&
+               latest.discovered_devices.size() == 1U && latest.operation.has_value() &&
+               !latest.operation->pending;
+    }));
     const auto& camera = latest.cameras.front();
     EXPECT_EQ(camera.id, "CAM01");
     EXPECT_EQ(camera.saved_config_revision, 7U);
     EXPECT_DOUBLE_EQ(camera.saved.exposure_us.value(), 100.0);
     EXPECT_DOUBLE_EQ(camera.actual.exposure_us.value(), 101.0);
+    EXPECT_EQ(latest.stored_config_revision, 7U);
+    EXPECT_FALSE(latest.topology_restart_required);
+    EXPECT_EQ(latest.discovered_devices.front().network_interface, "mock0");
+    EXPECT_TRUE(latest.discovered_devices.front().exclusive_access_available);
 
     ASSERT_TRUE(client.control("camera.connect", "CAM01"));
     auto busy = client.control("camera.start", "CAM01");
@@ -403,7 +411,7 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     }));
     ASSERT_EQ(latest.discovered_devices.size(), 1U);
     EXPECT_EQ(latest.discovered_devices.front().serial, "MOCK-01");
-    EXPECT_EQ(latest.discovered_devices.front().transport_id, "mock0");
+    EXPECT_EQ(latest.discovered_devices.front().network_interface, "mock0");
 
     auto changed = camera.saved;
     changed.exposure_us = 120.0;
@@ -416,6 +424,14 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     EXPECT_TRUE(latest.operation->dispatched);
     EXPECT_TRUE(latest.operation->applied);
     EXPECT_FALSE(latest.operation->restart_required);
+
+    ASSERT_TRUE(client.bind("CAM02", "MOCK-02", "出口", 7U));
+    ASSERT_TRUE(wait_until([&] {
+        return latest.operation.has_value() && latest.operation->operation == "camera.bind" &&
+               !latest.operation->pending;
+    }));
+    EXPECT_EQ(handler->last_command, "camera.bind");
+    EXPECT_TRUE(latest.operation->saved);
 
     client.stop();
     EXPECT_TRUE(latest.stale);

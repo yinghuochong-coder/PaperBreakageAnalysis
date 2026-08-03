@@ -54,7 +54,8 @@ struct CameraDiscoveredDevice final
     std::string model;
     std::string serial;
     std::string ip;
-    std::string transport_id;
+    std::string network_interface;
+    bool exclusive_access_available{};
 };
 
 struct CameraOperationResult final
@@ -75,6 +76,8 @@ struct CameraClientSnapshot final
     ipc::ClientConnectionSnapshot connection;
     std::vector<CameraClientItem> cameras;
     std::vector<CameraDiscoveredDevice> discovered_devices;
+    std::uint64_t stored_config_revision{};
+    bool topology_restart_required{};
     bool stale{true};
     std::optional<Error> error;
     std::optional<CameraOperationResult> operation;
@@ -94,6 +97,8 @@ class CameraClient final
     void stop() noexcept;
     void refresh();
     [[nodiscard]] Result<void> discover();
+    [[nodiscard]] Result<void> bind(std::string camera_id, std::string serial_number,
+                                    std::string location, std::uint64_t expected_revision);
     [[nodiscard]] Result<void> control(std::string command, std::string camera_id);
     [[nodiscard]] Result<void> update_config(std::string camera_id, std::uint64_t expected_revision,
                                              const CameraParameterValue& parameters);

@@ -1,7 +1,7 @@
 # M4-05：相机配置与实际值回显 ExecPlan
 
 ## 元数据
-- 状态：completed
+- 状态：completed（2026-08-03 整改）
 - 负责人：Codex
 - 创建日期：2026-08-03
 - 最后更新：2026-08-03
@@ -12,13 +12,16 @@
 
 控制台“相机配置”页通过本机 IPC 列出最多四个逻辑相机，展示配置、连接/采集状态、设备描述与服务回读的实际参数。用户可在确认危险操作后执行发现、连接、断开、开始、停止、快照和软件触发，并提交受能力约束的参数更新；结果清楚标示已保存、已下发、已应用、失败或需重启。
 
+2026-08-03 整改补充：修复 `camera.discover` 服务/客户端字段不一致、空配置吞掉发现结果和常用构建未启用生产适配器的问题；新增从真实发现清单绑定空闲逻辑槽位，并为控制端提供跟随系统、浅色和暗黑三种可持久化主题，确保所有输入控件和状态文本具备明确前景/背景色。
+
 ## 范围
 
 ### 范围内
-- 在相机领域接口之上增加服务端受限控制协调器及十个 M4-05 IPC 命令。
+- 在相机领域接口之上增加服务端受限控制协调器及十一个 M4-05 IPC 命令。
 - 使用已存在的 `ICameraProvider`/`ICameraDevice`，使 Mock 相机可作自动化端到端验证；不让 MVS SDK 泄漏至服务或 UI。
 - 增加客户端相机状态模型和 Qt 配置页，并将总览正常相机数接入实际快照。
 - 更新 IPC 文档、路线图和测试。
+- 增加 `camera.bind`、发现后自动展示/绑定、Hikrobot 显式构建预设以及应用级主题控制器。
 
 ### 范围外
 - MVS SDK 的实体设备验证（M3 硬件验证范围）；无 SDK 或硬件时不得模拟成真机。
@@ -85,7 +88,7 @@ ctest --preset windows-vs2026-release
 ```
 
 ### 人工或硬件验证
-- 未执行：需要目标 Windows 工控机、已装配 MVS SDK、至少一台实体相机及管理员身份。
+- 已执行只读 `--probe` 和启用 Hikrobot 服务的临时配置 IPC 发现；真实绑定需要提升后的管理员身份，本次令牌未提升，因此按权限模型被拒绝。未写生产配置、未写相机参数、未取流。
 
 ## 回滚与恢复
 
@@ -93,7 +96,7 @@ ctest --preset windows-vs2026-release
 
 ## 验收标准
 
-- [x] 十个 IPC 命令与权限/DTO/停止语义已测试。
+- [x] 十一个 IPC 命令与权限/DTO/停止语义已测试。
 - [x] UI 通过 IPC 显示保存、下发和实际回读值，危险操作有二次确认。
 - [x] Mock 自动化覆盖实际值回读与失败隔离。
 - [x] Debug/Release 构建与相关 CTest 已实际执行并记录限制。
@@ -102,6 +105,8 @@ ctest --preset windows-vs2026-release
 
 - 2026-08-03：创建计划，状态 in-progress；已确认没有服务端相机控制协调器，且默认配置不启用相机。
 - 2026-08-03：完成控制门面、十个 IPC 命令、原子配置保存、生产适配器接线、控制台模型与配置页；状态 completed。
+- 2026-08-03：用户真机复核发现 M4-05 整改缺陷；只读 probe 枚举到 `MV-CS020-60GM`/`DB1888674`/`192.168.11.115`，主机接口 `192.168.11.102`，但独占访问不可用。确认普通 Debug/Release 缓存为 Mock-only，客户端错误要求 `transportId` 而服务返回 `networkInterface`，且空配置 UI 在渲染发现清单和操作错误前提前返回。计划状态重新置为 in-progress；不修改用户已有日志，不结束未知占用进程。
+- 2026-08-03：完成发现字段、空配置 UI、`camera.bind`、拓扑待重启、显式 Hikrobot 预设和三模式主题整改。最新只读 probe 显示设备已恢复独占可用；启用 Hikrobot 的临时服务 IPC 返回完整发现字段，空配置 list 返回修订与拓扑状态。当前令牌未提升，真机绑定按设计返回 `IPC_UNAUTHORIZED`，临时与生产配置均未改变。计划状态置为 completed。
 
 ## 决策记录
 
@@ -111,6 +116,7 @@ ctest --preset windows-vs2026-release
 ## 意外发现
 
 - 安装测试会先清空 `test-install`；原安装脚本的运行时依赖搜索目录缺少 OpenCV `bin`，因此即使旧安装目录曾有 DLL，重新安装仍会在复制前解析失败。已将 `opencv_core` 的目标目录加入搜索路径。
+- 显式 Hikrobot 预设首次暴露环境变量反斜杠进入安装脚本，以及运行时依赖解析未搜索 MVS x64 Runtime。现已在适配器边界规范路径并将 Runtime 加入部署依赖搜索；路径泄漏扫描显式包含 MVS 根目录和 Runtime，跳过与 PDB/ILK 同类的 MSVC Debug `.lib` 开发产物。
 
 ## 验证证据
 
@@ -121,9 +127,13 @@ ctest --preset windows-vs2026-release
 | 2026-08-03 | `cmake --preset local-windows-vs2026-debug`; `cmake --build --preset local-windows-vs2026-debug --target paperbreak_camera` | 通过 | 确认本机本地预设可构建现有相机模块；未执行全量测试 |
 | 2026-08-03 | Debug/Release `cmake --build --preset local-windows-vs2026-*` | 通过 | 两种配置全量构建成功 |
 | 2026-08-03 | Debug/Release `ctest --preset local-windows-vs2026-*` | 通过 | 完整非硬件 CTest 两种配置均 18/18；通用 unit 入口 164 项 |
+| 2026-08-03 | Mock Debug/Release 全量构建与 CTest | 通过 | `local-windows-vs2026-debug/release` 均全量构建成功；非硬件 CTest 均 18/18，通用 unit 入口 167 项 |
+| 2026-08-03 | Hikrobot Debug/Release 全量构建与 CTest | 通过 | 新增 `windows-vs2026-hikrobot-debug/release` 预设；两种配置构建成功，非硬件 CTest 均 22/22，适配器 27 项，SDK 边界与安装运行树通过 |
+| 2026-08-03 | Qt 离屏 smoke | 通过 | 空配置仍显示发现设备；拓扑待重启禁用设备操作；系统/浅色/暗黑切换、非法设置回退、持久化及成对色值 4.5:1 对比检查通过 |
 | 2026-08-03 | 任务文件 clang-format dry-run；`git diff --check` | 通过 | 项目全局 `format-check` 仍命中无关既有 `preview_client.cpp` 格式差异 |
-| 2026-08-03 | 实体相机/MVS SDK | 未执行 | 当前验证环境未启用生产 SDK 且无实体相机，不宣称硬件验证通过 |
+| 2026-08-03 | `PaperBreakCameraHardwareTest --probe` | 部分通过 | 只读发现目标设备与 IP/网卡，最新状态可独占；硬件门禁仍为 incomplete，未执行取流或故障场景 |
+| 2026-08-03 | 启用 Hikrobot 的临时服务 IPC | 部分通过 | `camera.discover`/空配置 `camera.list` 返回准确结构；当前令牌非提升管理员，`camera.bind` 返回 `IPC_UNAUTHORIZED`，临时配置修订保持 1 |
 
 ## 完成摘要
 
-已完成厂商无关的相机控制会话、十个服务 IPC 命令、配置原子保存与设备回读、控制台模型和 Qt 配置页。启用 Hikrobot 的生产构建会注入现有 MVS 提供者；未启用 SDK 时明确降级。Mock 自动化、安装树启动检查与 Debug/Release 完整非硬件验证通过；仅保留实体硬件验证限制。
+已完成厂商无关的相机控制会话、十一个服务 IPC 命令、配置原子保存与设备回读、控制台模型、绑定页面和应用级主题。启用 Hikrobot 的生产构建会注入现有 MVS 提供者；未启用 SDK 时提供可操作构建提示。Mock/Hikrobot Debug/Release、Qt 离屏、SDK 边界和运行时安装树验证通过；已只读验证真机发现，真实绑定仍受当前非提升管理员令牌限制，未宣称取流或故障场景通过。

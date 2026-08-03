@@ -130,8 +130,8 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | --- | --- | ---: | --- |
 | `CAMERA_NOT_FOUND` | Error | 是 | 绑定的实体相机未枚举到；该路进入断开/恢复，其他路继续 |
 | `CAMERA_OPEN_FAILED` | Error | 是 | 设备打开失败且不是更明确的访问拒绝；保留 MVS 原始码 |
-| `CAMERA_ACCESS_DENIED` | Error | 是 | 相机被占用或权限不足；不得紧循环重试 |
-| `CAMERA_CONFIG_FAILED` | Error | 否 | 参数不受设备能力支持、范围/步进/组合非法或发现重复序列号；在触达 SDK 前拒绝请求 |
+| `CAMERA_ACCESS_DENIED` | Error | 是 | 相机被占用、不可独占访问或权限不足；绑定不得修改配置，且不得紧循环重试 |
+| `CAMERA_CONFIG_FAILED` | Error | 否 | 参数不受设备能力支持、范围/步进/组合非法、发现重复序列号，或绑定槽位/序列号/目标型号冲突；可在触达 SDK 前判断的请求必须提前拒绝 |
 | `CAMERA_PARAMETER_READ_FAILED` | Error | 是 | 参数能力或当前值读取失败；保留 MVS 原始码，不把不完整快照报告为成功 |
 | `CAMERA_PARAMETER_WRITE_FAILED` | Error | 是 | 参数写入或写后回读失败；尝试恢复旧快照并恢复原采集状态 |
 | `CAMERA_PARAMETER_FAULTED` | Critical | 否 | 参数事务无法恢复旧快照或原采集状态；锁定当前连接会话的参数操作，要求断开重连 |

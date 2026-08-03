@@ -9,4 +9,4 @@
 *.suo
 *.VC.db
 *.VC.opendb
-
+config/data/logs/*.log

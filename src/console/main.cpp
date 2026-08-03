@@ -10,8 +10,11 @@
 
 #include <QApplication>
 #include <QDesktopServices>
+#include <QDir>
+#include <QFile>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QSettings>
 #include <QTimer>
 #include <QUrl>
 
@@ -48,11 +51,24 @@ int main(int argc, char* argv[])
 
     QApplication application(argc, argv);
     QApplication::setApplicationName(QStringLiteral("PaperBreakEdgeConsole"));
+    QApplication::setOrganizationName(QStringLiteral("PaperBreak"));
+    QApplication::setOrganizationDomain(QStringLiteral("paperbreak.local"));
     QApplication::setApplicationVersion(QString::fromUtf8(
         paperbreak::version_info().application_version.data(),
         static_cast<qsizetype>(paperbreak::version_info().application_version.size())));
     QApplication::setQuitOnLastWindowClosed(false);
     const bool smoke_test = has_argument(argc, argv, "--smoke-test");
+    const QString smoke_theme_settings =
+        smoke_test ? QDir::current().filePath(QStringLiteral("paperbreak-theme-smoke.ini"))
+                   : QString{};
+    if (smoke_test)
+    {
+        static_cast<void>(QFile::remove(smoke_theme_settings));
+        QSettings invalid_settings{smoke_theme_settings, QSettings::IniFormat};
+        invalid_settings.setValue(QStringLiteral("ui/theme"), QStringLiteral("invalid"));
+        invalid_settings.sync();
+    }
+    paperbreak::console::ThemeController theme_controller(application, true, smoke_theme_settings);
 
     paperbreak::logging::LoggingConfig log_config;
     log_config.directory = std::filesystem::temp_directory_path() / "PaperBreakEdge" / "logs";
@@ -77,6 +93,16 @@ int main(int argc, char* argv[])
                      "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "相机客户端尚未初始化",
                      "console", "console.camera.discover", true));
              },
+         .bind =
+             [&camera_client](std::string camera_id, std::string serial_number,
+                              std::string location, const std::uint64_t expected_revision) {
+                 if (camera_client)
+                     return camera_client->bind(std::move(camera_id), std::move(serial_number),
+                                                std::move(location), expected_revision);
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "相机客户端尚未初始化",
+                     "console", "console.camera.bind", true));
+             },
          .control =
              [&camera_client](std::string command, std::string camera_id) {
                  if (camera_client)
@@ -94,7 +120,11 @@ int main(int argc, char* argv[])
                  return paperbreak::Result<void>::failure(paperbreak::make_error(
                      "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "相机客户端尚未初始化",
                      "console", "console.camera.updateConfig", true));
-             }});
+             }},
+        {.initial_mode = theme_controller.mode(),
+         .set_mode = [&theme_controller](const paperbreak::console::ThemeMode mode) {
+             theme_controller.set_mode(mode);
+         }});
     preview_client = std::make_unique<paperbreak::console::PreviewClient>(
         [&main_window](const paperbreak::console::PreviewSnapshot& snapshot) {
             main_window.apply_preview_snapshot(snapshot);
@@ -224,11 +254,44 @@ int main(int argc, char* argv[])
     bool smoke_ok = true;
     if (smoke_test)
     {
+        paperbreak::console::CameraClientSnapshot camera_smoke;
+        camera_smoke.stale = false;
+        camera_smoke.stored_config_revision = 1U;
+        camera_smoke.discovered_devices.push_back({.model = "MV-CS020-60GM",
+                                                   .serial = "SMOKE-01",
+                                                   .ip = "192.0.2.10",
+                                                   .network_interface = "192.0.2.1",
+                                                   .exclusive_access_available = false});
+        main_window.apply_camera_snapshot(camera_smoke);
+        const bool empty_configuration_kept_discovery =
+            main_window.discovered_camera_count() == 1U &&
+            main_window.camera_device_controls_disabled();
+        camera_smoke.cameras.push_back({.id = "CAM01", .state = "disconnected"});
+        camera_smoke.discovered_devices.front().exclusive_access_available = true;
+        camera_smoke.topology_restart_required = true;
+        main_window.apply_camera_snapshot(camera_smoke);
+        const bool restart_state_disabled_controls = main_window.camera_device_controls_disabled();
+        const bool invalid_theme_fell_back =
+            theme_controller.mode() == paperbreak::console::ThemeMode::system;
+        const bool selected_light =
+            main_window.select_theme_mode(paperbreak::console::ThemeMode::light);
+        const bool selected_dark =
+            main_window.select_theme_mode(paperbreak::console::ThemeMode::dark);
+        QSettings persisted_settings{smoke_theme_settings, QSettings::IniFormat};
+        persisted_settings.sync();
+        const bool dark_theme_persisted =
+            persisted_settings.value(QStringLiteral("ui/theme")).toString() ==
+            QStringLiteral("dark");
+        const bool selected_system =
+            main_window.select_theme_mode(paperbreak::console::ThemeMode::system);
         smoke_ok = tray.is_visible() && main_window.isVisible() && tray.action_count() == 8U &&
                    !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
-                   main_window.camera_configuration_ready() && main_window.select_page(11U) &&
-                   main_window.select_page(0U);
+                   main_window.camera_configuration_ready() && empty_configuration_kept_discovery &&
+                   restart_state_disabled_controls &&
+                   theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
+                   selected_light && selected_dark && dark_theme_persisted && selected_system &&
+                   main_window.select_page(11U) && main_window.select_page(0U);
         for (int iteration = 0; iteration < 20 && smoke_ok; ++iteration)
         {
             main_window.close();
@@ -239,12 +302,16 @@ int main(int argc, char* argv[])
     }
     if (!smoke_ok)
     {
+        if (smoke_test)
+            static_cast<void>(QFile::remove(smoke_theme_settings));
         state_store.stop();
         main_window.hide();
         tray.hide();
         static_cast<void>(logging->shutdown());
         return 2;
     }
+    if (smoke_test)
+        static_cast<void>(QFile::remove(smoke_theme_settings));
 
     QTimer refresh_timer;
     QObject::connect(&refresh_timer, &QTimer::timeout,

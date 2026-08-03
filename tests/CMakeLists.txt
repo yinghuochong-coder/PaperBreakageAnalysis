@@ -199,7 +199,17 @@ set_tests_properties(hikrobot_sdk_boundary PROPERTIES LABELS "integration")
 
 set(path_scan_inputs "$ENV{PAPERBREAK_QT_ROOT}|${OpenCV_DIR}|$ENV{VCPKG_ROOT}")
 if(PAPERBREAK_ENABLE_HIKROBOT)
-    string(APPEND path_scan_inputs "|${PAPERBREAK_MVS_ROOT}|${PAPERBREAK_MVS_RUNTIME_DIR}")
+    if(DEFINED PAPERBREAK_MVS_ROOT AND NOT PAPERBREAK_MVS_ROOT STREQUAL "")
+        set(path_scan_mvs_root "${PAPERBREAK_MVS_ROOT}")
+    else()
+        set(path_scan_mvs_root "$ENV{PAPERBREAK_MVS_ROOT}")
+    endif()
+    if(DEFINED PAPERBREAK_MVS_RUNTIME_DIR AND NOT PAPERBREAK_MVS_RUNTIME_DIR STREQUAL "")
+        set(path_scan_mvs_runtime "${PAPERBREAK_MVS_RUNTIME_DIR}")
+    else()
+        set(path_scan_mvs_runtime "$ENV{PAPERBREAK_MVS_RUNTIME_DIR}")
+    endif()
+    string(APPEND path_scan_inputs "|${path_scan_mvs_root}|${path_scan_mvs_runtime}")
 endif()
 add_test(NAME install_tree_no_sdk_path_leaks
     COMMAND "${CMAKE_COMMAND}"

@@ -19,7 +19,10 @@ endif()
 string(REPLACE "|" ";" forbidden_paths "${FORBIDDEN_PATHS}")
 file(GLOB_RECURSE installed_files LIST_DIRECTORIES FALSE "${INSTALL_DIR}/*")
 foreach(installed_file IN LISTS installed_files)
-    if(installed_file MATCHES "\\.(pdb|ilk)$")
+    # MSVC Debug static/import libraries contain compiler include paths just like PDB/ILK files.
+    # They are development artifacts; deployment path-leak validation applies to runtime and data
+    # files that are loaded on the target machine.
+    if(installed_file MATCHES "\\.(pdb|ilk|lib)$")
         continue()
     endif()
     file(STRINGS "${installed_file}" file_strings LIMIT_COUNT 100000)

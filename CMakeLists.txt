@@ -79,11 +79,22 @@ if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
+set(paperbreak_runtime_dependency_dirs
+    "$<TARGET_FILE_DIR:spdlog::spdlog>"
+    "$<TARGET_FILE_DIR:Qt6::Core>"
+    "$<TARGET_FILE_DIR:opencv_core>")
+if(PAPERBREAK_ENABLE_HIKROBOT)
+    if(DEFINED PAPERBREAK_MVS_RUNTIME_DIR AND NOT PAPERBREAK_MVS_RUNTIME_DIR STREQUAL "")
+        set(paperbreak_runtime_dependency_mvs_dir "${PAPERBREAK_MVS_RUNTIME_DIR}")
+    else()
+        set(paperbreak_runtime_dependency_mvs_dir "$ENV{PAPERBREAK_MVS_RUNTIME_DIR}")
+    endif()
+    cmake_path(CONVERT "${paperbreak_runtime_dependency_mvs_dir}" TO_CMAKE_PATH_LIST
+        paperbreak_runtime_dependency_mvs_dir NORMALIZE)
+    list(APPEND paperbreak_runtime_dependency_dirs "${paperbreak_runtime_dependency_mvs_dir}")
+endif()
 install(RUNTIME_DEPENDENCY_SET paperbreak_service_runtime
-    DIRECTORIES
-        "$<TARGET_FILE_DIR:spdlog::spdlog>"
-        "$<TARGET_FILE_DIR:Qt6::Core>"
-        "$<TARGET_FILE_DIR:opencv_core>"
+    DIRECTORIES ${paperbreak_runtime_dependency_dirs}
     PRE_EXCLUDE_REGEXES
         "api-ms-.*"
         "ext-ms-.*"

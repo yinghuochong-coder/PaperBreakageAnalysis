@@ -22,7 +22,8 @@ set_target_properties(paperbreak_console_model PROPERTIES
 add_executable(PaperBreakEdgeConsole WIN32
     main.cpp
     src/main_window.cpp
-    src/system_tray_controller.cpp)
+    src/system_tray_controller.cpp
+    src/theme_controller.cpp)
 target_link_libraries(PaperBreakEdgeConsole
     PRIVATE
         paperbreak_common

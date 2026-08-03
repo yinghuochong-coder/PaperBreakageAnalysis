@@ -7,6 +7,7 @@
 #include "paperbreak/camera/control.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
@@ -29,6 +30,15 @@ Error command_error(std::string code, const Severity severity, std::string messa
 {
     return make_error(std::move(code), severity, std::move(message), "ipc", std::move(operation),
                       retryable);
+}
+
+Error hikrobot_build_required(std::string operation)
+{
+    return command_error("SYS_NOT_SUPPORTED", Severity::warning,
+                         "当前服务为 Mock-only 构建，未启用 Hikrobot MVS；请使用 "
+                         "windows-vs2026-hikrobot-debug 或 windows-vs2026-hikrobot-release "
+                         "预设重新构建并部署服务",
+                         std::move(operation));
 }
 
 Result<Json> request_payload(const ipc::RequestMessage& request)
@@ -393,9 +403,15 @@ Result<ipc::CommandResponse> log_tail_response(const Json& payload,
 bool is_camera_write_command(const std::string_view command)
 {
     return command == "camera.connect" || command == "camera.disconnect" ||
-           command == "camera.start" || command == "camera.stop" ||
+           command == "camera.start" || command == "camera.stop" || command == "camera.bind" ||
            command == "camera.updateConfig" || command == "camera.captureSnapshot" ||
            command == "camera.softwareTrigger";
+}
+
+bool topology_restart_required(const config::ConfigSnapshot& snapshot)
+{
+    return std::find(snapshot.pending_restart_paths.begin(), snapshot.pending_restart_paths.end(),
+                     "/cameras") != snapshot.pending_restart_paths.end();
 }
 
 Result<std::string> camera_id(const Json& payload, const std::string_view operation)
@@ -577,6 +593,78 @@ camera::CameraParameterSnapshot camera_parameters(const config::CameraConfig& va
     return result;
 }
 
+Result<Json> bound_camera_json(const std::string& id, const std::string& serial,
+                               const std::string& location,
+                               const camera::CameraControlSnapshot& snapshot)
+{
+    if (!snapshot.actual)
+    {
+        return Result<Json>::failure(command_error(
+            "CAMERA_PARAMETER_READ_FAILED", Severity::error,
+            snapshot.last_error ? snapshot.last_error->message : "无法读取相机当前参数",
+            "ipc.camera.bind"));
+    }
+    const auto& actual = *snapshot.actual;
+    if (!actual.exposure_us || !actual.gain_db || !actual.frame_rate || !actual.roi ||
+        !actual.pixel_format || !actual.trigger_mode || !actual.trigger_delay_us ||
+        !actual.packet_size_bytes || !actual.inter_packet_delay_ns)
+    {
+        return Result<Json>::failure(command_error("CAMERA_PARAMETER_READ_FAILED", Severity::error,
+                                                   "相机没有返回创建配置所需的完整参数",
+                                                   "ipc.camera.bind"));
+    }
+
+    std::string pixel_format;
+    switch (*actual.pixel_format)
+    {
+    case camera::PixelFormat::mono8:
+        pixel_format = "Mono8";
+        break;
+    case camera::PixelFormat::mono10:
+        pixel_format = "Mono10";
+        break;
+    case camera::PixelFormat::mono12:
+        pixel_format = "Mono12";
+        break;
+    case camera::PixelFormat::bayer_rg8:
+        pixel_format = "BayerRG8";
+        break;
+    }
+
+    std::string trigger_mode;
+    switch (*actual.trigger_mode)
+    {
+    case camera::TriggerMode::continuous:
+        trigger_mode = "Continuous";
+        break;
+    case camera::TriggerMode::hardware:
+        trigger_mode = "Hardware";
+        break;
+    case camera::TriggerMode::software:
+        trigger_mode = "Software";
+        break;
+    }
+
+    return Result<Json>::success({{"id", id},
+                                  {"enabled", true},
+                                  {"serialNumber", serial},
+                                  {"location", location},
+                                  {"exposureUs", *actual.exposure_us},
+                                  {"gainDb", *actual.gain_db},
+                                  {"frameRate", *actual.frame_rate},
+                                  {"roi",
+                                   {{"width", actual.roi->width},
+                                    {"height", actual.roi->height},
+                                    {"offsetX", actual.roi->offset_x},
+                                    {"offsetY", actual.roi->offset_y}}},
+                                  {"pixelFormat", std::move(pixel_format)},
+                                  {"triggerMode", std::move(trigger_mode)},
+                                  {"triggerSource", actual.trigger_source.value_or("")},
+                                  {"triggerDelayUs", *actual.trigger_delay_us},
+                                  {"packetSizeBytes", *actual.packet_size_bytes},
+                                  {"interPacketDelayNs", *actual.inter_packet_delay_ns}});
+}
+
 } // namespace
 
 void ServiceStatusStore::set_state(const ServiceState state)
@@ -654,8 +742,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
     {
         if (!cameras_)
             return Result<ipc::CommandResponse>::failure(
-                command_error("SYS_NOT_SUPPORTED", Severity::warning, "相机控制运行时尚未装配",
-                              "ipc.camera.dispatch"));
+                hikrobot_build_required("ipc.camera.dispatch"));
         if (is_camera_write_command(request.command) &&
             (!peer.local || !peer.authenticated || !peer.administrator))
             return Result<ipc::CommandResponse>::failure(
@@ -673,7 +760,12 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
                                   "camera.discover payload 必须为空", "ipc.camera.discover"));
             auto discovered = cameras_->discover();
             if (!discovered)
+            {
+                if (discovered.error().business_code == "SYS_NOT_SUPPORTED")
+                    return Result<ipc::CommandResponse>::failure(
+                        hikrobot_build_required("ipc.camera.discover"));
                 return Result<ipc::CommandResponse>::failure(discovered.error());
+            }
             Json devices = Json::array();
             for (const auto& d : discovered.value())
                 devices.push_back({{"model", d.model_name},
@@ -708,11 +800,129 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
                 list.push_back(std::move(json));
             }
             return Result<ipc::CommandResponse>::success(
-                {.payload_json = Json{{"cameras", std::move(list)}}.dump(), .binary = {}});
+                {.payload_json =
+                     Json{{"cameras", std::move(list)},
+                          {"storedConfigRevision", config.value().stored_config_revision},
+                          {"topologyRestartRequired", topology_restart_required(config.value())}}
+                         .dump(),
+                 .binary = {}});
         }
         auto id = camera_id(payload.value(), "ipc.camera");
         if (!id)
             return Result<ipc::CommandResponse>::failure(id.error());
+        if (request.command == "camera.bind")
+        {
+            if (!has_only_fields(payload.value(), {"cameraId", "serialNumber", "location",
+                                                   "expectedConfigRevision"}) ||
+                !payload.value().contains("serialNumber") ||
+                !payload.value()["serialNumber"].is_string() ||
+                !payload.value().contains("location") || !payload.value()["location"].is_string() ||
+                !payload.value().contains("expectedConfigRevision") ||
+                !payload.value()["expectedConfigRevision"].is_number_unsigned())
+            {
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error,
+                    "camera.bind 需要 cameraId、serialNumber、location 和 expectedConfigRevision",
+                    "ipc.camera.bind"));
+            }
+            const std::string serial = payload.value()["serialNumber"].get<std::string>();
+            const std::string location = payload.value()["location"].get<std::string>();
+            constexpr std::array valid_slots{"CAM01", "CAM02", "CAM03", "CAM04"};
+            if (std::ranges::find(valid_slots, id.value()) == valid_slots.end() || serial.empty() ||
+                serial.size() > 128U || location.empty() || location.size() > 128U ||
+                location.find_first_not_of(" \t\r\n") == std::string::npos)
+            {
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "逻辑槽位、相机序列号或安装位置无效", "ipc.camera.bind"));
+            }
+
+            auto config = repository_.snapshot();
+            if (!config)
+                return Result<ipc::CommandResponse>::failure(config.error());
+            if (payload.value()["expectedConfigRevision"].get<std::uint64_t>() !=
+                config.value().stored_config_revision)
+            {
+                Error error = command_error("SYS_CONFIG_VERSION_CONFLICT", Severity::warning,
+                                            "配置修订与当前版本冲突", "ipc.camera.bind");
+                error.details.push_back({"currentConfigRevision",
+                                         std::to_string(config.value().stored_config_revision)});
+                return Result<ipc::CommandResponse>::failure(std::move(error));
+            }
+            if (config.value().stored->cameras.size() >= 4U ||
+                std::ranges::any_of(config.value().stored->cameras,
+                                    [&](const auto& item) { return item.id == id.value(); }))
+            {
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("CAMERA_CONFIG_FAILED", Severity::error,
+                                  "逻辑相机槽位已被占用或已达到四路上限", "ipc.camera.bind"));
+            }
+            if (std::ranges::any_of(config.value().stored->cameras,
+                                    [&](const auto& item) { return item.serial_number == serial; }))
+            {
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("CAMERA_CONFIG_FAILED", Severity::error,
+                                  "该序列号已经绑定到其他逻辑相机", "ipc.camera.bind"));
+            }
+
+            auto discovered = cameras_->discover();
+            if (!discovered)
+            {
+                if (discovered.error().business_code == "SYS_NOT_SUPPORTED")
+                    return Result<ipc::CommandResponse>::failure(
+                        hikrobot_build_required("ipc.camera.bind"));
+                return Result<ipc::CommandResponse>::failure(discovered.error());
+            }
+            auto device = camera::find_device_by_serial(discovered.value(), serial);
+            if (!device)
+                return Result<ipc::CommandResponse>::failure(device.error());
+            if (device.value().model_name != "MV-CS020-60GM")
+            {
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("CAMERA_CONFIG_FAILED", Severity::error,
+                                  "仅允许绑定已批准型号 MV-CS020-60GM", "ipc.camera.bind"));
+            }
+            if (!device.value().exclusive_access_available)
+            {
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "CAMERA_ACCESS_DENIED", Severity::error,
+                    "相机正被其他程序占用，无法读取参数并完成绑定", "ipc.camera.bind", true));
+            }
+
+            auto connected = cameras_->connect(id.value(), serial);
+            if (!connected)
+                return Result<ipc::CommandResponse>::failure(connected.error());
+            auto candidate = bound_camera_json(id.value(), serial, location, connected.value());
+            auto disconnected = cameras_->disconnect(id.value());
+            if (!disconnected)
+                return Result<ipc::CommandResponse>::failure(disconnected.error());
+            if (!candidate)
+                return Result<ipc::CommandResponse>::failure(candidate.error());
+
+            Json document = Json::parse(config::serialize_config(*config.value().stored));
+            document["cameras"].push_back(std::move(candidate).value());
+            std::sort(document["cameras"].begin(), document["cameras"].end(),
+                      [](const Json& left, const Json& right) {
+                          return left.at("id").get<std::string>() <
+                                 right.at("id").get<std::string>();
+                      });
+            auto saved = repository_.update(
+                document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
+                {.source = config::ConfigChangeSource::local_ipc,
+                 .actor = peer.actor_sid,
+                 .correlation_id = request.request_id});
+            if (!saved)
+                return Result<ipc::CommandResponse>::failure(saved.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{{"saved", true},
+                          {"dispatched", false},
+                          {"applied", false},
+                          {"restartRequired", true},
+                          {"storedConfigRevision", saved.value().stored_config_revision}}
+                         .dump(),
+                 .binary = {}});
+        }
         if (request.command != "camera.updateConfig" &&
             !has_only_field(payload.value(), "cameraId"))
             return Result<ipc::CommandResponse>::failure(command_error(

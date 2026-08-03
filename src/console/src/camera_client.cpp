@@ -36,14 +36,17 @@ Result<std::vector<CameraDiscoveredDevice>> parse_discovered_devices(const Json&
     {
         if (!item.is_object() || !item.contains("model") || !item["model"].is_string() ||
             !item.contains("serialNumber") || !item["serialNumber"].is_string() ||
-            !item.contains("ip") || !item["ip"].is_string() || !item.contains("transportId") ||
-            !item["transportId"].is_string())
+            !item.contains("ip") || !item["ip"].is_string() || !item.contains("networkInterface") ||
+            !item["networkInterface"].is_string() || !item.contains("exclusiveAccessAvailable") ||
+            !item["exclusiveAccessAvailable"].is_boolean())
             return Result<std::vector<CameraDiscoveredDevice>>::failure(
                 protocol_error("camera.discover 设备项结构无效"));
-        devices.push_back({.model = item["model"].get<std::string>(),
-                           .serial = item["serialNumber"].get<std::string>(),
-                           .ip = item["ip"].get<std::string>(),
-                           .transport_id = item["transportId"].get<std::string>()});
+        devices.push_back(
+            {.model = item["model"].get<std::string>(),
+             .serial = item["serialNumber"].get<std::string>(),
+             .ip = item["ip"].get<std::string>(),
+             .network_interface = item["networkInterface"].get<std::string>(),
+             .exclusive_access_available = item["exclusiveAccessAvailable"].get<bool>()});
     }
     return Result<std::vector<CameraDiscoveredDevice>>::success(std::move(devices));
 }
@@ -161,7 +164,10 @@ void CameraClient::connection_changed(const ipc::ClientConnectionSnapshot& conne
         operation_request_.reset();
     }
     else
+    {
         refresh();
+        static_cast<void>(discover());
+    }
     notify();
 }
 
@@ -198,7 +204,10 @@ void CameraClient::list_completed(ipc::ClientRequestHandle handle,
     }
     const Json payload = Json::parse(result.value().payload_json, nullptr, false);
     if (payload.is_discarded() || !payload.contains("cameras") || !payload["cameras"].is_array() ||
-        payload["cameras"].size() > 4U)
+        payload["cameras"].size() > 4U || !payload.contains("storedConfigRevision") ||
+        !payload["storedConfigRevision"].is_number_unsigned() ||
+        !payload.contains("topologyRestartRequired") ||
+        !payload["topologyRestartRequired"].is_boolean())
     {
         snapshot_.error = protocol_error("camera.list 响应结构无效");
         snapshot_.stale = true;
@@ -242,6 +251,8 @@ void CameraClient::list_completed(ipc::ClientRequestHandle handle,
         items.push_back(std::move(value));
     }
     snapshot_.cameras = std::move(items);
+    snapshot_.stored_config_revision = payload["storedConfigRevision"].get<std::uint64_t>();
+    snapshot_.topology_restart_required = payload["topologyRestartRequired"].get<bool>();
     snapshot_.stale = false;
     snapshot_.error.reset();
     notify();
@@ -250,6 +261,18 @@ void CameraClient::list_completed(ipc::ClientRequestHandle handle,
 Result<void> CameraClient::discover()
 {
     return send_operation("camera.discover", {}, "{}");
+}
+
+Result<void> CameraClient::bind(std::string camera_id, std::string serial_number,
+                                std::string location, const std::uint64_t expected_revision)
+{
+    const std::string payload = Json{
+        {"cameraId", camera_id},
+        {"serialNumber", std::move(serial_number)},
+        {"location", std::move(location)},
+        {"expectedConfigRevision",
+         expected_revision}}.dump();
+    return send_operation("camera.bind", std::move(camera_id), payload);
 }
 
 Result<void> CameraClient::control(std::string command, std::string camera_id)

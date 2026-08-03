@@ -211,10 +211,28 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 ### 相机查询与控制
 
 `camera.list` 和 `camera.discover` 允许已认证本机用户调用，payload 必须为空。`camera.list`
-最多返回四个配置槽位，每项包含 `cameraId`、`location`、`enabled`、`serialNumber`、
-`state`、`savedConfigRevision`、完整 `saved` 参数，以及设备已连接时的 `device` 和服务回读
-`actual` 参数。`camera.discover` 返回厂商无关的型号、序列号、IP、网卡和独占访问状态；未装配
-设备提供者时返回 `SYS_NOT_SUPPORTED`，不得伪造设备。
+返回顶层 `storedConfigRevision`、`topologyRestartRequired` 和最多四个配置槽位 `cameras`；
+每个槽位包含 `cameraId`、`location`、`enabled`、`serialNumber`、`state`、
+`savedConfigRevision`、完整 `saved` 参数，以及设备已连接时的 `device` 和服务回读 `actual`
+参数。`topologyRestartRequired=true` 表示保存的相机拓扑与当前运行拓扑不同，连接、采集和参数
+下发均应等待服务重启。
+
+`camera.discover` 返回结构如下；字段名是 IPC v1 的固定名称：
+
+```json
+{
+  "devices":[{
+    "model":"MV-CS020-60GM",
+    "serialNumber":"DB1888674",
+    "ip":"192.168.11.115",
+    "networkInterface":"192.168.11.102",
+    "exclusiveAccessAvailable":false
+  }]
+}
+```
+
+未装配设备提供者的 Mock-only 服务返回 `SYS_NOT_SUPPORTED`，不得伪造设备。客户端在连接成功后
+自动发现一次，也可以显式重新发现；发现结果不依赖是否已有配置槽位。
 
 `camera.getConfig` 允许已认证本机用户调用；其余相机控制命令要求提升后的本机管理员身份。
 除 `camera.updateConfig` 外，单相机命令 payload 必须且只能包含：
@@ -227,6 +245,23 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 `camera.getConfig`、`camera.captureSnapshot` 和 `camera.softwareTrigger`。连接时服务把当前保存参数
 下发给设备并回读实际值；断开会先停止仍在进行的采集。`camera.captureSnapshot` 只返回帧号、宽和高，
 不在 IPC 工作线程进行磁盘写入或 JPEG 编码。软件触发仅在设备实际处于软件触发采集模式时成功。
+
+`camera.bind` 要求提升后的本机管理员身份，payload 为：
+
+```json
+{
+  "cameraId":"CAM01",
+  "serialNumber":"DB1888674",
+  "location":"用户填写的安装位置",
+  "expectedConfigRevision":1
+}
+```
+
+服务每次绑定都重新枚举设备，仅接受尚未使用的 `CAM01`～`CAM04`、尚未绑定的序列号和批准型号
+`MV-CS020-60GM`。设备必须可独占访问；服务连接设备、完整回读当前参数并成功断开后，才通过配置
+仓储乐观修订与原子替换保存。占用、型号不符、参数回读失败、修订冲突、断开失败或持久化失败均不
+修改配置。成功响应包含 `saved=true`、新的 `storedConfigRevision` 与
+`restartRequired=true`；客户端只提示用户通过既有入口重启服务，不自动重启。
 
 `camera.updateConfig` payload：
 

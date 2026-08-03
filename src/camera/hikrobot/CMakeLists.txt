@@ -10,6 +10,7 @@ if(NOT DEFINED PAPERBREAK_MVS_ROOT OR PAPERBREAK_MVS_ROOT STREQUAL "")
             "CMakeUserPresets.json or the PAPERBREAK_MVS_ROOT environment variable.")
     endif()
 endif()
+cmake_path(CONVERT "${PAPERBREAK_MVS_ROOT}" TO_CMAKE_PATH_LIST PAPERBREAK_MVS_ROOT NORMALIZE)
 if(NOT IS_DIRECTORY "${PAPERBREAK_MVS_ROOT}")
     message(FATAL_ERROR
         "PAPERBREAK_MVS_ROOT does not name an existing directory: '${PAPERBREAK_MVS_ROOT}'.")
@@ -44,6 +45,8 @@ if(NOT DEFINED PAPERBREAK_MVS_RUNTIME_DIR OR PAPERBREAK_MVS_RUNTIME_DIR STREQUAL
             "the MVS 4.8.0.3 x64 Runtime directory containing MvCameraControl.dll.")
     endif()
 endif()
+cmake_path(CONVERT "${PAPERBREAK_MVS_RUNTIME_DIR}" TO_CMAKE_PATH_LIST
+    PAPERBREAK_MVS_RUNTIME_DIR NORMALIZE)
 set(paperbreak_mvs_runtime "${PAPERBREAK_MVS_RUNTIME_DIR}/MvCameraControl.dll")
 if(NOT EXISTS "${paperbreak_mvs_runtime}")
     message(FATAL_ERROR

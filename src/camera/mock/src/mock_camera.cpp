@@ -216,7 +216,9 @@ struct MockSharedState final
                         .packet_size_bytes = SteppedRange<std::uint32_t>{576U, 9000U, 1U},
                         .inter_packet_delay_ns = SteppedRange<std::uint32_t>{0U, 1000000U, 1U},
                         .maximum_payload_bytes = config.maximum_payload_bytes};
-        parameters = {.frame_rate = config.frame_rate,
+        parameters = {.exposure_us = 1000.0,
+                      .gain_db = 0.0,
+                      .frame_rate = config.frame_rate,
                       .roi = Roi{config.width, config.height, 0U, 0U},
                       .pixel_format = config.pixel_format,
                       .trigger_mode = config.trigger_mode,

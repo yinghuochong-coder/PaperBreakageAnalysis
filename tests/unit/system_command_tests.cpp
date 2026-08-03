@@ -276,12 +276,17 @@ TEST(SystemCommand, ControlsMockCameraPersistsConfigAndReturnsReadback)
     ASSERT_TRUE(list);
     const Json listed = Json::parse(list.value().payload_json);
     ASSERT_EQ(listed["cameras"].size(), 1U);
+    EXPECT_EQ(listed["storedConfigRevision"], 2U);
+    EXPECT_TRUE(listed["topologyRestartRequired"].get<bool>());
     EXPECT_EQ(listed["cameras"][0]["state"], "disconnected");
     EXPECT_EQ(listed["cameras"][0]["saved"]["exposureUs"], 100.0);
 
     auto discovered = commands.handle(fixture.request("camera.discover"), reader, {});
     ASSERT_TRUE(discovered);
-    EXPECT_EQ(Json::parse(discovered.value().payload_json)["devices"].size(), 1U);
+    const Json discovered_json = Json::parse(discovered.value().payload_json);
+    ASSERT_EQ(discovered_json["devices"].size(), 1U);
+    EXPECT_EQ(discovered_json["devices"][0]["networkInterface"], "loopback");
+    EXPECT_TRUE(discovered_json["devices"][0]["exclusiveAccessAvailable"].get<bool>());
     auto denied =
         commands.handle(fixture.request("camera.connect", R"({"cameraId":"CAM01"})"), reader, {});
     ASSERT_FALSE(denied);
@@ -349,6 +354,170 @@ TEST(SystemCommand, ControlsMockCameraPersistsConfigAndReturnsReadback)
                                     administrator, stopped.get_token());
     ASSERT_FALSE(stopping);
     EXPECT_EQ(stopping.error().business_code, "SYS_SERVICE_STOPPING");
+}
+
+TEST(SystemCommand, BindsDiscoveredApprovedCameraFromActualReadbackAndRequiresRestart)
+{
+    CommandFixture fixture;
+    auto provider = paperbreak::camera::mock::MockCameraProvider::create(
+        {{.descriptor = {.model_name = "MV-CS020-60GM",
+                         .serial_number = "MOCK-BIND-01",
+                         .ip_address = "192.0.2.20",
+                         .network_interface = "192.0.2.1",
+                         .exclusive_access_available = true},
+          .width = 64U,
+          .height = 48U,
+          .frame_rate = 30.0}});
+    ASSERT_TRUE(provider);
+    std::shared_ptr<paperbreak::camera::ICameraProvider> shared_provider{
+        std::move(provider).value()};
+    auto runtime = std::make_shared<paperbreak::camera::CameraControlRuntime>(shared_provider);
+    paperbreak::service::SystemCommandService commands{fixture.repository,
+                                                       fixture.status,
+                                                       {},
+                                                       {},
+                                                       {},
+                                                       fixture.config_path.parent_path(),
+                                                       {},
+                                                       runtime};
+
+    const auto before = commands.handle(fixture.request("camera.list"), reader, {});
+    ASSERT_TRUE(before);
+    const Json before_json = Json::parse(before.value().payload_json);
+    EXPECT_EQ(before_json["storedConfigRevision"], 1U);
+    EXPECT_FALSE(before_json["topologyRestartRequired"].get<bool>());
+
+    const std::string request =
+        R"({"cameraId":"CAM01","serialNumber":"MOCK-BIND-01","location":"压榨部入口","expectedConfigRevision":1})";
+    auto denied = commands.handle(fixture.request("camera.bind", request), reader, {});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
+
+    auto bound = commands.handle(fixture.request("camera.bind", request), administrator, {});
+    ASSERT_TRUE(bound);
+    const Json response = Json::parse(bound.value().payload_json);
+    EXPECT_TRUE(response["saved"].get<bool>());
+    EXPECT_FALSE(response["applied"].get<bool>());
+    EXPECT_TRUE(response["restartRequired"].get<bool>());
+    EXPECT_EQ(response["storedConfigRevision"], 2U);
+
+    const auto stored = fixture.repository.snapshot();
+    ASSERT_TRUE(stored);
+    ASSERT_EQ(stored.value().stored->cameras.size(), 1U);
+    const auto& camera = stored.value().stored->cameras.front();
+    EXPECT_EQ(camera.id, "CAM01");
+    EXPECT_EQ(camera.serial_number, "MOCK-BIND-01");
+    EXPECT_EQ(camera.location, "压榨部入口");
+    EXPECT_DOUBLE_EQ(camera.exposure_us, 1000.0);
+    EXPECT_DOUBLE_EQ(camera.frame_rate, 30.0);
+    EXPECT_EQ(camera.roi.width, 64U);
+
+    const auto after = commands.handle(fixture.request("camera.list"), reader, {});
+    ASSERT_TRUE(after);
+    const Json after_json = Json::parse(after.value().payload_json);
+    EXPECT_EQ(after_json["storedConfigRevision"], 2U);
+    EXPECT_TRUE(after_json["topologyRestartRequired"].get<bool>());
+    EXPECT_EQ(after_json["cameras"].size(), 1U);
+
+    auto conflict = commands.handle(fixture.request("camera.bind", request), administrator, {});
+    ASSERT_FALSE(conflict);
+    EXPECT_EQ(conflict.error().business_code, "SYS_CONFIG_VERSION_CONFLICT");
+
+    auto duplicate_slot = commands.handle(
+        fixture.request(
+            "camera.bind",
+            R"({"cameraId":"CAM01","serialNumber":"OTHER","location":"出口","expectedConfigRevision":2})"),
+        administrator, {});
+    ASSERT_FALSE(duplicate_slot);
+    EXPECT_EQ(duplicate_slot.error().business_code, "CAMERA_CONFIG_FAILED");
+    auto duplicate_serial = commands.handle(
+        fixture.request(
+            "camera.bind",
+            R"({"cameraId":"CAM02","serialNumber":"MOCK-BIND-01","location":"出口","expectedConfigRevision":2})"),
+        administrator, {});
+    ASSERT_FALSE(duplicate_serial);
+    EXPECT_EQ(duplicate_serial.error().business_code, "CAMERA_CONFIG_FAILED");
+    auto invalid_slot = commands.handle(
+        fixture.request(
+            "camera.bind",
+            R"({"cameraId":"CAM05","serialNumber":"OTHER","location":"出口","expectedConfigRevision":2})"),
+        administrator, {});
+    ASSERT_FALSE(invalid_slot);
+    EXPECT_EQ(invalid_slot.error().business_code, "IPC_REQUEST_INVALID");
+    ASSERT_TRUE(fixture.repository.snapshot());
+    EXPECT_EQ(fixture.repository.snapshot().value().stored_config_revision, 2U);
+    EXPECT_EQ(fixture.repository.snapshot().value().stored->cameras.size(), 1U);
+}
+
+TEST(SystemCommand, MockOnlyDiscoveryReturnsActionableHikrobotBuildHint)
+{
+    CommandFixture fixture;
+    auto runtime = std::make_shared<paperbreak::camera::CameraControlRuntime>();
+    paperbreak::service::SystemCommandService commands{fixture.repository,
+                                                       fixture.status,
+                                                       {},
+                                                       {},
+                                                       {},
+                                                       fixture.config_path.parent_path(),
+                                                       {},
+                                                       runtime};
+
+    auto list = commands.handle(fixture.request("camera.list"), reader, {});
+    ASSERT_TRUE(list);
+    EXPECT_TRUE(Json::parse(list.value().payload_json)["cameras"].empty());
+    auto discovered = commands.handle(fixture.request("camera.discover"), reader, {});
+    ASSERT_FALSE(discovered);
+    EXPECT_EQ(discovered.error().business_code, "SYS_NOT_SUPPORTED");
+    EXPECT_NE(discovered.error().message.find("windows-vs2026-hikrobot-debug"), std::string::npos);
+}
+
+TEST(SystemCommand, RejectsOccupiedOrUnapprovedCameraBindingWithoutChangingConfiguration)
+{
+    const auto exercise = [](paperbreak::camera::CameraDeviceDescriptor descriptor,
+                             const std::string& expected_code) {
+        CommandFixture fixture;
+        auto provider = paperbreak::camera::mock::MockCameraProvider::create(
+            {{.descriptor = std::move(descriptor),
+              .width = 64U,
+              .height = 48U,
+              .frame_rate = 30.0}});
+        ASSERT_TRUE(provider);
+        std::shared_ptr<paperbreak::camera::ICameraProvider> shared_provider{
+            std::move(provider).value()};
+        auto runtime = std::make_shared<paperbreak::camera::CameraControlRuntime>(shared_provider);
+        paperbreak::service::SystemCommandService commands{fixture.repository,
+                                                           fixture.status,
+                                                           {},
+                                                           {},
+                                                           {},
+                                                           fixture.config_path.parent_path(),
+                                                           {},
+                                                           runtime};
+        auto result = commands.handle(
+            fixture.request(
+                "camera.bind",
+                R"({"cameraId":"CAM01","serialNumber":"MOCK-BIND-02","location":"入口","expectedConfigRevision":1})"),
+            administrator, {});
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().business_code, expected_code);
+        const auto stored = fixture.repository.snapshot();
+        ASSERT_TRUE(stored);
+        EXPECT_EQ(stored.value().stored_config_revision, 1U);
+        EXPECT_TRUE(stored.value().stored->cameras.empty());
+    };
+
+    exercise({.model_name = "MV-CS020-60GM",
+              .serial_number = "MOCK-BIND-02",
+              .ip_address = "192.0.2.21",
+              .network_interface = "192.0.2.1",
+              .exclusive_access_available = false},
+             "CAMERA_ACCESS_DENIED");
+    exercise({.model_name = "UNAPPROVED",
+              .serial_number = "MOCK-BIND-02",
+              .ip_address = "192.0.2.21",
+              .network_interface = "192.0.2.1",
+              .exclusive_access_available = true},
+             "CAMERA_CONFIG_FAILED");
 }
 
 TEST(SystemCommand, ReloadIsIdempotentAndInvalidConfigPreservesActiveSnapshot)
