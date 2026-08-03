@@ -1,6 +1,7 @@
 #include "paperbreak/common/version.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/navigation_model.hpp"
+#include "paperbreak/console/preview_client.hpp"
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/service/windows/scm.hpp"
 #include "src/main_window.hpp"
@@ -50,6 +51,7 @@ int main(int argc, char* argv[])
         paperbreak::version_info().application_version.data(),
         static_cast<qsizetype>(paperbreak::version_info().application_version.size())));
     QApplication::setQuitOnLastWindowClosed(false);
+    const bool smoke_test = has_argument(argc, argv, "--smoke-test");
 
     paperbreak::logging::LoggingConfig log_config;
     log_config.directory = std::filesystem::temp_directory_path() / "PaperBreakEdge" / "logs";
@@ -59,7 +61,15 @@ int main(int argc, char* argv[])
     auto logging = std::move(logging_result).value();
     auto* const logging_runtime = logging.get();
 
-    paperbreak::console::MainWindow main_window;
+    std::unique_ptr<paperbreak::console::PreviewClient> preview_client;
+    paperbreak::console::MainWindow main_window([&preview_client](const bool paused) {
+        if (preview_client)
+            preview_client->set_paused(paused);
+    });
+    preview_client = std::make_unique<paperbreak::console::PreviewClient>(
+        [&main_window](const paperbreak::console::PreviewSnapshot& snapshot) {
+            main_window.apply_preview_snapshot(snapshot);
+        });
     paperbreak::console::ClientStateSnapshot latest_snapshot;
     std::atomic_bool restart_running{};
     std::jthread restart_task;
@@ -169,9 +179,15 @@ int main(int argc, char* argv[])
         static_cast<void>(logging->shutdown());
         return 1;
     }
+    if (!smoke_test)
+    {
+        const auto preview_start = preview_client->start();
+        if (!preview_start)
+            main_window.apply_preview_snapshot(preview_client->snapshot());
+    }
 
     bool smoke_ok = true;
-    if (has_argument(argc, argv, "--smoke-test"))
+    if (smoke_test)
     {
         smoke_ok = tray.is_visible() && main_window.isVisible() && tray.action_count() == 8U &&
                    !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
@@ -206,13 +222,15 @@ int main(int argc, char* argv[])
     static_cast<void>(logging->log(paperbreak::logging::Category::ui,
                                    paperbreak::logging::Level::info,
                                    "PaperBreakEdgeConsole tray started"));
-    if (has_argument(argc, argv, "--smoke-test"))
+    if (smoke_test)
         QTimer::singleShot(100, &application, &QApplication::quit);
 
     const int result = application.exec();
     refresh_timer.stop();
     clock_timer.stop();
     state_store.stop();
+    preview_client->stop();
+    preview_client.reset();
     if (restart_task.joinable())
     {
         restart_task.request_stop();

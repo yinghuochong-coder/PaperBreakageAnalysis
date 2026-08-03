@@ -3,7 +3,9 @@
 #include "paperbreak/console/navigation_model.hpp"
 
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDateTime>
+#include <QFileDialog>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -11,6 +13,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QStackedWidget>
+#include <QPushButton>
 #include <QStringList>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -107,6 +110,24 @@ QWidget* make_placeholder_page(QWidget* parent, const QString& title, const QStr
     layout->addWidget(heading);
     layout->addWidget(description, 1);
     return page;
+}
+
+QWidget* make_preview_tile(QWidget* parent, const int index, QLabel*& image, QLabel*& overlay)
+{
+    QWidget* tile = make_child<QWidget>(parent);
+    tile->setProperty("role", "previewTile");
+    auto* layout = make_layout<QVBoxLayout>(tile);
+    layout->setContentsMargins(6, 6, 6, 6);
+    image = make_child<QLabel>(tile, QStringLiteral("等待 CAM%1 预览帧").arg(index + 1, 2, 10, QChar{'0'}));
+    image->setAlignment(Qt::AlignCenter);
+    image->setMinimumSize(240, 135);
+    image->setScaledContents(false);
+    image->setProperty("role", "previewImage");
+    overlay = make_child<QLabel>(tile, QStringLiteral("CAM%1 · 无数据").arg(index + 1, 2, 10, QChar{'0'}));
+    overlay->setProperty("role", "previewOverlay");
+    layout->addWidget(image, 1);
+    layout->addWidget(overlay);
+    return tile;
 }
 
 QString stale_value(QString value, const bool stale)
@@ -206,7 +227,8 @@ QString placeholder_message(const ConsolePageId id)
 
 } // namespace
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
+MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed, QWidget* parent)
+    : QMainWindow(parent), preview_pause_changed_(std::move(preview_pause_changed))
 {
     setObjectName(QStringLiteral("main-window"));
     setWindowTitle(QStringLiteral("PaperBreakEdge 断纸分析控制台"));
@@ -347,8 +369,86 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
                                                 static_cast<qsizetype>(descriptor.title.size()));
         const QString key =
             QString::fromUtf8(descriptor.key.data(), static_cast<qsizetype>(descriptor.key.size()));
-        pages_->addWidget(
-            make_placeholder_page(pages_, title, placeholder_message(descriptor.id), key));
+        if (descriptor.id != ConsolePageId::preview)
+        {
+            pages_->addWidget(make_placeholder_page(pages_, title, placeholder_message(descriptor.id), key));
+            continue;
+        }
+        QWidget* preview_page = make_child<QWidget>(pages_);
+        preview_page->setObjectName(QStringLiteral("page-preview"));
+        auto* preview_layout = make_layout<QVBoxLayout>(preview_page);
+        preview_layout->setContentsMargins(24, 20, 24, 20);
+        QLabel* heading = make_child<QLabel>(preview_page, QStringLiteral("实时预览"));
+        heading->setProperty("role", "pageTitle");
+        preview_layout->addWidget(heading);
+        QWidget* controls = make_child<QWidget>(preview_page);
+        auto* controls_layout = make_layout<QHBoxLayout>(controls);
+        auto* layout_choice = make_child<QComboBox>(controls);
+        layout_choice->addItems({QStringLiteral("四宫格"), QStringLiteral("CAM01"),
+                                 QStringLiteral("CAM02"), QStringLiteral("CAM03"),
+                                 QStringLiteral("CAM04")});
+        auto* rate_choice = make_child<QComboBox>(controls);
+        rate_choice->addItems({QStringLiteral("2 fps"), QStringLiteral("3 fps"), QStringLiteral("5 fps")});
+        auto* resolution_choice = make_child<QComboBox>(controls);
+        resolution_choice->addItems({QStringLiteral("自适应分辨率"), QStringLiteral("1280×720"), QStringLiteral("640×360")});
+        preview_pause_button_ = make_child<QPushButton>(controls, QStringLiteral("暂停显示"));
+        auto* one_to_one = make_child<QPushButton>(controls, QStringLiteral("1:1"));
+        auto* adaptive = make_child<QPushButton>(controls, QStringLiteral("自适应"));
+        auto* full_screen = make_child<QPushButton>(controls, QStringLiteral("全屏"));
+        auto* capture = make_child<QPushButton>(controls, QStringLiteral("抓图"));
+        controls_layout->addWidget(layout_choice);
+        controls_layout->addWidget(rate_choice);
+        controls_layout->addWidget(resolution_choice);
+        controls_layout->addWidget(preview_pause_button_);
+        controls_layout->addWidget(one_to_one);
+        controls_layout->addWidget(adaptive);
+        controls_layout->addWidget(full_screen);
+        controls_layout->addWidget(capture);
+        controls_layout->addStretch(1);
+        preview_layout->addWidget(controls);
+        preview_status_ = make_child<QLabel>(preview_page, QStringLiteral("预览正在连接后台服务"));
+        preview_status_->setProperty("role", "muted");
+        preview_layout->addWidget(preview_status_);
+        QWidget* grid = make_child<QWidget>(preview_page);
+        auto* grid_layout = make_layout<QGridLayout>(grid);
+        grid_layout->setSpacing(8);
+        std::array<QWidget*, 4U> preview_tiles{};
+        for (int camera = 0; camera < 4; ++camera)
+        {
+            preview_tiles[camera] = make_preview_tile(grid, camera, preview_images_[camera], preview_overlays_[camera]);
+            grid_layout->addWidget(preview_tiles[camera], camera / 2, camera % 2);
+        }
+        preview_layout->addWidget(grid, 1);
+        QObject::connect(preview_pause_button_, &QPushButton::clicked, this, [this] {
+            preview_paused_ = !preview_paused_;
+            preview_pause_button_->setText(preview_paused_ ? QStringLiteral("恢复显示") : QStringLiteral("暂停显示"));
+            if (preview_pause_changed_)
+                preview_pause_changed_(preview_paused_);
+        });
+        QObject::connect(layout_choice, &QComboBox::currentIndexChanged, this, [preview_tiles](const int selection) {
+            for (std::size_t tile = 0; tile < preview_tiles.size(); ++tile)
+                preview_tiles[tile]->setVisible(selection == 0 || static_cast<int>(tile + 1U) == selection);
+        });
+        QObject::connect(one_to_one, &QPushButton::clicked, this, [this] {
+            for (QLabel* image : preview_images_)
+                image->setScaledContents(false);
+        });
+        QObject::connect(adaptive, &QPushButton::clicked, this, [this] {
+            for (QLabel* image : preview_images_)
+                image->setScaledContents(true);
+        });
+        QObject::connect(full_screen, &QPushButton::clicked, this, [this] {
+            isFullScreen() ? showNormal() : showFullScreen();
+        });
+        QObject::connect(capture, &QPushButton::clicked, this, [this] {
+            const auto found = std::find_if(preview_images_.begin(), preview_images_.end(), [](const QLabel* label) { return !label->pixmap().isNull(); });
+            if (found == preview_images_.end())
+                return;
+            const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("保存预览抓图"), QStringLiteral("preview.jpg"), QStringLiteral("JPEG 图像 (*.jpg)"));
+            if (!path.isEmpty())
+                static_cast<void>((*found)->pixmap().save(path, "JPG"));
+        });
+        pages_->addWidget(preview_page);
     }
 
     QObject::connect(navigation_, &QListWidget::currentRowChanged, pages_,
@@ -375,9 +475,37 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
         QGroupBox { background: white; border: 1px solid #d9e1e8; border-radius: 6px; margin-top: 8px; padding-top: 8px; font-weight: 600; }
         QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; color: #34516a; }
         QGroupBox[role="cameraCard"] { min-height: 112px; }
+        QWidget[role="previewTile"] { background: #132331; border-radius: 5px; }
+        QLabel[role="previewImage"] { color: #b9ccdc; background: #0a1118; }
+        QLabel[role="previewOverlay"] { color: #dce8f1; font-size: 11px; }
     )"));
 
     update_clock();
+}
+
+void MainWindow::apply_preview_snapshot(const PreviewSnapshot& snapshot)
+{
+    if (!preview_status_)
+        return;
+    if (snapshot.paused)
+        preview_status_->setText(QStringLiteral("显示已暂停：后台采集和预览服务仍继续运行"));
+    else if (snapshot.connection.state != ipc::ClientConnectionState::connected)
+        preview_status_->setText(QStringLiteral("预览服务未连接；最后画面不代表实时状态"));
+    else if (!snapshot.subscribed)
+        preview_status_->setText(QStringLiteral("正在订阅预览帧"));
+    else
+        preview_status_->setText(QStringLiteral("已订阅预览：服务端按低帧率发送最新画面"));
+    for (std::size_t index = 0; index < snapshot.images.size(); ++index)
+    {
+        if (!snapshot.images[index])
+            continue;
+        const auto& frame = snapshot.images[index].value();
+        preview_images_[index]->setPixmap(QPixmap::fromImage(frame.image));
+        preview_overlays_[index]->setText(QStringLiteral("%1 · 帧 %2 · %3 fps · %4")
+            .arg(QString::fromStdString(frame.camera_id)).arg(frame.frame_number)
+            .arg(frame.actual_fps.value_or(0.0), 0, 'f', 1)
+            .arg(QString::fromStdString(frame.detection_result.empty() ? frame.camera_status : frame.detection_result)));
+    }
 }
 
 void MainWindow::apply_snapshot(const ClientStateSnapshot& snapshot)

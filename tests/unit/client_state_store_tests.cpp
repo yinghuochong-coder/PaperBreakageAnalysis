@@ -1,5 +1,6 @@
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/navigation_model.hpp"
+#include "paperbreak/console/preview_client.hpp"
 #include "paperbreak/console/tray_status_model.hpp"
 #include "paperbreak/ipc/server.hpp"
 
@@ -383,4 +384,27 @@ TEST(ConsoleTrayStatusModel, MapsConnectionServiceAndAlarmPriority)
     EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::red);
     snapshot.alarms->highest_severity = "Critical";
     EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::red);
+}
+
+TEST(PreviewClient, PausesWithoutStartingAnyServiceControlOperation)
+{
+    paperbreak::console::PreviewSnapshot latest;
+    paperbreak::console::PreviewClient client(
+        [&](const paperbreak::console::PreviewSnapshot& snapshot) { latest = snapshot; });
+
+    client.set_camera_ids({"CAM01", "CAM02", "CAM03", "CAM04"});
+    client.set_paused(true);
+    EXPECT_TRUE(latest.paused);
+    EXPECT_FALSE(latest.subscribed);
+    EXPECT_EQ(latest.accepted_frames, 0U);
+
+    client.set_camera_ids({"CAM01", "CAM01"});
+    ASSERT_TRUE(latest.last_error.has_value());
+    EXPECT_EQ(latest.last_error->business_code, "IPC_PROTOCOL_ERROR");
+    EXPECT_TRUE(latest.paused);
+
+    client.set_paused(false);
+    EXPECT_FALSE(latest.paused);
+    EXPECT_FALSE(latest.subscribed);
+    client.stop();
 }

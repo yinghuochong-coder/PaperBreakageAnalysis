@@ -35,6 +35,7 @@ target_link_libraries(PaperBreakTests
         paperbreak_windows_service
         paperbreak_compiler_options
         Qt6::Core
+        Qt6::Gui
         Qt6::Network
         nlohmann_json::nlohmann_json
         GTest::gtest)
@@ -59,8 +60,10 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Camera*:Pipeline*:Common*:Result*:Version*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
-set_tests_properties(unit PROPERTIES LABELS "unit")
+    COMMAND PaperBreakTests --gtest_filter=Camera*:Pipeline*:Common*:Result*:Version*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
+set_tests_properties(unit PROPERTIES
+    LABELS "unit"
+    ENVIRONMENT "PATH=$<TARGET_FILE_DIR:Qt6::Core>\\;$<TARGET_FILE_DIR:opencv_core>\\;$ENV{PATH}")
 
 add_test(NAME simulation
     COMMAND PaperBreakTests --gtest_filter=Simulation*)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/console/client_state_store.hpp"
+#include "paperbreak/console/preview_client.hpp"
 
 #include <QMainWindow>
 
@@ -9,6 +10,7 @@
 class QLabel;
 class QListWidget;
 class QStackedWidget;
+class QPushButton;
 
 namespace paperbreak::console
 {
@@ -16,10 +18,11 @@ namespace paperbreak::console
 class MainWindow final : public QMainWindow
 {
   public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    explicit MainWindow(std::function<void(bool)> preview_pause_changed = {}, QWidget* parent = nullptr);
 
     void apply_snapshot(const ClientStateSnapshot& snapshot);
     void update_clock();
+    void apply_preview_snapshot(const PreviewSnapshot& snapshot);
 
     [[nodiscard]] std::size_t page_count() const noexcept;
     [[nodiscard]] int current_page_index() const noexcept;
@@ -42,6 +45,12 @@ class MainWindow final : public QMainWindow
     QLabel* overview_disk_value_{};
     QLabel* recent_alarms_value_{};
     QLabel* overview_sync_value_{};
+    std::array<QLabel*, 4U> preview_images_{};
+    std::array<QLabel*, 4U> preview_overlays_{};
+    QLabel* preview_status_{};
+    QPushButton* preview_pause_button_{};
+    std::function<void(bool)> preview_pause_changed_;
+    bool preview_paused_{};
     QListWidget* navigation_{};
     QStackedWidget* pages_{};
 };
