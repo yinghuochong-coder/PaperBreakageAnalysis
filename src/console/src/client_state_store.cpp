@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <utility>
 
@@ -18,21 +19,35 @@ Error state_error(std::string message, std::string operation)
                       std::move(operation));
 }
 
-Result<ServiceStatusSummary> parse_status(const ipc::ResponseMessage& response,
-                                          const std::uint64_t generation)
+Result<Json> response_payload(const ipc::ResponseMessage& response, std::string operation)
 {
     if (!response.success)
     {
         if (response.error.has_value())
         {
-            return Result<ServiceStatusSummary>::failure(response.error.value());
+            return Result<Json>::failure(response.error.value());
         }
-        return Result<ServiceStatusSummary>::failure(
-            state_error("服务状态查询失败但未携带错误", "console.status.parse"));
+        return Result<Json>::failure(state_error("服务查询失败但未携带错误", std::move(operation)));
     }
-    const Json payload = Json::parse(response.payload_json, nullptr, false);
-    if (payload.is_discarded() || !payload.is_object() || !payload.contains("serviceState") ||
-        !payload["serviceState"].is_string() ||
+    Json payload = Json::parse(response.payload_json, nullptr, false);
+    if (payload.is_discarded() || !payload.is_object())
+    {
+        return Result<Json>::failure(
+            state_error("服务响应不是有效 JSON 对象", std::move(operation)));
+    }
+    return Result<Json>::success(std::move(payload));
+}
+
+Result<ServiceStatusSummary> parse_status(const ipc::ResponseMessage& response,
+                                          const std::uint64_t generation)
+{
+    auto parsed = response_payload(response, "console.status.parse");
+    if (!parsed)
+    {
+        return Result<ServiceStatusSummary>::failure(parsed.error());
+    }
+    const Json& payload = parsed.value();
+    if (!payload.contains("serviceState") || !payload["serviceState"].is_string() ||
         payload["serviceState"].get_ref<const std::string&>().empty() ||
         !payload.contains("machineId") || !payload["machineId"].is_string() ||
         !payload.contains("timestamp") || !payload["timestamp"].is_string() ||
@@ -47,6 +62,150 @@ Result<ServiceStatusSummary> parse_status(const ipc::ResponseMessage& response,
          .service_timestamp = payload["timestamp"].get<std::string>(),
          .accepting_writes = payload["acceptingWrites"].get<bool>(),
          .generation = generation});
+}
+
+Result<VersionSummary> parse_version(const ipc::ResponseMessage& response,
+                                     const std::uint64_t generation)
+{
+    auto parsed = response_payload(response, "console.version.parse");
+    if (!parsed)
+    {
+        return Result<VersionSummary>::failure(parsed.error());
+    }
+    const Json& payload = parsed.value();
+    if (!payload.contains("applicationVersion") || !payload["applicationVersion"].is_string() ||
+        payload["applicationVersion"].get_ref<const std::string&>().empty() ||
+        !payload.contains("gitCommit") || !payload["gitCommit"].is_string())
+    {
+        return Result<VersionSummary>::failure(
+            state_error("system.getVersion 响应结构无效", "console.version.parse"));
+    }
+    return Result<VersionSummary>::success(
+        {.application_version = payload["applicationVersion"].get<std::string>(),
+         .git_commit = payload["gitCommit"].get<std::string>(),
+         .generation = generation});
+}
+
+std::optional<double> numeric_metric(const Json& value)
+{
+    if (!value.is_number())
+    {
+        return std::nullopt;
+    }
+    return value.get<double>();
+}
+
+Result<SystemMetricsSummary> parse_metrics(const ipc::ResponseMessage& response,
+                                           const std::uint64_t generation)
+{
+    auto parsed = response_payload(response, "console.metrics.parse");
+    if (!parsed)
+    {
+        return Result<SystemMetricsSummary>::failure(parsed.error());
+    }
+    const Json& payload = parsed.value();
+    if (!payload.contains("sampledAt") || !payload["sampledAt"].is_string() ||
+        !payload.contains("metrics") || !payload["metrics"].is_array() ||
+        !payload.contains("truncated") || !payload["truncated"].is_boolean())
+    {
+        return Result<SystemMetricsSummary>::failure(
+            state_error("system.getMetrics 响应结构无效", "console.metrics.parse"));
+    }
+
+    SystemMetricsSummary summary;
+    summary.sampled_at = payload["sampledAt"].get<std::string>();
+    summary.generation = generation;
+    for (const auto& metric : payload["metrics"])
+    {
+        if (!metric.is_object() || !metric.contains("name") || !metric["name"].is_string() ||
+            !metric.contains("value") || !metric.contains("unit") || !metric["unit"].is_string() ||
+            !metric.contains("available") || !metric["available"].is_boolean())
+        {
+            return Result<SystemMetricsSummary>::failure(
+                state_error("system.getMetrics 指标结构无效", "console.metrics.parse"));
+        }
+        if (!metric["available"].get<bool>())
+        {
+            continue;
+        }
+        const auto value = numeric_metric(metric["value"]);
+        if (!value.has_value())
+        {
+            continue;
+        }
+        const std::string& name = metric["name"].get_ref<const std::string&>();
+        if (name == "process.cpu.percent")
+        {
+            summary.process_cpu_percent = value;
+        }
+        else if (name == "system.memory.used_percent")
+        {
+            summary.system_memory_used_percent = value;
+        }
+        else if (name == "disk.event.free_gib")
+        {
+            summary.event_disk_free_gib = value;
+        }
+    }
+    return Result<SystemMetricsSummary>::success(std::move(summary));
+}
+
+Result<AlarmOverviewSummary> parse_alarms(const ipc::ResponseMessage& response,
+                                          const std::uint64_t generation)
+{
+    auto parsed = response_payload(response, "console.alarms.parse");
+    if (!parsed)
+    {
+        return Result<AlarmOverviewSummary>::failure(parsed.error());
+    }
+    const Json& payload = parsed.value();
+    if (!payload.contains("alarms") || !payload["alarms"].is_array() ||
+        !payload.contains("truncated") || !payload["truncated"].is_boolean())
+    {
+        return Result<AlarmOverviewSummary>::failure(
+            state_error("alarm.list 响应结构无效", "console.alarms.parse"));
+    }
+
+    AlarmOverviewSummary summary;
+    summary.active_count = payload["alarms"].size();
+    summary.count_truncated = payload["truncated"].get<bool>();
+    summary.generation = generation;
+    summary.recent.reserve(std::min<std::size_t>(5U, summary.active_count));
+    for (const auto& alarm : payload["alarms"])
+    {
+        if (!alarm.is_object() || !alarm.contains("alarmId") ||
+            !alarm["alarmId"].is_number_unsigned() || !alarm.contains("severity") ||
+            !alarm["severity"].is_string() || !alarm.contains("source") ||
+            !alarm["source"].is_string() || !alarm.contains("lastOccurredAt") ||
+            !alarm["lastOccurredAt"].is_string() || !alarm.contains("active") ||
+            !alarm["active"].is_boolean() || !alarm.contains("message") ||
+            !alarm["message"].is_string() || !alarm.contains("acknowledged") ||
+            !alarm["acknowledged"].is_boolean())
+        {
+            return Result<AlarmOverviewSummary>::failure(
+                state_error("alarm.list 报警结构无效", "console.alarms.parse"));
+        }
+        if (!alarm["active"].get<bool>() || summary.recent.size() >= 5U)
+        {
+            continue;
+        }
+        summary.recent.push_back({.alarm_id = alarm["alarmId"].get<std::uint64_t>(),
+                                  .severity = alarm["severity"].get<std::string>(),
+                                  .source = alarm["source"].get<std::string>(),
+                                  .last_occurred_at = alarm["lastOccurredAt"].get<std::string>(),
+                                  .message = alarm["message"].get<std::string>(),
+                                  .acknowledged = alarm["acknowledged"].get<bool>()});
+    }
+    return Result<AlarmOverviewSummary>::success(std::move(summary));
+}
+
+bool current_request(const ipc::ClientRequestHandle& handle,
+                     const std::optional<ipc::ClientRequestHandle>& expected,
+                     const ClientStateSnapshot& snapshot)
+{
+    return handle.generation == snapshot.connection.generation &&
+           snapshot.connection.state == ipc::ClientConnectionState::connected &&
+           expected.has_value() && expected.value() == handle;
 }
 
 } // namespace
@@ -78,6 +237,28 @@ void ClientStateStore::stop() noexcept
 {
     client_->stop();
     status_request_.reset();
+    version_request_.reset();
+    metrics_request_.reset();
+    alarms_request_.reset();
+    alarm_push_refresh_pending_ = false;
+}
+
+void ClientStateStore::refresh_dynamic()
+{
+    if (snapshot_.connection.state != ipc::ClientConnectionState::connected)
+    {
+        return;
+    }
+    if (snapshot_.service_status_stale)
+    {
+        synchronize_status(snapshot_.connection.generation);
+    }
+    if (snapshot_.version_stale)
+    {
+        synchronize_version(snapshot_.connection.generation);
+    }
+    synchronize_metrics(snapshot_.connection.generation);
+    synchronize_alarms(snapshot_.connection.generation);
 }
 
 const ClientStateSnapshot& ClientStateStore::snapshot() const noexcept
@@ -95,7 +276,14 @@ void ClientStateStore::connection_changed(const ipc::ClientConnectionSnapshot& c
     if (connection.state != ipc::ClientConnectionState::connected)
     {
         snapshot_.service_status_stale = true;
+        snapshot_.version_stale = true;
+        snapshot_.metrics_stale = true;
+        snapshot_.alarms_stale = true;
         status_request_.reset();
+        version_request_.reset();
+        metrics_request_.reset();
+        alarms_request_.reset();
+        alarm_push_refresh_pending_ = false;
         notify();
         return;
     }
@@ -106,33 +294,67 @@ void ClientStateStore::connection_changed(const ipc::ClientConnectionSnapshot& c
         return;
     }
     snapshot_.service_status_stale = true;
+    snapshot_.version_stale = true;
+    snapshot_.metrics_stale = true;
+    snapshot_.alarms_stale = true;
     snapshot_.synchronization_error.reset();
+    snapshot_.version_error.reset();
+    snapshot_.metrics_error.reset();
+    snapshot_.alarms_error.reset();
     status_request_.reset();
+    version_request_.reset();
+    metrics_request_.reset();
+    alarms_request_.reset();
+    alarm_push_refresh_pending_ = false;
     notify();
     synchronize_status(connection.generation);
+    synchronize_version(connection.generation);
+    synchronize_metrics(connection.generation);
+    synchronize_alarms(connection.generation);
 }
 
 void ClientStateStore::push_received(const std::uint64_t generation, const ipc::PushMessage& push)
 {
     if (generation != snapshot_.connection.generation ||
-        snapshot_.connection.state != ipc::ClientConnectionState::connected ||
-        push.event_name != "status.changed")
+        snapshot_.connection.state != ipc::ClientConnectionState::connected)
     {
         return;
     }
-    const Json payload = Json::parse(push.payload_json, nullptr, false);
-    if (payload.is_discarded() || !payload.is_object() || !payload.contains("serviceState") ||
-        !payload["serviceState"].is_string() || !snapshot_.service_status.has_value())
+    if (push.event_name == "status.changed")
     {
+        const Json payload = Json::parse(push.payload_json, nullptr, false);
+        if (payload.is_discarded() || !payload.is_object() || !payload.contains("serviceState") ||
+            !payload["serviceState"].is_string() || !snapshot_.service_status.has_value())
+        {
+            return;
+        }
+        snapshot_.service_status->service_state = payload["serviceState"].get<std::string>();
+        snapshot_.service_status->generation = generation;
+        notify();
         return;
     }
-    snapshot_.service_status->service_state = payload["serviceState"].get<std::string>();
-    snapshot_.service_status->generation = generation;
-    notify();
+    if (push.event_name == "alarm.raised" || push.event_name == "alarm.cleared" ||
+        push.event_name == "alarm.acknowledged")
+    {
+        if (alarms_request_.has_value())
+        {
+            alarm_push_refresh_pending_ = true;
+        }
+        else
+        {
+            synchronize_alarms(generation);
+        }
+    }
 }
 
 void ClientStateStore::synchronize_status(const std::uint64_t generation)
 {
+    if (generation != snapshot_.connection.generation ||
+        snapshot_.connection.state != ipc::ClientConnectionState::connected ||
+        status_request_.has_value())
+    {
+        return;
+    }
     auto request = client_->send_request(
         "system.getStatus", "{}", {},
         [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
@@ -141,24 +363,91 @@ void ClientStateStore::synchronize_status(const std::uint64_t generation)
         std::chrono::seconds{2});
     if (!request)
     {
-        if (generation == snapshot_.connection.generation &&
-            snapshot_.connection.state == ipc::ClientConnectionState::connected)
-        {
-            snapshot_.synchronization_error = request.error();
-            snapshot_.service_status_stale = true;
-            notify();
-        }
+        snapshot_.synchronization_error = request.error();
+        snapshot_.service_status_stale = true;
+        notify();
         return;
     }
     status_request_ = std::move(request).value();
 }
 
+void ClientStateStore::synchronize_version(const std::uint64_t generation)
+{
+    if (generation != snapshot_.connection.generation ||
+        snapshot_.connection.state != ipc::ClientConnectionState::connected ||
+        version_request_.has_value())
+    {
+        return;
+    }
+    auto request = client_->send_request(
+        "system.getVersion", "{}", {},
+        [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
+            version_completed(std::move(handle), std::move(result));
+        },
+        std::chrono::seconds{2});
+    if (!request)
+    {
+        snapshot_.version_error = request.error();
+        snapshot_.version_stale = true;
+        notify();
+        return;
+    }
+    version_request_ = std::move(request).value();
+}
+
+void ClientStateStore::synchronize_metrics(const std::uint64_t generation)
+{
+    if (generation != snapshot_.connection.generation ||
+        snapshot_.connection.state != ipc::ClientConnectionState::connected ||
+        metrics_request_.has_value())
+    {
+        return;
+    }
+    auto request = client_->send_request(
+        "system.getMetrics",
+        R"({"prefixes":["process.cpu.","system.memory.","disk.event."],"limit":64})", {},
+        [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
+            metrics_completed(std::move(handle), std::move(result));
+        },
+        std::chrono::seconds{2});
+    if (!request)
+    {
+        snapshot_.metrics_error = request.error();
+        snapshot_.metrics_stale = true;
+        notify();
+        return;
+    }
+    metrics_request_ = std::move(request).value();
+}
+
+void ClientStateStore::synchronize_alarms(const std::uint64_t generation)
+{
+    if (generation != snapshot_.connection.generation ||
+        snapshot_.connection.state != ipc::ClientConnectionState::connected ||
+        alarms_request_.has_value())
+    {
+        return;
+    }
+    auto request = client_->send_request(
+        "alarm.list", R"({"active":true,"limit":200})", {},
+        [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
+            alarms_completed(std::move(handle), std::move(result));
+        },
+        std::chrono::seconds{2});
+    if (!request)
+    {
+        snapshot_.alarms_error = request.error();
+        snapshot_.alarms_stale = true;
+        notify();
+        return;
+    }
+    alarms_request_ = std::move(request).value();
+}
+
 void ClientStateStore::status_completed(ipc::ClientRequestHandle handle,
                                         Result<ipc::ResponseMessage> result)
 {
-    if (handle.generation != snapshot_.connection.generation ||
-        snapshot_.connection.state != ipc::ClientConnectionState::connected ||
-        !status_request_.has_value() || status_request_.value() != handle)
+    if (!current_request(handle, status_request_, snapshot_))
     {
         return;
     }
@@ -182,6 +471,105 @@ void ClientStateStore::status_completed(ipc::ClientRequestHandle handle,
     snapshot_.service_status_stale = false;
     snapshot_.synchronization_error.reset();
     notify();
+}
+
+void ClientStateStore::version_completed(ipc::ClientRequestHandle handle,
+                                         Result<ipc::ResponseMessage> result)
+{
+    if (!current_request(handle, version_request_, snapshot_))
+    {
+        return;
+    }
+    version_request_.reset();
+    if (!result)
+    {
+        snapshot_.version_error = result.error();
+        snapshot_.version_stale = true;
+        notify();
+        return;
+    }
+    auto version = parse_version(result.value(), handle.generation);
+    if (!version)
+    {
+        snapshot_.version_error = version.error();
+        snapshot_.version_stale = true;
+        notify();
+        return;
+    }
+    snapshot_.version = std::move(version).value();
+    snapshot_.version_stale = false;
+    snapshot_.version_error.reset();
+    notify();
+}
+
+void ClientStateStore::metrics_completed(ipc::ClientRequestHandle handle,
+                                         Result<ipc::ResponseMessage> result)
+{
+    if (!current_request(handle, metrics_request_, snapshot_))
+    {
+        return;
+    }
+    metrics_request_.reset();
+    if (!result)
+    {
+        snapshot_.metrics_error = result.error();
+        snapshot_.metrics_stale = true;
+        notify();
+        return;
+    }
+    auto metrics = parse_metrics(result.value(), handle.generation);
+    if (!metrics)
+    {
+        snapshot_.metrics_error = metrics.error();
+        snapshot_.metrics_stale = true;
+        notify();
+        return;
+    }
+    snapshot_.metrics = std::move(metrics).value();
+    snapshot_.metrics_stale = false;
+    snapshot_.metrics_error.reset();
+    notify();
+}
+
+void ClientStateStore::alarms_completed(ipc::ClientRequestHandle handle,
+                                        Result<ipc::ResponseMessage> result)
+{
+    if (!current_request(handle, alarms_request_, snapshot_))
+    {
+        return;
+    }
+    alarms_request_.reset();
+    const auto refresh_after_push = [this, generation = handle.generation] {
+        if (alarm_push_refresh_pending_ &&
+            snapshot_.connection.state == ipc::ClientConnectionState::connected &&
+            snapshot_.connection.generation == generation)
+        {
+            alarm_push_refresh_pending_ = false;
+            synchronize_alarms(generation);
+        }
+    };
+    if (!result)
+    {
+        snapshot_.alarms_error = result.error();
+        snapshot_.alarms_stale = true;
+        notify();
+        refresh_after_push();
+        return;
+    }
+    auto alarms = parse_alarms(result.value(), handle.generation);
+    if (!alarms)
+    {
+        snapshot_.alarms_error = alarms.error();
+        snapshot_.alarms_stale = true;
+        notify();
+        refresh_after_push();
+        return;
+    }
+    snapshot_.alarms = std::move(alarms).value();
+    snapshot_.alarms_stale = false;
+    snapshot_.alarms_error.reset();
+    notify();
+    refresh_after_push();
 }
 
 void ClientStateStore::notify() const noexcept

@@ -1,5 +1,6 @@
 add_library(paperbreak_console_model STATIC
-    src/client_state_store.cpp)
+    src/client_state_store.cpp
+    src/navigation_model.cpp)
 target_link_libraries(paperbreak_console_model
     PUBLIC
         paperbreak_common
@@ -14,7 +15,9 @@ set_target_properties(paperbreak_console_model PROPERTIES
     OUTPUT_NAME paperbreak_console_model
     FOLDER "PaperBreak/Libraries")
 
-add_executable(PaperBreakEdgeConsole WIN32 main.cpp)
+add_executable(PaperBreakEdgeConsole WIN32
+    main.cpp
+    src/main_window.cpp)
 target_link_libraries(PaperBreakEdgeConsole
     PRIVATE
         paperbreak_common

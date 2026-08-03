@@ -1,6 +1,7 @@
 #include "paperbreak/common/version.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/logging/logging.hpp"
+#include "src/main_window.hpp"
 
 #include <QAction>
 #include <QApplication>
@@ -69,13 +70,17 @@ int main(int argc, char* argv[])
 
     QSystemTrayIcon tray;
     tray.setIcon(application.style()->standardIcon(QStyle::SP_ComputerIcon));
-    tray.setToolTip(QStringLiteral("PaperBreakEdge Console — M0"));
+    tray.setToolTip(QStringLiteral("PaperBreakEdge Console — M4-01"));
     tray.setContextMenu(&tray_menu);
     QObject::connect(&quit_action, &QAction::triggered, &application, &QApplication::quit);
     tray.show();
 
+    paperbreak::console::MainWindow main_window;
+    main_window.show();
+
     paperbreak::console::ClientStateStore state_store(
-        [&status_action, &tray](const paperbreak::console::ClientStateSnapshot& snapshot) {
+        [&status_action, &tray,
+         &main_window](const paperbreak::console::ClientStateSnapshot& snapshot) {
             QString text;
             switch (snapshot.connection.state)
             {
@@ -102,23 +107,42 @@ int main(int argc, char* argv[])
             }
             status_action.setText(text);
             tray.setToolTip(QStringLiteral("PaperBreakEdge Console — %1").arg(text));
+            main_window.apply_snapshot(snapshot);
         });
+    main_window.apply_snapshot(state_store.snapshot());
     auto client_start = state_store.start();
     if (!client_start)
     {
         static_cast<void>(logging->log(paperbreak::logging::Category::ui,
                                        paperbreak::logging::Level::error,
                                        "PaperBreakEdgeConsole IPC client failed to start"));
+        main_window.hide();
         tray.hide();
         static_cast<void>(logging->shutdown());
         return 1;
     }
 
-    if (has_argument(argc, argv, "--smoke-test") && !tray.isVisible())
+    if (has_argument(argc, argv, "--smoke-test") &&
+        (!tray.isVisible() || !main_window.isVisible() || main_window.page_count() != 12U ||
+         main_window.current_page_index() != 0 || !main_window.select_page(11U) ||
+         !main_window.select_page(0U)))
     {
+        state_store.stop();
+        main_window.hide();
+        tray.hide();
         static_cast<void>(logging->shutdown());
         return 2;
     }
+
+    QTimer refresh_timer;
+    QObject::connect(&refresh_timer, &QTimer::timeout,
+                     [&state_store] { state_store.refresh_dynamic(); });
+    refresh_timer.start(1000);
+
+    QTimer clock_timer;
+    QObject::connect(&clock_timer, &QTimer::timeout, &main_window,
+                     [&main_window] { main_window.update_clock(); });
+    clock_timer.start(1000);
 
     static_cast<void>(logging->log(paperbreak::logging::Category::ui,
                                    paperbreak::logging::Level::info,
@@ -130,7 +154,10 @@ int main(int argc, char* argv[])
     }
 
     const int result = application.exec();
+    refresh_timer.stop();
+    clock_timer.stop();
     state_store.stop();
+    main_window.hide();
     tray.hide();
     static_cast<void>(logging->log(paperbreak::logging::Category::ui,
                                    paperbreak::logging::Level::info,

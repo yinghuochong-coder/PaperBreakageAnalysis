@@ -945,6 +945,7 @@ class IpcServer::Impl final
             return;
         }
         client.socket->flush();
+        QTimer::singleShot(0, event_dispatcher_, [this, identifier] { bytes_written(identifier); });
     }
 
     void bytes_written(const std::uint64_t identifier)
