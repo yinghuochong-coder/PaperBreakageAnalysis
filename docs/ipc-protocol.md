@@ -60,7 +60,7 @@ binaryLength bytes optional binary payload
 - `timestamp` 必须是 RFC 3339，协议超时使用服务端单调时钟，不信任客户端时间；
 - v1 只允许顶层字段 `protocolVersion`、`messageType`、`requestId`、`command`、
   `timestamp`、`payload` 和可选对象 `extensions`；
-- 本文列出的 system、alarm 和 log 命令均不接受二进制负载。
+- 本文列出的 system、alarm、log 和 preview 控制命令均不接受请求二进制负载。
 
 成功响应：
 
@@ -208,6 +208,23 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 `message`。查询读取异步日志线程维护的内存环，不读取滚动日志文件，因此允许短暂最终一致性。
 当请求游标早于当前最早可用序号或匹配结果超过 `limit` 时，`truncated=true`。
 
+### `preview.subscribe`
+
+权限：已认证本机用户。请求二进制负载必须为空。
+
+```json
+{"cameraIds":["CAM01","CAM02"]}
+```
+
+`cameraIds` 必须包含 1 至 4 个不重复的逻辑相机编号，每项最长 32 字节。订阅绑定当前 IPC
+连接；同一连接再次订阅会原子替换其相机集合。服务最多接受 4 个并发预览订阅。无订阅者时服务
+不进行 JPEG 编码。响应包含 `subscribed=true` 与实际 `cameraIds`。
+
+### `preview.unsubscribe`
+
+权限：已认证本机用户。payload 必须为空。取消当前 IPC 连接的全部预览订阅，响应
+`{"subscribed":false}`。连接断开后的订阅不得恢复；客户端重连后必须重新订阅。
+
 报警 ID、报警历史、日志序号和近期日志均是进程内状态，服务重启后重置；M1-06 不提供跨重启游标。
 
 ## 5. 推送事件
@@ -216,6 +233,10 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 - `alarm.raised`：新报警或同一 `(code, source)` 重复发生；
 - `alarm.cleared`：报警生命周期结束并进入内存历史；
 - `alarm.acknowledged`：报警首次被确认，重复确认不重复推送。
+- `preview.frame`：仅发送给订阅该逻辑相机的当前连接。payload 包含 `cameraId`、
+  `cameraFrameNumber`、`sequenceNumber`、源图像 `width`/`height`/`stride`、可选 `brightness`、
+  `actualFps`、`cameraStatus`、`roi` 和 `detectionResult`；二进制负载为 JPEG。每个连接/相机
+  在服务端只保留最新待发送帧，旧帧可丢弃。二进制负载仍受 16 MiB 通用上限约束。
 
 三类报警推送 payload 均包含 `registryRevision` 和完整报警字段。报警推送允许丢弃，
 `alarm.list` 始终是恢复事实来源。

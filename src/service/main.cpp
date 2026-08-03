@@ -5,6 +5,7 @@
 #include "paperbreak/monitoring/monitoring.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/platform/system_metrics.hpp"
+#include "paperbreak/pipeline/preview.hpp"
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/service/system_commands.hpp"
 #include "paperbreak/service/windows/console_control.hpp"
@@ -393,6 +394,93 @@ class IpcLifecycleComponent final : public paperbreak::service::ILifecycleCompon
     std::shared_ptr<paperbreak::ipc::IpcServer> server_;
 };
 
+class PreviewLifecycleComponent final : public paperbreak::service::ILifecycleComponent
+{
+  public:
+    explicit PreviewLifecycleComponent(std::shared_ptr<paperbreak::pipeline::PreviewRuntime> runtime)
+        : runtime_(std::move(runtime))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "preview";
+    }
+    [[nodiscard]] paperbreak::service::ShutdownPhase shutdown_phase() const noexcept override
+    {
+        return paperbreak::service::ShutdownPhase::processing;
+    }
+    [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
+    {
+        return runtime_->start();
+    }
+    [[nodiscard]] paperbreak::Result<void> request_stop(paperbreak::service::StopReason) override
+    {
+        runtime_->request_stop();
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> join(
+        const std::chrono::steady_clock::time_point deadline) override
+    {
+        return runtime_->join(deadline);
+    }
+
+  private:
+    std::shared_ptr<paperbreak::pipeline::PreviewRuntime> runtime_;
+};
+
+class PreviewPublisher final
+{
+  public:
+    void set_server(const std::shared_ptr<paperbreak::ipc::IpcServer>& server)
+    {
+        std::scoped_lock lock{mutex_};
+        server_ = server;
+    }
+
+    void publish(paperbreak::pipeline::PreviewDelivery delivery) const noexcept
+    {
+        std::shared_ptr<paperbreak::ipc::IpcServer> server;
+        {
+            std::scoped_lock lock{mutex_};
+            server = server_.lock();
+        }
+        if (!server)
+            return;
+        nlohmann::json payload{{"cameraId", delivery.camera_id},
+                               {"cameraFrameNumber", delivery.camera_frame_number},
+                               {"sequenceNumber", delivery.sequence_number},
+                               {"width", delivery.source_geometry.width},
+                               {"height", delivery.source_geometry.height},
+                               {"stride", delivery.source_geometry.stride},
+                               {"cameraStatus", delivery.metadata.camera_status},
+                               {"detectionResult", delivery.metadata.detection_result}};
+        if (delivery.metadata.brightness)
+            payload["brightness"] = delivery.metadata.brightness.value();
+        if (delivery.metadata.actual_fps)
+            payload["actualFps"] = delivery.metadata.actual_fps.value();
+        if (delivery.metadata.roi)
+        {
+            const auto& roi = delivery.metadata.roi.value();
+            payload["roi"] = {{"x", roi.x}, {"y", roi.y}, {"width", roi.width},
+                              {"height", roi.height}};
+        }
+        static_cast<void>(server->try_publish(
+            {.event_name = "preview.frame",
+             .timestamp = paperbreak::current_utc_timestamp(),
+             .payload_json = payload.dump(),
+             .binary = std::move(delivery.jpeg),
+             .coalescing_key = "preview." + std::to_string(delivery.subscriber_id) + "." +
+                               delivery.camera_id,
+             .target_connection_id = delivery.subscriber_id},
+            paperbreak::ipc::PushPolicy::coalesce_latest));
+    }
+
+  private:
+    mutable std::mutex mutex_;
+    std::weak_ptr<paperbreak::ipc::IpcServer> server_;
+};
+
 class MonitoringLifecycleComponent final : public paperbreak::service::ILifecycleComponent
 {
   public:
@@ -767,9 +855,36 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     auto status = std::make_shared<paperbreak::service::ServiceStatusStore>();
     auto metrics = std::make_shared<paperbreak::monitoring::MetricRegistry>();
     auto alarms = std::make_shared<paperbreak::monitoring::AlarmRegistry>();
+    std::shared_ptr<paperbreak::pipeline::PreviewRuntime> preview;
+    std::shared_ptr<PreviewPublisher> preview_publisher;
+    if (loaded.value().effective->preview.enabled)
+    {
+        std::vector<std::string> camera_ids;
+        for (const auto& camera : loaded.value().effective->cameras)
+        {
+            if (camera.enabled)
+                camera_ids.push_back(camera.id);
+        }
+        if (!camera_ids.empty())
+        {
+            preview_publisher = std::make_shared<PreviewPublisher>();
+            paperbreak::pipeline::PreviewRuntimeOptions preview_options{
+                .frames_per_second = loaded.value().effective->preview.fps,
+                .encoding = {.maximum_width = loaded.value().effective->preview.max_width,
+                             .maximum_height = loaded.value().effective->preview.max_height,
+                             .jpeg_quality = loaded.value().effective->preview.jpeg_quality}};
+            preview = std::make_shared<paperbreak::pipeline::PreviewRuntime>(
+                std::move(camera_ids), paperbreak::pipeline::make_opencv_preview_encoder(),
+                [preview_publisher](paperbreak::pipeline::PreviewDelivery delivery) {
+                    preview_publisher->publish(std::move(delivery));
+                }, preview_options);
+        }
+    }
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
-        configuration->repository, status, metrics, alarms, logging, config_path.parent_path());
+        configuration->repository, status, metrics, alarms, logging, config_path.parent_path(), preview);
     auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(commands);
+    if (preview_publisher)
+        preview_publisher->set_server(ipc_server);
 
     auto monitor = std::make_shared<paperbreak::monitoring::HealthMonitor>(
         metrics, alarms, monitoring_options_from_config(*loaded.value().effective));
@@ -844,6 +959,8 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     std::vector<std::unique_ptr<paperbreak::service::ILifecycleComponent>> components;
     components.push_back(std::make_unique<ConfigurationLifecycleComponent>(configuration));
     components.push_back(std::make_unique<LoggingLifecycleComponent>(logging));
+    if (preview)
+        components.push_back(std::make_unique<PreviewLifecycleComponent>(preview));
     components.push_back(std::make_unique<IpcLifecycleComponent>(ipc_server));
     components.push_back(std::make_unique<MonitoringLifecycleComponent>(monitor));
     return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::

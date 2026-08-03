@@ -16,6 +16,7 @@ namespace paperbreak::ipc
 struct PeerIdentity final
 {
     std::string actor_sid;
+    std::uint64_t connection_id{};
     bool local{};
     bool authenticated{};
     bool administrator{};

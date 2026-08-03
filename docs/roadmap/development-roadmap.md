@@ -722,6 +722,18 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M4-03 预览服务端分支
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-03
+
+完成日期：2026-08-03
+
+执行记录：`.agent/plans/m4-03-preview-service-branch.md`
+
+完成证据（2026-08-03）：新增 `PreviewRuntime`，每路相机使用容量为 1 的待编码槽并按 2～5 fps 抽样；没有订阅者时不会进入 JPEG 编码，慢编码时旧待编码帧被替换并计数。OpenCV 缩放/JPEG 编码仅在专用 `jthread` 执行，失败仅丢弃该预览帧；服务 IPC 提供 `preview.subscribe`/`preview.unsubscribe`，以连接内部标识定向发送 `preview.frame`，每订阅/相机经既有有界推送队列按合并键只保留最新待发送帧。Debug/Release 均完成全量构建；单元入口 160 项及排除既有 OpenCV DLL 安装扫描后的 18/18 CTest 通过。完整 CTest 的安装树扫描在外部 OpenCV Windows Pack 环境中未能解析 `opencv_world4120[d].dll`，未修改无关安装逻辑。未执行实体相机、真实服务采集输入或 M4-04 Qt 显示验证；默认配置未启用相机，服务不会伪造预览帧。
+
 实施：
 
 - 与原始采集解耦抽样，默认 2～5 fps；

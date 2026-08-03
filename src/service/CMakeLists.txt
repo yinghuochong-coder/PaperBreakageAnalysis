@@ -8,6 +8,7 @@ target_link_libraries(PaperBreakEdgeService
         paperbreak_config
         paperbreak_logging
         paperbreak_monitoring
+        paperbreak_pipeline
         paperbreak_ipc
         paperbreak_platform_windows
         paperbreak_service_core

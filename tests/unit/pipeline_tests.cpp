@@ -1,12 +1,16 @@
 #include "paperbreak/pipeline/pipeline.hpp"
+#include "paperbreak/pipeline/preview.hpp"
 
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
@@ -79,6 +83,57 @@ class SlowNode final : public IPreprocessingNode
         return Result<void>::success();
     }
 };
+
+class CountingPreviewEncoder final : public IPreviewEncoder
+{
+  public:
+    explicit CountingPreviewEncoder(const bool fail = false, const std::chrono::milliseconds delay = {})
+        : fail_(fail), delay_(delay)
+    {
+    }
+
+    [[nodiscard]] Result<std::vector<std::byte>> encode(const FrameView& frame,
+                                                         const PreviewEncodeOptions&) override
+    {
+        calls.fetch_add(1U, std::memory_order_relaxed);
+        if (delay_ > 0ms)
+            std::this_thread::sleep_for(delay_);
+        if (fail_)
+            return Result<std::vector<std::byte>>::failure(
+                make_error("PIPELINE_PREVIEW_ENCODE_FAILED", Severity::warning, "注入编码失败",
+                           "test", "test.preview"));
+        return Result<std::vector<std::byte>>::success(
+            {static_cast<std::byte>(frame.sequence_number() & 0xffU)});
+    }
+
+    std::atomic_uint64_t calls{};
+
+  private:
+    bool fail_{};
+    std::chrono::milliseconds delay_{};
+};
+
+FrameView preview_frame(const std::uint64_t sequence, const std::string& camera_id = "CAM01")
+{
+    auto packet = make_packet(sequence);
+    packet.camera_id = camera_id;
+    auto view = make_frame_view(packet);
+    if (!view)
+        throw std::runtime_error{"preview frame invalid"};
+    return std::move(view).value();
+}
+
+bool wait_preview(const std::function<bool()>& predicate)
+{
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (predicate())
+            return true;
+        std::this_thread::sleep_for(1ms);
+    }
+    return predicate();
+}
 } // namespace
 
 TEST(PipelineNodes, RunsConfiguredChainWithoutCopyingFrameBuffer)
@@ -347,4 +402,81 @@ TEST(PipelineRuntime, EnforcesFourUniqueRoutesAndRollsBackPartialStart)
         EXPECT_EQ(static_cast<bool>(added), index < 4U);
     }
     EXPECT_EQ(capacity_runtime.size(), 4U);
+}
+
+TEST(PipelinePreviewRuntime, DoesNotEncodeWithoutSubscribersAndSamplesAtConfiguredRate)
+{
+    auto encoder = std::make_unique<CountingPreviewEncoder>();
+    auto* encoder_ptr = encoder.get();
+    PreviewRuntime runtime{{"CAM01"}, std::move(encoder), [](PreviewDelivery) {},
+                           {.frames_per_second = 3.0}};
+    ASSERT_TRUE(runtime.start());
+    AcquisitionQueue acquisition{2U};
+    auto source_packet = make_packet(1U);
+    auto source_view = make_frame_view(source_packet);
+    ASSERT_TRUE(source_view);
+    ASSERT_EQ(acquisition.push(source_packet), FrameEnqueueStatus::enqueued);
+    const auto before_preview = acquisition.snapshot();
+    runtime.submit(std::move(source_view).value());
+    ASSERT_TRUE(wait_preview([&] {
+        return runtime.snapshot().frames_skipped_without_subscribers == 1U;
+    }));
+    EXPECT_EQ(encoder_ptr->calls.load(), 0U);
+    const auto after_preview = acquisition.snapshot();
+    EXPECT_EQ(after_preview.enqueued, before_preview.enqueued);
+    EXPECT_EQ(after_preview.dequeued, before_preview.dequeued);
+    EXPECT_EQ(after_preview.dropped_oldest, before_preview.dropped_oldest);
+
+    ASSERT_TRUE(runtime.subscribe(11U, {"CAM01"}));
+    runtime.submit(preview_frame(10U));
+    runtime.submit(preview_frame(11U));
+    ASSERT_TRUE(wait_preview([&] { return runtime.snapshot().encoded == 1U; }));
+    EXPECT_EQ(encoder_ptr->calls.load(), 1U);
+    EXPECT_GE(runtime.snapshot().frames_skipped_by_rate, 1U);
+    runtime.request_stop();
+    EXPECT_TRUE(runtime.join(std::chrono::steady_clock::now() + 1s));
+}
+
+TEST(PipelinePreviewRuntime, ReplacesPendingFramesDeliversToFourSubscribersAndSurvivesFailures)
+{
+    std::mutex deliveries_mutex;
+    std::vector<PreviewDelivery> deliveries;
+    auto slow_encoder = std::make_unique<CountingPreviewEncoder>(false, 40ms);
+    PreviewRuntime runtime{{"CAM01", "CAM02", "CAM03", "CAM04"}, std::move(slow_encoder),
+                           [&](PreviewDelivery delivery) {
+                               std::scoped_lock lock{deliveries_mutex};
+                               deliveries.push_back(std::move(delivery));
+                           },
+                           {.frames_per_second = 5.0}};
+    ASSERT_TRUE(runtime.start());
+    for (std::uint64_t subscriber = 1U; subscriber <= 4U; ++subscriber)
+        ASSERT_TRUE(runtime.subscribe(subscriber, {"CAM01", "CAM02", "CAM03", "CAM04"}));
+    for (std::uint64_t sequence = 1U; sequence <= 12U; ++sequence)
+        runtime.submit(preview_frame(sequence * 1000U));
+    ASSERT_TRUE(wait_preview([&] {
+        std::scoped_lock lock{deliveries_mutex};
+        return deliveries.size() >= 4U;
+    }));
+    EXPECT_GT(runtime.snapshot().frames_replaced_before_encoding, 0U);
+    {
+        std::scoped_lock lock{deliveries_mutex};
+        for (const auto& delivery : deliveries)
+        {
+            EXPECT_EQ(delivery.camera_id, "CAM01");
+            EXPECT_EQ(delivery.jpeg.size(), 1U);
+        }
+    }
+    runtime.unsubscribe(1U);
+    runtime.request_stop();
+    EXPECT_TRUE(runtime.join(std::chrono::steady_clock::now() + 1s));
+
+    auto failing_encoder = std::make_unique<CountingPreviewEncoder>(true);
+    PreviewRuntime failing{{"CAM01"}, std::move(failing_encoder), [](PreviewDelivery) {},
+                           {.frames_per_second = 3.0}};
+    ASSERT_TRUE(failing.start());
+    ASSERT_TRUE(failing.subscribe(9U, {"CAM01"}));
+    failing.submit(preview_frame(1U));
+    ASSERT_TRUE(wait_preview([&] { return failing.snapshot().encoding_failures == 1U; }));
+    failing.request_stop();
+    EXPECT_TRUE(failing.join(std::chrono::steady_clock::now() + 1s));
 }

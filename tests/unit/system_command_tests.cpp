@@ -1,6 +1,7 @@
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/monitoring/monitoring.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
+#include "paperbreak/pipeline/preview.hpp"
 #include "paperbreak/service/system_commands.hpp"
 
 #include <nlohmann/json.hpp>
@@ -114,6 +115,33 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json version_json = Json::parse(version.value().payload_json);
     EXPECT_FALSE(version_json.at("applicationVersion").get<std::string>().empty());
     EXPECT_TRUE(version_json.at("dependencies").contains("qt"));
+}
+
+TEST(SystemCommand, ValidatesPreviewSubscriptionAgainstBoundedRuntime)
+{
+    CommandFixture fixture;
+    auto preview = std::make_shared<paperbreak::pipeline::PreviewRuntime>(
+        std::vector<std::string>{"CAM01"}, paperbreak::pipeline::make_opencv_preview_encoder(),
+        [](paperbreak::pipeline::PreviewDelivery) {});
+    paperbreak::service::SystemCommandService commands(
+        fixture.repository, fixture.status, {}, {}, {}, fixture.config_path.parent_path(), preview);
+    const paperbreak::ipc::PeerIdentity preview_reader{
+        .actor_sid = "S-1-5-21-preview", .connection_id = 42U, .local = true,
+        .authenticated = true, .administrator = false};
+    auto subscribed = commands.handle(fixture.request("preview.subscribe", R"({"cameraIds":["CAM01"]})"),
+                                      preview_reader, {});
+    ASSERT_TRUE(subscribed);
+    EXPECT_TRUE(Json::parse(subscribed.value().payload_json).at("subscribed").get<bool>());
+    EXPECT_EQ(preview->snapshot().subscriptions, 1U);
+
+    auto invalid = commands.handle(fixture.request("preview.subscribe", R"({"cameraIds":["UNKNOWN"]})"),
+                                   preview_reader, {});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
+
+    auto unsubscribed = commands.handle(fixture.request("preview.unsubscribe"), preview_reader, {});
+    ASSERT_TRUE(unsubscribed);
+    EXPECT_EQ(preview->snapshot().subscriptions, 0U);
 }
 
 TEST(SystemCommand, ReturnsResolvedEventLocationAndRejectsFields)

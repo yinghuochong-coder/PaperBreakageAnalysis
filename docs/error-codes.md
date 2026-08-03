@@ -149,6 +149,9 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `PIPELINE_QUEUE_FULL` | Warning | 否 | 有界通道按既定溢出策略拒绝/丢弃；记录队列名、容量和动作，不阻塞采集 |
 | `PIPELINE_BUFFER_POOL_EXHAUSTED` | Error | 否 | 固定帧池无可用缓冲；丢帧、计数并按持续情况报警，禁止无界分配 |
 | `PIPELINE_FRAME_ORDER_VIOLATION` | Warning | 否 | 会话序号回退、重复或出现缺口；隔离受影响帧并更新统计 |
+| `PIPELINE_PREVIEW_ENCODE_FAILED` | Warning | 是 | 预览 JPEG 编码、缩放或二进制大小校验失败；丢弃该预览帧并继续后续帧，不影响采集 |
+| `PIPELINE_PREVIEW_INVALID_STATE` | Warning | 否 | 预览运行时重复启动或处于不允许的生命周期状态 |
+| `PIPELINE_PREVIEW_START_FAILED` | Error | 是 | 无法创建预览编码工作线程；服务保持无预览降级，不启动无界替代线程 |
 | `ALGORITHM_INIT_FAILED` | Error | 视原因 | 新算法实例初始化/验证失败；保持旧实例或禁用检测并报警 |
 | `ALGORITHM_PROCESS_FAILED` | Error | 否 | 单帧处理异常；跳过该帧，持续失败时降级算法 |
 | `ALGORITHM_DEADLINE_EXCEEDED` | Warning | 否 | 单帧或队列处理超过预算；按策略跳帧/降级，不反压采集 |

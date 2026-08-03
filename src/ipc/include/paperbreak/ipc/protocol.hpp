@@ -59,6 +59,8 @@ struct PushMessage final
     std::string payload_json{"{}"};
     std::vector<std::byte> binary;
     std::string coalescing_key;
+    /// Server-internal routing key; it is not serialized into IPC JSON.
+    std::optional<std::uint64_t> target_connection_id;
 };
 
 using ServerMessage = std::variant<ResponseMessage, PushMessage>;

@@ -441,10 +441,11 @@ SystemCommandService::SystemCommandService(config::ConfigRepository& repository,
                                            std::shared_ptr<monitoring::MetricRegistry> metrics,
                                            std::shared_ptr<monitoring::AlarmRegistry> alarms,
                                            std::shared_ptr<logging::LoggingRuntime> logging,
-                                           std::filesystem::path config_directory)
+                                           std::filesystem::path config_directory,
+                                           std::shared_ptr<pipeline::PreviewRuntime> preview)
     : repository_(repository), status_(std::move(status)), metrics_(std::move(metrics)),
       alarms_(std::move(alarms)), logging_(std::move(logging)),
-      config_directory_(std::move(config_directory))
+      config_directory_(std::move(config_directory)), preview_(std::move(preview))
 {
 }
 
@@ -506,6 +507,48 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
             return Result<ipc::CommandResponse>::failure(command_error(
                 "SYS_INTERNAL_ERROR", Severity::error, "日志服务未装配", "ipc.log.tail"));
         return log_tail_response(payload.value(), *logging_);
+    }
+    if (request.command == "preview.subscribe")
+    {
+        if (!preview_)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "SYS_NOT_SUPPORTED", Severity::warning, "预览运行时尚未装配", "ipc.preview.subscribe"));
+        if (!has_only_field(payload.value(), "cameraIds") ||
+            !payload.value()["cameraIds"].is_array() || payload.value()["cameraIds"].empty() ||
+            payload.value()["cameraIds"].size() > 4U)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error, "preview.subscribe 需要 1 至 4 个 cameraIds",
+                "ipc.preview.subscribe"));
+        std::vector<std::string> camera_ids;
+        camera_ids.reserve(payload.value()["cameraIds"].size());
+        for (const auto& value : payload.value()["cameraIds"])
+        {
+            if (!value.is_string() || value.get_ref<const std::string&>().empty() ||
+                value.get_ref<const std::string&>().size() > 32U)
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error, "cameraIds 包含无效相机编号",
+                    "ipc.preview.subscribe"));
+            camera_ids.push_back(value.get<std::string>());
+        }
+        auto subscribed = preview_->subscribe(peer.connection_id, camera_ids);
+        if (!subscribed)
+            return Result<ipc::CommandResponse>::failure(subscribed.error());
+        return Result<ipc::CommandResponse>::success(
+            {.payload_json = Json{{"subscribed", true}, {"cameraIds", camera_ids}}.dump(),
+             .binary = {}});
+    }
+    if (request.command == "preview.unsubscribe")
+    {
+        if (!preview_)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "SYS_NOT_SUPPORTED", Severity::warning, "预览运行时尚未装配", "ipc.preview.unsubscribe"));
+        if (!payload.value().empty())
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error, "preview.unsubscribe payload 必须为空",
+                "ipc.preview.unsubscribe"));
+        preview_->unsubscribe(peer.connection_id);
+        return Result<ipc::CommandResponse>::success(
+            {.payload_json = R"({"subscribed":false})", .binary = {}});
     }
     if (request.command == "alarm.acknowledge")
     {

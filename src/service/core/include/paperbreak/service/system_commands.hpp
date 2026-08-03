@@ -4,6 +4,7 @@
 #include "paperbreak/ipc/server.hpp"
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/monitoring/monitoring.hpp"
+#include "paperbreak/pipeline/preview.hpp"
 #include "paperbreak/service/runtime.hpp"
 
 #include <atomic>
@@ -45,7 +46,8 @@ class SystemCommandService final : public ipc::IRequestHandler
                          std::shared_ptr<monitoring::MetricRegistry> metrics = {},
                          std::shared_ptr<monitoring::AlarmRegistry> alarms = {},
                          std::shared_ptr<logging::LoggingRuntime> logging = {},
-                         std::filesystem::path config_directory = {});
+                         std::filesystem::path config_directory = {},
+                         std::shared_ptr<pipeline::PreviewRuntime> preview = {});
 
     [[nodiscard]] Result<ipc::CommandResponse> handle(const ipc::RequestMessage& request,
                                                       const ipc::PeerIdentity& peer,
@@ -58,6 +60,7 @@ class SystemCommandService final : public ipc::IRequestHandler
     std::shared_ptr<monitoring::AlarmRegistry> alarms_;
     std::shared_ptr<logging::LoggingRuntime> logging_;
     std::filesystem::path config_directory_;
+    std::shared_ptr<pipeline::PreviewRuntime> preview_;
 };
 
 } // namespace paperbreak::service

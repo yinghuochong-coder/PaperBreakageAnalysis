@@ -627,9 +627,11 @@ class IpcServer::Impl final
             return;
         }
 
+        PeerIdentity peer = client.peer.value();
+        peer.connection_id = identifier;
         QueuedCommand command{.connection_id = identifier,
                               .request = std::move(request).value(),
-                              .peer = client.peer.value(),
+                              .peer = std::move(peer),
                               .queued_at = std::chrono::steady_clock::now()};
         {
             std::scoped_lock lock{command_mutex_};
@@ -900,6 +902,11 @@ class IpcServer::Impl final
         identifiers.reserve(clients_.size());
         for (auto& [identifier, client] : clients_)
         {
+            if (push.target_connection_id.has_value() &&
+                push.target_connection_id.value() != identifier)
+            {
+                continue;
+            }
             enqueue_push(*client, bytes, push, policy);
             identifiers.push_back(identifier);
         }
