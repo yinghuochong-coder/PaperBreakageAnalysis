@@ -5,15 +5,20 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
-#include <QStackedWidget>
+#include <QMessageBox>
 #include <QPushButton>
+#include <QSpinBox>
+#include <QStackedWidget>
 #include <QStringList>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -118,12 +123,14 @@ QWidget* make_preview_tile(QWidget* parent, const int index, QLabel*& image, QLa
     tile->setProperty("role", "previewTile");
     auto* layout = make_layout<QVBoxLayout>(tile);
     layout->setContentsMargins(6, 6, 6, 6);
-    image = make_child<QLabel>(tile, QStringLiteral("等待 CAM%1 预览帧").arg(index + 1, 2, 10, QChar{'0'}));
+    image = make_child<QLabel>(
+        tile, QStringLiteral("等待 CAM%1 预览帧").arg(index + 1, 2, 10, QChar{'0'}));
     image->setAlignment(Qt::AlignCenter);
     image->setMinimumSize(240, 135);
     image->setScaledContents(false);
     image->setProperty("role", "previewImage");
-    overlay = make_child<QLabel>(tile, QStringLiteral("CAM%1 · 无数据").arg(index + 1, 2, 10, QChar{'0'}));
+    overlay = make_child<QLabel>(
+        tile, QStringLiteral("CAM%1 · 无数据").arg(index + 1, 2, 10, QChar{'0'}));
     overlay->setProperty("role", "previewOverlay");
     layout->addWidget(image, 1);
     layout->addWidget(overlay);
@@ -227,8 +234,10 @@ QString placeholder_message(const ConsolePageId id)
 
 } // namespace
 
-MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed, QWidget* parent)
-    : QMainWindow(parent), preview_pause_changed_(std::move(preview_pause_changed))
+MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
+                       CameraUiActions camera_actions, QWidget* parent)
+    : QMainWindow(parent), preview_pause_changed_(std::move(preview_pause_changed)),
+      camera_actions_(std::move(camera_actions))
 {
     setObjectName(QStringLiteral("main-window"));
     setWindowTitle(QStringLiteral("PaperBreakEdge 断纸分析控制台"));
@@ -369,9 +378,140 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed, QWidget*
                                                 static_cast<qsizetype>(descriptor.title.size()));
         const QString key =
             QString::fromUtf8(descriptor.key.data(), static_cast<qsizetype>(descriptor.key.size()));
+        if (descriptor.id == ConsolePageId::camera_configuration)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-camera-configuration"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            auto* heading = make_child<QLabel>(page, QStringLiteral("相机配置与实际值"));
+            heading->setProperty("role", "pageTitle");
+            camera_selector_ = make_child<QComboBox>(page);
+            camera_selector_->setObjectName(QStringLiteral("camera-selector"));
+            camera_configuration_value_ =
+                make_child<QLabel>(page, QStringLiteral("正在从后台服务读取相机配置"));
+            camera_configuration_value_->setWordWrap(true);
+            camera_configuration_value_->setProperty("role", "placeholder");
+            camera_operation_value_ = make_child<QLabel>(page, QStringLiteral("尚未执行操作"));
+            auto* form_container = make_child<QWidget>(page);
+            auto* form = make_layout<QFormLayout>(form_container);
+            camera_exposure_ = make_child<QDoubleSpinBox>(form_container);
+            camera_exposure_->setRange(1.0, 10000000.0);
+            camera_exposure_->setDecimals(1);
+            camera_gain_ = make_child<QDoubleSpinBox>(form_container);
+            camera_gain_->setRange(-24.0, 48.0);
+            camera_gain_->setDecimals(2);
+            camera_fps_ = make_child<QDoubleSpinBox>(form_container);
+            camera_fps_->setRange(0.1, 1000.0);
+            camera_fps_->setDecimals(3);
+            camera_roi_width_ = make_child<QSpinBox>(form_container);
+            camera_roi_width_->setRange(1, 16384);
+            camera_roi_height_ = make_child<QSpinBox>(form_container);
+            camera_roi_height_->setRange(1, 16384);
+            camera_roi_x_ = make_child<QSpinBox>(form_container);
+            camera_roi_x_->setRange(0, 16383);
+            camera_roi_y_ = make_child<QSpinBox>(form_container);
+            camera_roi_y_->setRange(0, 16383);
+            camera_pixel_format_ = make_child<QComboBox>(form_container);
+            camera_pixel_format_->addItems({QStringLiteral("Mono8"), QStringLiteral("Mono10"),
+                                            QStringLiteral("Mono12"), QStringLiteral("BayerRG8")});
+            camera_trigger_mode_ = make_child<QComboBox>(form_container);
+            camera_trigger_mode_->addItems({QStringLiteral("Continuous"),
+                                            QStringLiteral("Hardware"),
+                                            QStringLiteral("Software")});
+            camera_trigger_source_ = make_child<QLineEdit>(form_container);
+            camera_trigger_delay_ = make_child<QSpinBox>(form_container);
+            camera_trigger_delay_->setRange(0, 60000000);
+            camera_packet_size_ = make_child<QSpinBox>(form_container);
+            camera_packet_size_->setRange(576, 9000);
+            camera_packet_delay_ = make_child<QSpinBox>(form_container);
+            camera_packet_delay_->setRange(0, 1000000000);
+            form->addRow(QStringLiteral("曝光 (us)"), camera_exposure_);
+            form->addRow(QStringLiteral("增益 (dB)"), camera_gain_);
+            form->addRow(QStringLiteral("帧率 (fps)"), camera_fps_);
+            form->addRow(QStringLiteral("ROI 宽"), camera_roi_width_);
+            form->addRow(QStringLiteral("ROI 高"), camera_roi_height_);
+            form->addRow(QStringLiteral("ROI X"), camera_roi_x_);
+            form->addRow(QStringLiteral("ROI Y"), camera_roi_y_);
+            form->addRow(QStringLiteral("像素格式"), camera_pixel_format_);
+            form->addRow(QStringLiteral("触发模式"), camera_trigger_mode_);
+            form->addRow(QStringLiteral("触发源"), camera_trigger_source_);
+            form->addRow(QStringLiteral("触发延迟 (us)"), camera_trigger_delay_);
+            form->addRow(QStringLiteral("包大小 (bytes)"), camera_packet_size_);
+            form->addRow(QStringLiteral("包间延迟 (ns)"), camera_packet_delay_);
+            auto* actions = make_child<QWidget>(page);
+            auto* action_layout = make_layout<QHBoxLayout>(actions);
+            const auto add_action = [&](const QString& text, const std::string& command,
+                                        const bool confirm) {
+                auto* button = make_child<QPushButton>(actions, text);
+                button->setObjectName(
+                    QStringLiteral("camera-%1").arg(QString::fromStdString(command)));
+                QObject::connect(button, &QPushButton::clicked, this, [this, command, confirm] {
+                    run_camera_control(command, confirm);
+                });
+                action_layout->addWidget(button);
+            };
+            auto* discover = make_child<QPushButton>(actions, QStringLiteral("发现设备"));
+            discover->setObjectName(QStringLiteral("camera-discover"));
+            QObject::connect(discover, &QPushButton::clicked, this, [this] {
+                if (camera_actions_.discover)
+                    show_camera_result(camera_actions_.discover());
+            });
+            action_layout->addWidget(discover);
+            add_action(QStringLiteral("连接"), "camera.connect", false);
+            add_action(QStringLiteral("断开"), "camera.disconnect", true);
+            add_action(QStringLiteral("开始采集"), "camera.start", true);
+            add_action(QStringLiteral("停止采集"), "camera.stop", true);
+            add_action(QStringLiteral("抓取快照"), "camera.captureSnapshot", false);
+            add_action(QStringLiteral("软件触发"), "camera.softwareTrigger", false);
+            auto* save = make_child<QPushButton>(actions, QStringLiteral("保存并下发"));
+            save->setObjectName(QStringLiteral("camera-update-config"));
+            QObject::connect(save, &QPushButton::clicked, this, [this] {
+                if (!camera_actions_.update_config || camera_selector_->currentIndex() < 0)
+                    return;
+                if (QMessageBox::question(
+                        this, QStringLiteral("确认相机配置"),
+                        QStringLiteral("保存并下发参数可能短暂影响采集，是否继续？")) !=
+                    QMessageBox::Yes)
+                    return;
+                const auto index = static_cast<std::size_t>(camera_selector_->currentIndex());
+                if (index >= camera_snapshot_.cameras.size())
+                    return;
+                CameraParameterValue value{
+                    .exposure_us = camera_exposure_->value(),
+                    .gain_db = camera_gain_->value(),
+                    .frame_rate = camera_fps_->value(),
+                    .roi = CameraRoiValue{static_cast<std::uint32_t>(camera_roi_width_->value()),
+                                          static_cast<std::uint32_t>(camera_roi_height_->value()),
+                                          static_cast<std::uint32_t>(camera_roi_x_->value()),
+                                          static_cast<std::uint32_t>(camera_roi_y_->value())},
+                    .pixel_format = camera_pixel_format_->currentText().toStdString(),
+                    .trigger_mode = camera_trigger_mode_->currentText().toStdString(),
+                    .trigger_source = camera_trigger_source_->text().toStdString(),
+                    .trigger_delay_us = static_cast<std::uint32_t>(camera_trigger_delay_->value()),
+                    .packet_size_bytes = static_cast<std::uint32_t>(camera_packet_size_->value()),
+                    .inter_packet_delay_ns =
+                        static_cast<std::uint32_t>(camera_packet_delay_->value())};
+                show_camera_result(camera_actions_.update_config(
+                    camera_snapshot_.cameras[index].id,
+                    camera_snapshot_.cameras[index].saved_config_revision, value));
+            });
+            action_layout->addWidget(save);
+            layout->addWidget(heading);
+            layout->addWidget(camera_selector_);
+            layout->addWidget(camera_configuration_value_, 1);
+            layout->addWidget(form_container);
+            layout->addWidget(actions);
+            layout->addWidget(camera_operation_value_);
+            QObject::connect(camera_selector_, &QComboBox::currentIndexChanged, this,
+                             [this] { populate_camera_editor(); });
+            pages_->addWidget(page);
+            continue;
+        }
         if (descriptor.id != ConsolePageId::preview)
         {
-            pages_->addWidget(make_placeholder_page(pages_, title, placeholder_message(descriptor.id), key));
+            pages_->addWidget(
+                make_placeholder_page(pages_, title, placeholder_message(descriptor.id), key));
             continue;
         }
         QWidget* preview_page = make_child<QWidget>(pages_);
@@ -388,9 +528,11 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed, QWidget*
                                  QStringLiteral("CAM02"), QStringLiteral("CAM03"),
                                  QStringLiteral("CAM04")});
         auto* rate_choice = make_child<QComboBox>(controls);
-        rate_choice->addItems({QStringLiteral("2 fps"), QStringLiteral("3 fps"), QStringLiteral("5 fps")});
+        rate_choice->addItems(
+            {QStringLiteral("2 fps"), QStringLiteral("3 fps"), QStringLiteral("5 fps")});
         auto* resolution_choice = make_child<QComboBox>(controls);
-        resolution_choice->addItems({QStringLiteral("自适应分辨率"), QStringLiteral("1280×720"), QStringLiteral("640×360")});
+        resolution_choice->addItems({QStringLiteral("自适应分辨率"), QStringLiteral("1280×720"),
+                                     QStringLiteral("640×360")});
         preview_pause_button_ = make_child<QPushButton>(controls, QStringLiteral("暂停显示"));
         auto* one_to_one = make_child<QPushButton>(controls, QStringLiteral("1:1"));
         auto* adaptive = make_child<QPushButton>(controls, QStringLiteral("自适应"));
@@ -415,20 +557,24 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed, QWidget*
         std::array<QWidget*, 4U> preview_tiles{};
         for (int camera = 0; camera < 4; ++camera)
         {
-            preview_tiles[camera] = make_preview_tile(grid, camera, preview_images_[camera], preview_overlays_[camera]);
+            preview_tiles[camera] =
+                make_preview_tile(grid, camera, preview_images_[camera], preview_overlays_[camera]);
             grid_layout->addWidget(preview_tiles[camera], camera / 2, camera % 2);
         }
         preview_layout->addWidget(grid, 1);
         QObject::connect(preview_pause_button_, &QPushButton::clicked, this, [this] {
             preview_paused_ = !preview_paused_;
-            preview_pause_button_->setText(preview_paused_ ? QStringLiteral("恢复显示") : QStringLiteral("暂停显示"));
+            preview_pause_button_->setText(preview_paused_ ? QStringLiteral("恢复显示")
+                                                           : QStringLiteral("暂停显示"));
             if (preview_pause_changed_)
                 preview_pause_changed_(preview_paused_);
         });
-        QObject::connect(layout_choice, &QComboBox::currentIndexChanged, this, [preview_tiles](const int selection) {
-            for (std::size_t tile = 0; tile < preview_tiles.size(); ++tile)
-                preview_tiles[tile]->setVisible(selection == 0 || static_cast<int>(tile + 1U) == selection);
-        });
+        QObject::connect(layout_choice, &QComboBox::currentIndexChanged, this,
+                         [preview_tiles](const int selection) {
+                             for (std::size_t tile = 0; tile < preview_tiles.size(); ++tile)
+                                 preview_tiles[tile]->setVisible(
+                                     selection == 0 || static_cast<int>(tile + 1U) == selection);
+                         });
         QObject::connect(one_to_one, &QPushButton::clicked, this, [this] {
             for (QLabel* image : preview_images_)
                 image->setScaledContents(false);
@@ -437,14 +583,17 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed, QWidget*
             for (QLabel* image : preview_images_)
                 image->setScaledContents(true);
         });
-        QObject::connect(full_screen, &QPushButton::clicked, this, [this] {
-            isFullScreen() ? showNormal() : showFullScreen();
-        });
+        QObject::connect(full_screen, &QPushButton::clicked, this,
+                         [this] { isFullScreen() ? showNormal() : showFullScreen(); });
         QObject::connect(capture, &QPushButton::clicked, this, [this] {
-            const auto found = std::find_if(preview_images_.begin(), preview_images_.end(), [](const QLabel* label) { return !label->pixmap().isNull(); });
+            const auto found =
+                std::find_if(preview_images_.begin(), preview_images_.end(),
+                             [](const QLabel* label) { return !label->pixmap().isNull(); });
             if (found == preview_images_.end())
                 return;
-            const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("保存预览抓图"), QStringLiteral("preview.jpg"), QStringLiteral("JPEG 图像 (*.jpg)"));
+            const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("保存预览抓图"),
+                                                              QStringLiteral("preview.jpg"),
+                                                              QStringLiteral("JPEG 图像 (*.jpg)"));
             if (!path.isEmpty())
                 static_cast<void>((*found)->pixmap().save(path, "JPG"));
         });
@@ -501,11 +650,150 @@ void MainWindow::apply_preview_snapshot(const PreviewSnapshot& snapshot)
             continue;
         const auto& frame = snapshot.images[index].value();
         preview_images_[index]->setPixmap(QPixmap::fromImage(frame.image));
-        preview_overlays_[index]->setText(QStringLiteral("%1 · 帧 %2 · %3 fps · %4")
-            .arg(QString::fromStdString(frame.camera_id)).arg(frame.frame_number)
-            .arg(frame.actual_fps.value_or(0.0), 0, 'f', 1)
-            .arg(QString::fromStdString(frame.detection_result.empty() ? frame.camera_status : frame.detection_result)));
+        preview_overlays_[index]->setText(
+            QStringLiteral("%1 · 帧 %2 · %3 fps · %4")
+                .arg(QString::fromStdString(frame.camera_id))
+                .arg(frame.frame_number)
+                .arg(frame.actual_fps.value_or(0.0), 0, 'f', 1)
+                .arg(QString::fromStdString(frame.detection_result.empty()
+                                                ? frame.camera_status
+                                                : frame.detection_result)));
     }
+}
+
+void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
+{
+    const QString selected = camera_selector_ ? camera_selector_->currentText() : QString{};
+    camera_snapshot_ = snapshot;
+    if (!camera_configuration_value_)
+        return;
+    if (snapshot.stale)
+    {
+        camera_configuration_value_->setText(
+            QStringLiteral("相机数据不可用或已过期；不会将旧值显示为实时状态。"));
+        return;
+    }
+    if (snapshot.cameras.empty())
+    {
+        camera_configuration_value_->setText(QStringLiteral("当前有效配置未包含相机。"));
+        camera_count_value_->setText(QStringLiteral("0/0"));
+        return;
+    }
+    camera_selector_->blockSignals(true);
+    camera_selector_->clear();
+    for (const auto& camera : snapshot.cameras)
+        camera_selector_->addItem(QString::fromStdString(camera.id));
+    const int previous = camera_selector_->findText(selected);
+    camera_selector_->setCurrentIndex(previous >= 0 ? previous : 0);
+    camera_selector_->blockSignals(false);
+    QStringList lines;
+    std::size_t healthy = 0U;
+    for (const auto& camera : snapshot.cameras)
+    {
+        if (camera.state == "connected" || camera.state == "acquiring")
+            ++healthy;
+        lines.push_back(
+            QStringLiteral(
+                "%1 · %2 · 序列号 %3 · 状态 %4\n型号 %5 · IP %6\n保存值：曝光 %7 us / 增益 %8 dB / "
+                "帧率 %9 fps\n实际值：曝光 %10 us / 增益 %11 dB / 帧率 %12 fps")
+                .arg(QString::fromStdString(camera.id), QString::fromStdString(camera.location),
+                     QString::fromStdString(camera.serial), QString::fromStdString(camera.state),
+                     QString::fromStdString(camera.model), QString::fromStdString(camera.ip))
+                .arg(camera.saved.exposure_us.value_or(0.0), 0, 'f', 1)
+                .arg(camera.saved.gain_db.value_or(0.0), 0, 'f', 1)
+                .arg(camera.saved.frame_rate.value_or(0.0), 0, 'f', 1)
+                .arg(camera.actual.exposure_us.value_or(0.0), 0, 'f', 1)
+                .arg(camera.actual.gain_db.value_or(0.0), 0, 'f', 1)
+                .arg(camera.actual.frame_rate.value_or(0.0), 0, 'f', 1));
+    }
+    if (!snapshot.discovered_devices.empty())
+    {
+        QStringList discovered;
+        for (const auto& device : snapshot.discovered_devices)
+            discovered.push_back(QStringLiteral("%1 / 序列号 %2 / IP %3 / 通道 %4")
+                                     .arg(QString::fromStdString(device.model),
+                                          QString::fromStdString(device.serial),
+                                          QString::fromStdString(device.ip),
+                                          QString::fromStdString(device.transport_id)));
+        lines.push_back(QStringLiteral("最近发现的设备（%1）：\n%2")
+                            .arg(snapshot.discovered_devices.size())
+                            .arg(discovered.join(QStringLiteral("\n"))));
+    }
+    camera_configuration_value_->setText(lines.join(QStringLiteral("\n\n")));
+    camera_count_value_->setText(QStringLiteral("%1/%2").arg(healthy).arg(snapshot.cameras.size()));
+    if (snapshot.operation)
+    {
+        const auto& operation = *snapshot.operation;
+        if (operation.pending)
+            camera_operation_value_->setText(
+                QStringLiteral("正在执行 %1").arg(QString::fromStdString(operation.operation)));
+        else if (!operation.succeeded)
+            camera_operation_value_->setText(
+                QStringLiteral("失败：%1").arg(QString::fromStdString(operation.message)));
+        else
+            camera_operation_value_->setText(
+                QStringLiteral("成功：已保存=%1，已下发=%2，已应用=%3，需重启=%4")
+                    .arg(operation.saved ? QStringLiteral("是") : QStringLiteral("否"),
+                         operation.dispatched ? QStringLiteral("是") : QStringLiteral("否"),
+                         operation.applied ? QStringLiteral("是") : QStringLiteral("否"),
+                         operation.restart_required ? QStringLiteral("是") : QStringLiteral("否")));
+    }
+    const auto selected_index = static_cast<std::size_t>(camera_selector_->currentIndex());
+    if (selected_index < camera_snapshot_.cameras.size())
+    {
+        const auto& selected_camera = camera_snapshot_.cameras[selected_index];
+        if (camera_editor_id_ != selected_camera.id ||
+            camera_editor_revision_ != selected_camera.saved_config_revision)
+            populate_camera_editor();
+    }
+}
+
+void MainWindow::populate_camera_editor()
+{
+    if (!camera_selector_ || camera_selector_->currentIndex() < 0)
+        return;
+    const auto index = static_cast<std::size_t>(camera_selector_->currentIndex());
+    if (index >= camera_snapshot_.cameras.size())
+        return;
+    const auto& value = camera_snapshot_.cameras[index].saved;
+    camera_editor_id_ = camera_snapshot_.cameras[index].id;
+    camera_editor_revision_ = camera_snapshot_.cameras[index].saved_config_revision;
+    camera_exposure_->setValue(value.exposure_us.value_or(1.0));
+    camera_gain_->setValue(value.gain_db.value_or(0.0));
+    camera_fps_->setValue(value.frame_rate.value_or(1.0));
+    if (value.roi)
+    {
+        camera_roi_width_->setValue(static_cast<int>(value.roi->width));
+        camera_roi_height_->setValue(static_cast<int>(value.roi->height));
+        camera_roi_x_->setValue(static_cast<int>(value.roi->offset_x));
+        camera_roi_y_->setValue(static_cast<int>(value.roi->offset_y));
+    }
+    camera_pixel_format_->setCurrentText(QString::fromStdString(value.pixel_format));
+    camera_trigger_mode_->setCurrentText(QString::fromStdString(value.trigger_mode));
+    camera_trigger_source_->setText(QString::fromStdString(value.trigger_source));
+    camera_trigger_delay_->setValue(static_cast<int>(value.trigger_delay_us.value_or(0U)));
+    camera_packet_size_->setValue(static_cast<int>(value.packet_size_bytes.value_or(1500U)));
+    camera_packet_delay_->setValue(static_cast<int>(value.inter_packet_delay_ns.value_or(0U)));
+}
+
+void MainWindow::run_camera_control(const std::string& command, const bool confirmation_required)
+{
+    if (!camera_actions_.control || !camera_selector_ || camera_selector_->currentIndex() < 0)
+        return;
+    if (confirmation_required &&
+        QMessageBox::question(this, QStringLiteral("确认相机操作"),
+                              QStringLiteral("操作 %1 可能影响当前采集，是否继续？")
+                                  .arg(QString::fromStdString(command))) != QMessageBox::Yes)
+        return;
+    show_camera_result(
+        camera_actions_.control(command, camera_selector_->currentText().toStdString()));
+}
+
+void MainWindow::show_camera_result(const Result<void>& result)
+{
+    if (!result && camera_operation_value_)
+        camera_operation_value_->setText(
+            QStringLiteral("失败：%1").arg(QString::fromStdString(result.error().message)));
 }
 
 void MainWindow::apply_snapshot(const ClientStateSnapshot& snapshot)
@@ -527,7 +815,8 @@ void MainWindow::apply_snapshot(const ClientStateSnapshot& snapshot)
     }
 
     uplink_value_->setText(QStringLiteral("待 M8 接入"));
-    camera_count_value_->setText(QStringLiteral("待 M4-05 接入"));
+    if (camera_snapshot_.stale)
+        camera_count_value_->setText(QStringLiteral("不可用（已过期）"));
 
     if (snapshot.alarms.has_value())
     {
@@ -624,6 +913,16 @@ bool MainWindow::select_page(const std::size_t index) noexcept
     }
     navigation_->setCurrentRow(static_cast<int>(index));
     return pages_->currentIndex() == static_cast<int>(index);
+}
+
+bool MainWindow::camera_configuration_ready() const noexcept
+{
+    return camera_selector_ && camera_exposure_ && camera_gain_ && camera_fps_ &&
+           camera_roi_width_ && camera_roi_height_ && camera_pixel_format_ &&
+           camera_trigger_mode_ && camera_trigger_source_ && camera_packet_size_ &&
+           findChild<QPushButton*>(QStringLiteral("camera-discover")) &&
+           findChild<QPushButton*>(QStringLiteral("camera-camera.disconnect")) &&
+           findChild<QPushButton*>(QStringLiteral("camera-update-config"));
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

@@ -4,7 +4,7 @@
 
 `PaperBreakEdgeService` 通过 `QLocalServer` 监听固定名称
 `PaperBreakEdgeService.Ipc`。Windows 下仅已认证的本机用户可执行请求：普通用户只能查询，
-提升后的管理员可执行 `system.reloadConfig` 和 `alarm.acknowledge`。无法确认身份、匿名或远程连接不会进入业务命令处理。
+提升后的管理员可执行 `system.reloadConfig`、`alarm.acknowledge` 和相机写操作。无法确认身份、匿名或远程连接不会进入业务命令处理。
 
 IPC v1 不持久化请求和推送。客户端断线重连后必须重新查询状态；服务端不重放断线期间的推送。
 
@@ -207,6 +207,53 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 每条记录包含 `sequence`、`timestamp`、`threadId`、`category`、`level` 和脱敏后的
 `message`。查询读取异步日志线程维护的内存环，不读取滚动日志文件，因此允许短暂最终一致性。
 当请求游标早于当前最早可用序号或匹配结果超过 `limit` 时，`truncated=true`。
+
+### 相机查询与控制
+
+`camera.list` 和 `camera.discover` 允许已认证本机用户调用，payload 必须为空。`camera.list`
+最多返回四个配置槽位，每项包含 `cameraId`、`location`、`enabled`、`serialNumber`、
+`state`、`savedConfigRevision`、完整 `saved` 参数，以及设备已连接时的 `device` 和服务回读
+`actual` 参数。`camera.discover` 返回厂商无关的型号、序列号、IP、网卡和独占访问状态；未装配
+设备提供者时返回 `SYS_NOT_SUPPORTED`，不得伪造设备。
+
+`camera.getConfig` 允许已认证本机用户调用；其余相机控制命令要求提升后的本机管理员身份。
+除 `camera.updateConfig` 外，单相机命令 payload 必须且只能包含：
+
+```json
+{"cameraId":"CAM01"}
+```
+
+支持 `camera.connect`、`camera.disconnect`、`camera.start`、`camera.stop`、
+`camera.getConfig`、`camera.captureSnapshot` 和 `camera.softwareTrigger`。连接时服务把当前保存参数
+下发给设备并回读实际值；断开会先停止仍在进行的采集。`camera.captureSnapshot` 只返回帧号、宽和高，
+不在 IPC 工作线程进行磁盘写入或 JPEG 编码。软件触发仅在设备实际处于软件触发采集模式时成功。
+
+`camera.updateConfig` payload：
+
+```json
+{
+  "cameraId":"CAM01",
+  "expectedConfigRevision":42,
+  "parameters":{
+    "exposureUs":1000.0,
+    "gainDb":2.0,
+    "frameRate":30.0,
+    "roi":{"width":1920,"height":1080,"offsetX":0,"offsetY":0},
+    "pixelFormat":"Mono8",
+    "triggerMode":"Continuous",
+    "triggerSource":"",
+    "triggerDelayUs":0,
+    "packetSizeBytes":1500,
+    "interPacketDelayNs":0
+  }
+}
+```
+
+`parameters` 只允许上述字段，并由配置 schema 与设备能力共同校验。服务先通过配置仓储的乐观修订、
+审计和原子替换保存，再尝试向已连接设备下发完整参数并回读。成功响应以 `saved`、`dispatched`、
+`applied`、`restartRequired` 和 `storedConfigRevision` 区分阶段；保存成功但设备未连接或拒绝参数时，
+响应仍保留 `saved=true`，同时返回 `applied=false` 和结构化 `applyError`，客户端不得把保存值显示为
+实际值。
 
 ### `preview.subscribe`
 

@@ -4,6 +4,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "paperbreak/camera/control.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -388,6 +390,193 @@ Result<ipc::CommandResponse> log_tail_response(const Json& payload,
     return Result<ipc::CommandResponse>::success({.payload_json = response.dump(), .binary = {}});
 }
 
+bool is_camera_write_command(const std::string_view command)
+{
+    return command == "camera.connect" || command == "camera.disconnect" ||
+           command == "camera.start" || command == "camera.stop" ||
+           command == "camera.updateConfig" || command == "camera.captureSnapshot" ||
+           command == "camera.softwareTrigger";
+}
+
+Result<std::string> camera_id(const Json& payload, const std::string_view operation)
+{
+    if (!payload.contains("cameraId") || !payload["cameraId"].is_string())
+        return Result<std::string>::failure(command_error("IPC_REQUEST_INVALID", Severity::error,
+                                                          "cameraId 必须是字符串",
+                                                          std::string{operation}));
+    const auto value = payload["cameraId"].get<std::string>();
+    if (value.size() != 5U || !value.starts_with("CAM0") || value[4] < '1' || value[4] > '4')
+        return Result<std::string>::failure(command_error("IPC_REQUEST_INVALID", Severity::error,
+                                                          "cameraId 必须为 CAM01 至 CAM04",
+                                                          std::string{operation}));
+    return Result<std::string>::success(value);
+}
+
+Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
+{
+    Json result{{"cameraId", value.camera_id},
+                {"serialNumber", value.serial_number},
+                {"state", camera::camera_control_state_name(value.state)}};
+    if (value.device)
+        result["device"] = {{"model", value.device->model_name},
+                            {"serialNumber", value.device->serial_number},
+                            {"ip", value.device->ip_address},
+                            {"networkInterface", value.device->network_interface}};
+    if (value.actual)
+    {
+        const auto& p = *value.actual;
+        Json actual;
+        if (p.exposure_us)
+            actual["exposureUs"] = *p.exposure_us;
+        if (p.gain_db)
+            actual["gainDb"] = *p.gain_db;
+        if (p.frame_rate)
+            actual["frameRate"] = *p.frame_rate;
+        if (p.roi)
+            actual["roi"] = {{"width", p.roi->width},
+                             {"height", p.roi->height},
+                             {"offsetX", p.roi->offset_x},
+                             {"offsetY", p.roi->offset_y}};
+        if (p.pixel_format)
+        {
+            switch (*p.pixel_format)
+            {
+            case camera::PixelFormat::mono8:
+                actual["pixelFormat"] = "Mono8";
+                break;
+            case camera::PixelFormat::mono10:
+                actual["pixelFormat"] = "Mono10";
+                break;
+            case camera::PixelFormat::mono12:
+                actual["pixelFormat"] = "Mono12";
+                break;
+            case camera::PixelFormat::bayer_rg8:
+                actual["pixelFormat"] = "BayerRG8";
+                break;
+            }
+        }
+        if (p.trigger_mode)
+        {
+            switch (*p.trigger_mode)
+            {
+            case camera::TriggerMode::continuous:
+                actual["triggerMode"] = "Continuous";
+                break;
+            case camera::TriggerMode::hardware:
+                actual["triggerMode"] = "Hardware";
+                break;
+            case camera::TriggerMode::software:
+                actual["triggerMode"] = "Software";
+                break;
+            }
+        }
+        if (p.trigger_source)
+            actual["triggerSource"] = *p.trigger_source;
+        if (p.trigger_delay_us)
+            actual["triggerDelayUs"] = *p.trigger_delay_us;
+        if (p.packet_size_bytes)
+            actual["packetSizeBytes"] = *p.packet_size_bytes;
+        if (p.inter_packet_delay_ns)
+            actual["interPacketDelayNs"] = *p.inter_packet_delay_ns;
+        result["actual"] = std::move(actual);
+    }
+    if (value.last_error)
+        result["lastError"] = {{"code", value.last_error->business_code},
+                               {"message", value.last_error->message}};
+    return result;
+}
+
+Json saved_camera_json(const config::CameraConfig& value)
+{
+    Json result{{"exposureUs", value.exposure_us},
+                {"gainDb", value.gain_db},
+                {"frameRate", value.frame_rate},
+                {"roi",
+                 {{"width", value.roi.width},
+                  {"height", value.roi.height},
+                  {"offsetX", value.roi.offset_x},
+                  {"offsetY", value.roi.offset_y}}},
+                {"triggerSource", value.trigger_source},
+                {"triggerDelayUs", value.trigger_delay_us},
+                {"packetSizeBytes", value.packet_size_bytes},
+                {"interPacketDelayNs", value.inter_packet_delay_ns}};
+    switch (value.pixel_format)
+    {
+    case config::PixelFormat::mono8:
+        result["pixelFormat"] = "Mono8";
+        break;
+    case config::PixelFormat::mono10:
+        result["pixelFormat"] = "Mono10";
+        break;
+    case config::PixelFormat::mono12:
+        result["pixelFormat"] = "Mono12";
+        break;
+    case config::PixelFormat::bayer_rg8:
+        result["pixelFormat"] = "BayerRG8";
+        break;
+    }
+    switch (value.trigger_mode)
+    {
+    case config::TriggerMode::continuous:
+        result["triggerMode"] = "Continuous";
+        break;
+    case config::TriggerMode::hardware:
+        result["triggerMode"] = "Hardware";
+        break;
+    case config::TriggerMode::software:
+        result["triggerMode"] = "Software";
+        break;
+    }
+    return result;
+}
+
+camera::CameraParameterSnapshot camera_parameters(const config::CameraConfig& value)
+{
+    camera::PixelFormat pixel = camera::PixelFormat::mono8;
+    switch (value.pixel_format)
+    {
+    case config::PixelFormat::mono8:
+        pixel = camera::PixelFormat::mono8;
+        break;
+    case config::PixelFormat::mono10:
+        pixel = camera::PixelFormat::mono10;
+        break;
+    case config::PixelFormat::mono12:
+        pixel = camera::PixelFormat::mono12;
+        break;
+    case config::PixelFormat::bayer_rg8:
+        pixel = camera::PixelFormat::bayer_rg8;
+        break;
+    }
+    camera::TriggerMode trigger = camera::TriggerMode::continuous;
+    switch (value.trigger_mode)
+    {
+    case config::TriggerMode::continuous:
+        trigger = camera::TriggerMode::continuous;
+        break;
+    case config::TriggerMode::hardware:
+        trigger = camera::TriggerMode::hardware;
+        break;
+    case config::TriggerMode::software:
+        trigger = camera::TriggerMode::software;
+        break;
+    }
+    camera::CameraParameterSnapshot result{
+        .exposure_us = value.exposure_us,
+        .gain_db = value.gain_db,
+        .frame_rate = value.frame_rate,
+        .roi =
+            camera::Roi{value.roi.width, value.roi.height, value.roi.offset_x, value.roi.offset_y},
+        .pixel_format = pixel,
+        .trigger_mode = trigger,
+        .trigger_delay_us = value.trigger_delay_us,
+        .packet_size_bytes = value.packet_size_bytes,
+        .inter_packet_delay_ns = value.inter_packet_delay_ns};
+    if (trigger == camera::TriggerMode::hardware)
+        result.trigger_source = value.trigger_source;
+    return result;
+}
+
 } // namespace
 
 void ServiceStatusStore::set_state(const ServiceState state)
@@ -442,10 +631,12 @@ SystemCommandService::SystemCommandService(config::ConfigRepository& repository,
                                            std::shared_ptr<monitoring::AlarmRegistry> alarms,
                                            std::shared_ptr<logging::LoggingRuntime> logging,
                                            std::filesystem::path config_directory,
-                                           std::shared_ptr<pipeline::PreviewRuntime> preview)
+                                           std::shared_ptr<pipeline::PreviewRuntime> preview,
+                                           std::shared_ptr<camera::CameraControlRuntime> cameras)
     : repository_(repository), status_(std::move(status)), metrics_(std::move(metrics)),
       alarms_(std::move(alarms)), logging_(std::move(logging)),
-      config_directory_(std::move(config_directory)), preview_(std::move(preview))
+      config_directory_(std::move(config_directory)), preview_(std::move(preview)),
+      cameras_(std::move(cameras))
 {
 }
 
@@ -457,6 +648,206 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
     if (!payload)
     {
         return Result<ipc::CommandResponse>::failure(payload.error());
+    }
+
+    if (request.command.starts_with("camera."))
+    {
+        if (!cameras_)
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_NOT_SUPPORTED", Severity::warning, "相机控制运行时尚未装配",
+                              "ipc.camera.dispatch"));
+        if (is_camera_write_command(request.command) &&
+            (!peer.local || !peer.authenticated || !peer.administrator))
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_UNAUTHORIZED", Severity::error,
+                              "相机控制操作要求提升后的本机管理员身份", "ipc.camera.dispatch"));
+        if (is_camera_write_command(request.command) && stop_token.stop_requested())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_SERVICE_STOPPING", Severity::warning,
+                              "服务正在停止，拒绝相机控制操作", "ipc.camera.dispatch", true));
+        if (request.command == "camera.discover")
+        {
+            if (!payload.value().empty())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "camera.discover payload 必须为空", "ipc.camera.discover"));
+            auto discovered = cameras_->discover();
+            if (!discovered)
+                return Result<ipc::CommandResponse>::failure(discovered.error());
+            Json devices = Json::array();
+            for (const auto& d : discovered.value())
+                devices.push_back({{"model", d.model_name},
+                                   {"serialNumber", d.serial_number},
+                                   {"ip", d.ip_address},
+                                   {"networkInterface", d.network_interface},
+                                   {"exclusiveAccessAvailable", d.exclusive_access_available}});
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = Json{{"devices", std::move(devices)}}.dump(), .binary = {}});
+        }
+        const bool no_payload = request.command == "camera.list";
+        if (no_payload)
+        {
+            if (!payload.value().empty())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "camera.list payload 必须为空", "ipc.camera.list"));
+            auto config = repository_.snapshot();
+            if (!config)
+                return Result<ipc::CommandResponse>::failure(config.error());
+            Json list = Json::array();
+            for (const auto& item : config.value().stored->cameras)
+            {
+                auto current = cameras_->get(item.id, item.serial_number);
+                if (!current)
+                    return Result<ipc::CommandResponse>::failure(current.error());
+                auto json = camera_snapshot_json(current.value());
+                json["enabled"] = item.enabled;
+                json["location"] = item.location;
+                json["savedConfigRevision"] = config.value().stored_config_revision;
+                json["saved"] = saved_camera_json(item);
+                list.push_back(std::move(json));
+            }
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = Json{{"cameras", std::move(list)}}.dump(), .binary = {}});
+        }
+        auto id = camera_id(payload.value(), "ipc.camera");
+        if (!id)
+            return Result<ipc::CommandResponse>::failure(id.error());
+        if (request.command != "camera.updateConfig" &&
+            !has_only_field(payload.value(), "cameraId"))
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error, "相机命令包含未知字段", "ipc.camera"));
+        if (request.command == "camera.updateConfig" &&
+            !has_only_fields(payload.value(), {"cameraId", "expectedConfigRevision", "parameters"}))
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "camera.updateConfig 包含未知字段", "ipc.camera.updateConfig"));
+        auto config = repository_.snapshot();
+        if (!config)
+            return Result<ipc::CommandResponse>::failure(config.error());
+        const auto found = std::find_if(config.value().stored->cameras.begin(),
+                                        config.value().stored->cameras.end(),
+                                        [&](const auto& c) { return c.id == id.value(); });
+        if (found == config.value().stored->cameras.end())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("CAMERA_NOT_FOUND", Severity::error, "逻辑相机未配置", "ipc.camera"));
+        Result<camera::CameraControlSnapshot> result =
+            Result<camera::CameraControlSnapshot>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error, "未知相机命令", "ipc.camera"));
+        if (request.command == "camera.connect")
+        {
+            result = cameras_->connect(id.value(), found->serial_number);
+            if (result)
+                result = cameras_->update(id.value(), camera_parameters(*found));
+        }
+        else if (request.command == "camera.disconnect")
+            result = cameras_->disconnect(id.value());
+        else if (request.command == "camera.start")
+            result = cameras_->start(id.value());
+        else if (request.command == "camera.stop")
+            result = cameras_->stop(id.value());
+        else if (request.command == "camera.getConfig")
+            result = cameras_->get(id.value(), found->serial_number);
+        else if (request.command == "camera.updateConfig")
+        {
+            if (!payload.value().contains("expectedConfigRevision") ||
+                !payload.value()["expectedConfigRevision"].is_number_unsigned() ||
+                !payload.value().contains("parameters") ||
+                !payload.value()["parameters"].is_object())
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error,
+                    "camera.updateConfig 需要 expectedConfigRevision 和 parameters 对象",
+                    "ipc.camera.updateConfig"));
+            const Json& parameters = payload.value()["parameters"];
+            static constexpr std::array<std::string_view, 9U> allowed{
+                "exposureUs",    "gainDb",         "frameRate",
+                "roi",           "pixelFormat",    "triggerMode",
+                "triggerSource", "triggerDelayUs", "packetSizeBytes"};
+            for (auto it = parameters.begin(); it != parameters.end(); ++it)
+                if (std::find(allowed.begin(), allowed.end(), it.key()) == allowed.end() &&
+                    it.key() != "interPacketDelayNs")
+                    return Result<ipc::CommandResponse>::failure(command_error(
+                        "IPC_REQUEST_INVALID", Severity::error, "camera.updateConfig 包含未知参数",
+                        "ipc.camera.updateConfig"));
+            Json document = Json::parse(config::serialize_config(*config.value().stored));
+            Json* target = nullptr;
+            for (auto& candidate : document["cameras"])
+                if (candidate["id"] == id.value())
+                {
+                    target = &candidate;
+                    break;
+                }
+            if (!target)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("CAMERA_NOT_FOUND", Severity::error, "逻辑相机未配置",
+                                  "ipc.camera.updateConfig"));
+            for (auto it = parameters.begin(); it != parameters.end(); ++it)
+                (*target)[it.key()] = it.value();
+            auto saved = repository_.update(
+                document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
+                {.source = config::ConfigChangeSource::local_ipc,
+                 .actor = peer.actor_sid,
+                 .correlation_id = request.request_id});
+            if (!saved)
+                return Result<ipc::CommandResponse>::failure(saved.error());
+            const auto updated = std::find_if(
+                saved.value().stored->cameras.begin(), saved.value().stored->cameras.end(),
+                [&](const auto& item) { return item.id == id.value(); });
+            if (updated == saved.value().stored->cameras.end())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("CAMERA_NOT_FOUND", Severity::error, "保存后逻辑相机不存在",
+                                  "ipc.camera.updateConfig"));
+            auto applied = cameras_->update(id.value(), camera_parameters(*updated));
+            if (applied)
+                result = std::move(applied);
+            else
+            {
+                Json response{{"saved", true},
+                              {"dispatched", false},
+                              {"applied", false},
+                              {"restartRequired", !saved.value().pending_restart_paths.empty()},
+                              {"storedConfigRevision", saved.value().stored_config_revision},
+                              {"applyError",
+                               {{"code", applied.error().business_code},
+                                {"message", applied.error().message}}}};
+                return Result<ipc::CommandResponse>::success(
+                    {.payload_json = response.dump(), .binary = {}});
+            }
+            if (!result)
+                return Result<ipc::CommandResponse>::failure(result.error());
+            Json response = camera_snapshot_json(result.value());
+            response["saved"] = true;
+            response["dispatched"] = true;
+            response["applied"] = true;
+            response["restartRequired"] = !saved.value().pending_restart_paths.empty();
+            response["storedConfigRevision"] = saved.value().stored_config_revision;
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = response.dump(), .binary = {}});
+        }
+        else if (request.command == "camera.softwareTrigger")
+        {
+            auto triggered = cameras_->software_trigger(id.value());
+            if (!triggered)
+                return Result<ipc::CommandResponse>::failure(triggered.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = R"({"triggered":true})", .binary = {}});
+        }
+        else if (request.command == "camera.captureSnapshot")
+        {
+            auto frame = cameras_->capture_snapshot(id.value());
+            if (!frame)
+                return Result<ipc::CommandResponse>::failure(frame.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = Json{{"cameraFrameNumber", frame.value().camera_frame_number},
+                                      {"width", frame.value().geometry.width},
+                                      {"height", frame.value().geometry.height}}
+                                     .dump(),
+                 .binary = {}});
+        }
+        if (!result)
+            return Result<ipc::CommandResponse>::failure(result.error());
+        return Result<ipc::CommandResponse>::success(
+            {.payload_json = camera_snapshot_json(result.value()).dump(), .binary = {}});
     }
 
     if (request.command == "system.getStatus")
@@ -511,23 +902,24 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
     if (request.command == "preview.subscribe")
     {
         if (!preview_)
-            return Result<ipc::CommandResponse>::failure(command_error(
-                "SYS_NOT_SUPPORTED", Severity::warning, "预览运行时尚未装配", "ipc.preview.subscribe"));
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_NOT_SUPPORTED", Severity::warning, "预览运行时尚未装配",
+                              "ipc.preview.subscribe"));
         if (!has_only_field(payload.value(), "cameraIds") ||
             !payload.value()["cameraIds"].is_array() || payload.value()["cameraIds"].empty() ||
             payload.value()["cameraIds"].size() > 4U)
             return Result<ipc::CommandResponse>::failure(command_error(
-                "IPC_REQUEST_INVALID", Severity::error, "preview.subscribe 需要 1 至 4 个 cameraIds",
-                "ipc.preview.subscribe"));
+                "IPC_REQUEST_INVALID", Severity::error,
+                "preview.subscribe 需要 1 至 4 个 cameraIds", "ipc.preview.subscribe"));
         std::vector<std::string> camera_ids;
         camera_ids.reserve(payload.value()["cameraIds"].size());
         for (const auto& value : payload.value()["cameraIds"])
         {
             if (!value.is_string() || value.get_ref<const std::string&>().empty() ||
                 value.get_ref<const std::string&>().size() > 32U)
-                return Result<ipc::CommandResponse>::failure(command_error(
-                    "IPC_REQUEST_INVALID", Severity::error, "cameraIds 包含无效相机编号",
-                    "ipc.preview.subscribe"));
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "cameraIds 包含无效相机编号", "ipc.preview.subscribe"));
             camera_ids.push_back(value.get<std::string>());
         }
         auto subscribed = preview_->subscribe(peer.connection_id, camera_ids);
@@ -540,12 +932,13 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
     if (request.command == "preview.unsubscribe")
     {
         if (!preview_)
-            return Result<ipc::CommandResponse>::failure(command_error(
-                "SYS_NOT_SUPPORTED", Severity::warning, "预览运行时尚未装配", "ipc.preview.unsubscribe"));
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_NOT_SUPPORTED", Severity::warning, "预览运行时尚未装配",
+                              "ipc.preview.unsubscribe"));
         if (!payload.value().empty())
-            return Result<ipc::CommandResponse>::failure(command_error(
-                "IPC_REQUEST_INVALID", Severity::error, "preview.unsubscribe payload 必须为空",
-                "ipc.preview.unsubscribe"));
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "preview.unsubscribe payload 必须为空", "ipc.preview.unsubscribe"));
         preview_->unsubscribe(peer.connection_id);
         return Result<ipc::CommandResponse>::success(
             {.payload_json = R"({"subscribed":false})", .binary = {}});

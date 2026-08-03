@@ -1,11 +1,15 @@
+#include "paperbreak/camera/control.hpp"
+#if defined(PAPERBREAK_ENABLE_HIKROBOT)
+#include "paperbreak/camera/hikrobot_camera.hpp"
+#endif
 #include "paperbreak/common/version.hpp"
 #include "paperbreak/config/basic_config.hpp"
 #include "paperbreak/config/config_repository.hpp"
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/monitoring/monitoring.hpp"
+#include "paperbreak/pipeline/preview.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/platform/system_metrics.hpp"
-#include "paperbreak/pipeline/preview.hpp"
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/service/system_commands.hpp"
 #include "paperbreak/service/windows/console_control.hpp"
@@ -397,7 +401,8 @@ class IpcLifecycleComponent final : public paperbreak::service::ILifecycleCompon
 class PreviewLifecycleComponent final : public paperbreak::service::ILifecycleComponent
 {
   public:
-    explicit PreviewLifecycleComponent(std::shared_ptr<paperbreak::pipeline::PreviewRuntime> runtime)
+    explicit PreviewLifecycleComponent(
+        std::shared_ptr<paperbreak::pipeline::PreviewRuntime> runtime)
         : runtime_(std::move(runtime))
     {
     }
@@ -462,16 +467,16 @@ class PreviewPublisher final
         if (delivery.metadata.roi)
         {
             const auto& roi = delivery.metadata.roi.value();
-            payload["roi"] = {{"x", roi.x}, {"y", roi.y}, {"width", roi.width},
-                              {"height", roi.height}};
+            payload["roi"] = {
+                {"x", roi.x}, {"y", roi.y}, {"width", roi.width}, {"height", roi.height}};
         }
         static_cast<void>(server->try_publish(
             {.event_name = "preview.frame",
              .timestamp = paperbreak::current_utc_timestamp(),
              .payload_json = payload.dump(),
              .binary = std::move(delivery.jpeg),
-             .coalescing_key = "preview." + std::to_string(delivery.subscriber_id) + "." +
-                               delivery.camera_id,
+             .coalescing_key =
+                 "preview." + std::to_string(delivery.subscriber_id) + "." + delivery.camera_id,
              .target_connection_id = delivery.subscriber_id},
             paperbreak::ipc::PushPolicy::coalesce_latest));
     }
@@ -856,6 +861,14 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     auto metrics = std::make_shared<paperbreak::monitoring::MetricRegistry>();
     auto alarms = std::make_shared<paperbreak::monitoring::AlarmRegistry>();
     std::shared_ptr<paperbreak::pipeline::PreviewRuntime> preview;
+#if defined(PAPERBREAK_ENABLE_HIKROBOT)
+    std::shared_ptr<paperbreak::camera::ICameraProvider> camera_provider{
+        paperbreak::camera::hikrobot::create_hikrobot_camera_provider()};
+    auto cameras =
+        std::make_shared<paperbreak::camera::CameraControlRuntime>(std::move(camera_provider));
+#else
+    auto cameras = std::make_shared<paperbreak::camera::CameraControlRuntime>();
+#endif
     std::shared_ptr<PreviewPublisher> preview_publisher;
     if (loaded.value().effective->preview.enabled)
     {
@@ -877,11 +890,13 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                 std::move(camera_ids), paperbreak::pipeline::make_opencv_preview_encoder(),
                 [preview_publisher](paperbreak::pipeline::PreviewDelivery delivery) {
                     preview_publisher->publish(std::move(delivery));
-                }, preview_options);
+                },
+                preview_options);
         }
     }
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
-        configuration->repository, status, metrics, alarms, logging, config_path.parent_path(), preview);
+        configuration->repository, status, metrics, alarms, logging, config_path.parent_path(),
+        preview, cameras);
     auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(commands);
     if (preview_publisher)
         preview_publisher->set_server(ipc_server);

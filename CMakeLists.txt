@@ -83,6 +83,7 @@ install(RUNTIME_DEPENDENCY_SET paperbreak_service_runtime
     DIRECTORIES
         "$<TARGET_FILE_DIR:spdlog::spdlog>"
         "$<TARGET_FILE_DIR:Qt6::Core>"
+        "$<TARGET_FILE_DIR:opencv_core>"
     PRE_EXCLUDE_REGEXES
         "api-ms-.*"
         "ext-ms-.*"

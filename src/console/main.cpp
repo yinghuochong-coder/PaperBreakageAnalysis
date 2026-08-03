@@ -1,4 +1,5 @@
 #include "paperbreak/common/version.hpp"
+#include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/navigation_model.hpp"
 #include "paperbreak/console/preview_client.hpp"
@@ -62,13 +63,45 @@ int main(int argc, char* argv[])
     auto* const logging_runtime = logging.get();
 
     std::unique_ptr<paperbreak::console::PreviewClient> preview_client;
-    paperbreak::console::MainWindow main_window([&preview_client](const bool paused) {
-        if (preview_client)
-            preview_client->set_paused(paused);
-    });
+    std::unique_ptr<paperbreak::console::CameraClient> camera_client;
+    paperbreak::console::MainWindow main_window(
+        [&preview_client](const bool paused) {
+            if (preview_client)
+                preview_client->set_paused(paused);
+        },
+        {.discover =
+             [&camera_client] {
+                 if (camera_client)
+                     return camera_client->discover();
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "相机客户端尚未初始化",
+                     "console", "console.camera.discover", true));
+             },
+         .control =
+             [&camera_client](std::string command, std::string camera_id) {
+                 if (camera_client)
+                     return camera_client->control(std::move(command), std::move(camera_id));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "相机客户端尚未初始化",
+                     "console", "console.camera.control", true));
+             },
+         .update_config =
+             [&camera_client](std::string camera_id, const std::uint64_t revision,
+                              paperbreak::console::CameraParameterValue parameters) {
+                 if (camera_client)
+                     return camera_client->update_config(std::move(camera_id), revision,
+                                                         parameters);
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "相机客户端尚未初始化",
+                     "console", "console.camera.updateConfig", true));
+             }});
     preview_client = std::make_unique<paperbreak::console::PreviewClient>(
         [&main_window](const paperbreak::console::PreviewSnapshot& snapshot) {
             main_window.apply_preview_snapshot(snapshot);
+        });
+    camera_client = std::make_unique<paperbreak::console::CameraClient>(
+        [&main_window](const paperbreak::console::CameraClientSnapshot& snapshot) {
+            main_window.apply_camera_snapshot(snapshot);
         });
     paperbreak::console::ClientStateSnapshot latest_snapshot;
     std::atomic_bool restart_running{};
@@ -185,6 +218,8 @@ int main(int argc, char* argv[])
         if (!preview_start)
             main_window.apply_preview_snapshot(preview_client->snapshot());
     }
+    if (!smoke_test)
+        static_cast<void>(camera_client->start());
 
     bool smoke_ok = true;
     if (smoke_test)
@@ -192,7 +227,8 @@ int main(int argc, char* argv[])
         smoke_ok = tray.is_visible() && main_window.isVisible() && tray.action_count() == 8U &&
                    !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
-                   main_window.select_page(11U) && main_window.select_page(0U);
+                   main_window.camera_configuration_ready() && main_window.select_page(11U) &&
+                   main_window.select_page(0U);
         for (int iteration = 0; iteration < 20 && smoke_ok; ++iteration)
         {
             main_window.close();
@@ -214,6 +250,8 @@ int main(int argc, char* argv[])
     QObject::connect(&refresh_timer, &QTimer::timeout,
                      [&state_store] { state_store.refresh_dynamic(); });
     refresh_timer.start(1000);
+    QObject::connect(&refresh_timer, &QTimer::timeout,
+                     [&camera_client] { camera_client->refresh(); });
     QTimer clock_timer;
     QObject::connect(&clock_timer, &QTimer::timeout, &main_window,
                      [&main_window] { main_window.update_clock(); });
@@ -231,6 +269,8 @@ int main(int argc, char* argv[])
     state_store.stop();
     preview_client->stop();
     preview_client.reset();
+    camera_client->stop();
+    camera_client.reset();
     if (restart_task.joinable())
     {
         restart_task.request_stop();

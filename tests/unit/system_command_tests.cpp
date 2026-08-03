@@ -1,7 +1,9 @@
+#include "paperbreak/camera/control.hpp"
+#include "paperbreak/camera/mock_camera.hpp"
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/monitoring/monitoring.hpp"
-#include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/pipeline/preview.hpp"
+#include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/service/system_commands.hpp"
 
 #include <nlohmann/json.hpp>
@@ -125,17 +127,19 @@ TEST(SystemCommand, ValidatesPreviewSubscriptionAgainstBoundedRuntime)
         [](paperbreak::pipeline::PreviewDelivery) {});
     paperbreak::service::SystemCommandService commands(
         fixture.repository, fixture.status, {}, {}, {}, fixture.config_path.parent_path(), preview);
-    const paperbreak::ipc::PeerIdentity preview_reader{
-        .actor_sid = "S-1-5-21-preview", .connection_id = 42U, .local = true,
-        .authenticated = true, .administrator = false};
-    auto subscribed = commands.handle(fixture.request("preview.subscribe", R"({"cameraIds":["CAM01"]})"),
-                                      preview_reader, {});
+    const paperbreak::ipc::PeerIdentity preview_reader{.actor_sid = "S-1-5-21-preview",
+                                                       .connection_id = 42U,
+                                                       .local = true,
+                                                       .authenticated = true,
+                                                       .administrator = false};
+    auto subscribed = commands.handle(
+        fixture.request("preview.subscribe", R"({"cameraIds":["CAM01"]})"), preview_reader, {});
     ASSERT_TRUE(subscribed);
     EXPECT_TRUE(Json::parse(subscribed.value().payload_json).at("subscribed").get<bool>());
     EXPECT_EQ(preview->snapshot().subscriptions, 1U);
 
-    auto invalid = commands.handle(fixture.request("preview.subscribe", R"({"cameraIds":["UNKNOWN"]})"),
-                                   preview_reader, {});
+    auto invalid = commands.handle(
+        fixture.request("preview.subscribe", R"({"cameraIds":["UNKNOWN"]})"), preview_reader, {});
     ASSERT_FALSE(invalid);
     EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
 
@@ -211,13 +215,140 @@ TEST(SystemCommand, PreservesConfigConflictAndRejectsUnknownOrBinaryCommands)
 
     auto unknown = fixture.commands.handle(fixture.request("camera.list"), reader, {});
     ASSERT_FALSE(unknown);
-    EXPECT_EQ(unknown.error().business_code, "IPC_REQUEST_INVALID");
+    EXPECT_EQ(unknown.error().business_code, "SYS_NOT_SUPPORTED");
 
     auto binary_request = fixture.request("system.getStatus");
     binary_request.binary.push_back(std::byte{0x01});
     auto binary = fixture.commands.handle(binary_request, reader, {});
     ASSERT_FALSE(binary);
     EXPECT_EQ(binary.error().business_code, "IPC_REQUEST_INVALID");
+}
+
+TEST(SystemCommand, ControlsMockCameraPersistsConfigAndReturnsReadback)
+{
+    CommandFixture fixture;
+    auto current = fixture.repository.snapshot();
+    ASSERT_TRUE(current);
+    Json document = Json::parse(paperbreak::config::serialize_config(*current.value().stored));
+    document["cameras"] =
+        Json::array({{{"id", "CAM01"},
+                      {"enabled", true},
+                      {"serialNumber", "MOCK-01"},
+                      {"location", "测试位置"},
+                      {"exposureUs", 100.0},
+                      {"gainDb", 2.0},
+                      {"frameRate", 30.0},
+                      {"roi", {{"width", 64}, {"height", 48}, {"offsetX", 0}, {"offsetY", 0}}},
+                      {"pixelFormat", "Mono8"},
+                      {"triggerMode", "Continuous"},
+                      {"triggerSource", ""},
+                      {"triggerDelayUs", 0},
+                      {"packetSizeBytes", 1500},
+                      {"interPacketDelayNs", 0}}});
+    ASSERT_TRUE(
+        fixture.repository.update(document.dump(), 1U,
+                                  {.source = paperbreak::config::ConfigChangeSource::local_ipc,
+                                   .actor = "test",
+                                   .correlation_id = "setup"}));
+
+    auto provider = paperbreak::camera::mock::MockCameraProvider::create(
+        {{.descriptor = {.model_name = "Mock",
+                         .serial_number = "MOCK-01",
+                         .ip_address = "127.0.0.1",
+                         .network_interface = "loopback"},
+          .width = 64U,
+          .height = 48U,
+          .frame_rate = 30.0}});
+    ASSERT_TRUE(provider);
+    std::shared_ptr<paperbreak::camera::ICameraProvider> shared_provider{
+        std::move(provider).value()};
+    auto runtime = std::make_shared<paperbreak::camera::CameraControlRuntime>(shared_provider);
+    paperbreak::service::SystemCommandService commands{fixture.repository,
+                                                       fixture.status,
+                                                       {},
+                                                       {},
+                                                       {},
+                                                       fixture.config_path.parent_path(),
+                                                       {},
+                                                       runtime};
+
+    auto list = commands.handle(fixture.request("camera.list"), reader, {});
+    ASSERT_TRUE(list);
+    const Json listed = Json::parse(list.value().payload_json);
+    ASSERT_EQ(listed["cameras"].size(), 1U);
+    EXPECT_EQ(listed["cameras"][0]["state"], "disconnected");
+    EXPECT_EQ(listed["cameras"][0]["saved"]["exposureUs"], 100.0);
+
+    auto discovered = commands.handle(fixture.request("camera.discover"), reader, {});
+    ASSERT_TRUE(discovered);
+    EXPECT_EQ(Json::parse(discovered.value().payload_json)["devices"].size(), 1U);
+    auto denied =
+        commands.handle(fixture.request("camera.connect", R"({"cameraId":"CAM01"})"), reader, {});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
+    auto connected = commands.handle(fixture.request("camera.connect", R"({"cameraId":"CAM01"})"),
+                                     administrator, {});
+    ASSERT_TRUE(connected);
+    const Json connected_json = Json::parse(connected.value().payload_json);
+    EXPECT_EQ(connected_json["actual"]["exposureUs"], 100.0);
+    EXPECT_EQ(connected_json["actual"]["pixelFormat"], "Mono8");
+    auto readback =
+        commands.handle(fixture.request("camera.getConfig", R"({"cameraId":"CAM01"})"), reader, {});
+    ASSERT_TRUE(readback);
+    EXPECT_EQ(Json::parse(readback.value().payload_json)["actual"]["frameRate"], 30.0);
+
+    auto updated = commands.handle(
+        fixture.request(
+            "camera.updateConfig",
+            R"({"cameraId":"CAM01","expectedConfigRevision":2,"parameters":{"exposureUs":120.0}})"),
+        administrator, {});
+    ASSERT_TRUE(updated);
+    const Json update_json = Json::parse(updated.value().payload_json);
+    EXPECT_TRUE(update_json["saved"].get<bool>());
+    EXPECT_TRUE(update_json["dispatched"].get<bool>());
+    EXPECT_TRUE(update_json["applied"].get<bool>());
+    EXPECT_EQ(update_json["actual"]["exposureUs"], 120.0);
+
+    auto software_mode = commands.handle(
+        fixture.request(
+            "camera.updateConfig",
+            R"({"cameraId":"CAM01","expectedConfigRevision":3,"parameters":{"triggerMode":"Software","triggerSource":""}})"),
+        administrator, {});
+    ASSERT_TRUE(software_mode);
+    EXPECT_EQ(Json::parse(software_mode.value().payload_json)["actual"]["triggerMode"], "Software");
+
+    ASSERT_TRUE(commands.handle(fixture.request("camera.start", R"({"cameraId":"CAM01"})"),
+                                administrator, {}));
+    ASSERT_TRUE(commands.handle(
+        fixture.request("camera.softwareTrigger", R"({"cameraId":"CAM01"})"), administrator, {}));
+    auto capture = commands.handle(
+        fixture.request("camera.captureSnapshot", R"({"cameraId":"CAM01"})"), administrator, {});
+    ASSERT_TRUE(capture);
+    EXPECT_EQ(Json::parse(capture.value().payload_json)["width"], 64U);
+    ASSERT_TRUE(commands.handle(fixture.request("camera.stop", R"({"cameraId":"CAM01"})"),
+                                administrator, {}));
+    ASSERT_TRUE(commands.handle(fixture.request("camera.disconnect", R"({"cameraId":"CAM01"})"),
+                                administrator, {}));
+
+    auto extra = commands.handle(
+        fixture.request("camera.getConfig", R"({"cameraId":"CAM01","extra":true})"), reader, {});
+    ASSERT_FALSE(extra);
+    EXPECT_EQ(extra.error().business_code, "IPC_REQUEST_INVALID");
+    auto invalid_update = commands.handle(
+        fixture.request(
+            "camera.updateConfig",
+            R"({"cameraId":"CAM01","expectedConfigRevision":4,"parameters":{"frameRate":0.0}})"),
+        administrator, {});
+    ASSERT_FALSE(invalid_update);
+    EXPECT_EQ(invalid_update.error().business_code, "SYS_CONFIG_INVALID");
+    ASSERT_TRUE(fixture.repository.snapshot());
+    EXPECT_EQ(fixture.repository.snapshot().value().stored_config_revision, 4U);
+    std::stop_source stopped;
+    stopped.request_stop();
+    auto stopping = commands.handle(fixture.request("camera.connect", R"({"cameraId":"CAM01"})"),
+                                    administrator, stopped.get_token());
+    ASSERT_FALSE(stopping);
+    EXPECT_EQ(stopping.error().business_code, "SYS_SERVICE_STOPPING");
 }
 
 TEST(SystemCommand, ReloadIsIdempotentAndInvalidConfigPreservesActiveSnapshot)

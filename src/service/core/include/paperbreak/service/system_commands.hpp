@@ -1,5 +1,6 @@
 #pragma once
 
+#include "paperbreak/camera/control.hpp"
 #include "paperbreak/config/config_repository.hpp"
 #include "paperbreak/ipc/server.hpp"
 #include "paperbreak/logging/logging.hpp"
@@ -47,7 +48,8 @@ class SystemCommandService final : public ipc::IRequestHandler
                          std::shared_ptr<monitoring::AlarmRegistry> alarms = {},
                          std::shared_ptr<logging::LoggingRuntime> logging = {},
                          std::filesystem::path config_directory = {},
-                         std::shared_ptr<pipeline::PreviewRuntime> preview = {});
+                         std::shared_ptr<pipeline::PreviewRuntime> preview = {},
+                         std::shared_ptr<camera::CameraControlRuntime> cameras = {});
 
     [[nodiscard]] Result<ipc::CommandResponse> handle(const ipc::RequestMessage& request,
                                                       const ipc::PeerIdentity& peer,
@@ -61,6 +63,7 @@ class SystemCommandService final : public ipc::IRequestHandler
     std::shared_ptr<logging::LoggingRuntime> logging_;
     std::filesystem::path config_directory_;
     std::shared_ptr<pipeline::PreviewRuntime> preview_;
+    std::shared_ptr<camera::CameraControlRuntime> cameras_;
 };
 
 } // namespace paperbreak::service

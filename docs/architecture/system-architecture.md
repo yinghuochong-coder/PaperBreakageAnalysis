@@ -183,7 +183,7 @@ Qt 桌面客户端只承担：
 | `paperbreak_platform_windows` | Windows 平台端口及系统健康指标源实现 | platform、common、monitoring 接口、Windows API | 业务状态、Widgets、MVS |
 | `paperbreak_config` | 强类型配置、schema 校验、版本、原子存储 | common、JSON、受控平台文件适配 | 相机实现、UI、上传实现 |
 | `paperbreak_logging` | 日志门面、分类、脱敏、滚动和刷新 | common、spdlog | 业务模块反向依赖 |
-| `paperbreak_camera` | 相机接口、能力、状态机、FramePacket、管理器 | common、monitoring 接口 | MVS 头文件、Widgets |
+| `paperbreak_camera` | 相机接口、能力、状态机、FramePacket、最多四路的运维控制会话 | common、monitoring 接口 | MVS 头文件、Widgets |
 | `paperbreak_camera_mock` | 模拟设备、模拟帧和故障注入 | camera、common | MVS |
 | `paperbreak_camera_hikrobot` | MVS 枚举、句柄、参数、取流和错误翻译 | camera、common、MVS SDK | UI、事件、上传 |
 | `paperbreak_pipeline` | 预处理节点、帧路由、顺序和背压策略 | common、camera、algorithm 接口、event 接口 | MVS、SQLite、网络实现 |
@@ -198,7 +198,7 @@ Qt 桌面客户端只承担：
 | `paperbreak_plant_io` | `IPlantIoAdapter` 和生产信号模型 | common | 具体未批准协议 |
 | `paperbreak_monitoring` | 指标、报警、健康快照和诊断接口 | common、logging 接口 | UI、MVS |
 | `paperbreak_ipc` | 版本化 IPC 编解码、Server/Client 传输 | common、platform_windows、Qt Core/Network、nlohmann/json | Widgets、MVS、业务实现 |
-| `paperbreak_console_model` | 客户端连接/服务状态快照、代次和过期语义 | common、ipc、JSON | Widgets、相机/存储/算法实现、MVS |
+| `paperbreak_console_model` | 客户端连接/服务与相机快照、单写操作在途、代次和过期语义 | common、ipc、JSON | Widgets、相机/存储/算法实现、MVS |
 | `paperbreak_service_core` | ServiceRuntime、用例编排、命令处理和生命周期 | 上述业务接口，不依赖具体适配器 | Widgets、MVS C API、具体网络/数据库句柄 |
 | `paperbreak_windows_service_control` | 安装器和 Qt 客户端复用的窄 SCM 管理适配，含有界重启 | common、Windows API | Widgets、业务状态、MVS |
 | `paperbreak_windows_service` | SCM 宿主与 Win32 服务适配 | service_core、windows_service_control、platform_windows、common | 业务模块内部实现 |

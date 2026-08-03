@@ -1,3 +1,4 @@
+#include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/navigation_model.hpp"
 #include "paperbreak/console/preview_client.hpp"
@@ -110,6 +111,38 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
     bool malformed_locations_{};
     std::atomic_uint64_t metrics_requests_{};
     std::atomic_uint64_t alarm_requests_{};
+};
+
+class CameraHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage& request, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        if (request.command == "camera.list")
+        {
+            ++list_requests;
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"pixelFormat":"Mono8","triggerMode":"Continuous"}}]})",
+                 .binary = {}});
+        }
+        ++operation_requests;
+        last_command = request.command;
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+            {.payload_json =
+                 request.command == "camera.discover"
+                     ? R"({"devices":[{"model":"Mock","serialNumber":"MOCK-01","ip":"127.0.0.1","transportId":"mock0"}]})"
+                 : request.command == "camera.updateConfig"
+                     ? R"({"saved":true,"dispatched":true,"applied":true,"restartRequired":false})"
+                     : R"({"state":"connected"})",
+             .binary = {}});
+    }
+
+    std::atomic_uint64_t list_requests{};
+    std::atomic_uint64_t operation_requests{};
+    std::string last_command;
 };
 
 std::string state_name()
@@ -331,6 +364,61 @@ TEST(ClientStateStore, InvalidLocationsStayStaleWithoutInvalidatingStatus)
     EXPECT_EQ(latest.service_status->service_state, "running");
 
     store.stop();
+    stop_server(server);
+}
+
+TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
+{
+    const std::string name = state_name();
+    auto handler = std::make_shared<CameraHandler>();
+    paperbreak::ipc::IpcServer server(handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name));
+    ASSERT_TRUE(server.start());
+
+    paperbreak::console::CameraClientSnapshot latest;
+    paperbreak::console::CameraClient client([&](const auto& snapshot) { latest = snapshot; },
+                                             client_options(name));
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until([&] { return !latest.stale && latest.cameras.size() == 1U; }));
+    const auto& camera = latest.cameras.front();
+    EXPECT_EQ(camera.id, "CAM01");
+    EXPECT_EQ(camera.saved_config_revision, 7U);
+    EXPECT_DOUBLE_EQ(camera.saved.exposure_us.value(), 100.0);
+    EXPECT_DOUBLE_EQ(camera.actual.exposure_us.value(), 101.0);
+
+    ASSERT_TRUE(client.control("camera.connect", "CAM01"));
+    auto busy = client.control("camera.start", "CAM01");
+    ASSERT_FALSE(busy);
+    EXPECT_EQ(busy.error().business_code, "IPC_BUSY");
+    ASSERT_TRUE(wait_until([&] {
+        return latest.operation.has_value() && !latest.operation->pending &&
+               latest.operation->succeeded;
+    }));
+    EXPECT_EQ(handler->last_command, "camera.connect");
+
+    ASSERT_TRUE(client.discover());
+    ASSERT_TRUE(wait_until([&] {
+        return latest.operation.has_value() && latest.operation->operation == "camera.discover" &&
+               !latest.operation->pending;
+    }));
+    ASSERT_EQ(latest.discovered_devices.size(), 1U);
+    EXPECT_EQ(latest.discovered_devices.front().serial, "MOCK-01");
+    EXPECT_EQ(latest.discovered_devices.front().transport_id, "mock0");
+
+    auto changed = camera.saved;
+    changed.exposure_us = 120.0;
+    ASSERT_TRUE(client.update_config("CAM01", 7U, changed));
+    ASSERT_TRUE(wait_until([&] {
+        return latest.operation.has_value() &&
+               latest.operation->operation == "camera.updateConfig" && !latest.operation->pending;
+    }));
+    EXPECT_TRUE(latest.operation->saved);
+    EXPECT_TRUE(latest.operation->dispatched);
+    EXPECT_TRUE(latest.operation->applied);
+    EXPECT_FALSE(latest.operation->restart_required);
+
+    client.stop();
+    EXPECT_TRUE(latest.stale);
     stop_server(server);
 }
 

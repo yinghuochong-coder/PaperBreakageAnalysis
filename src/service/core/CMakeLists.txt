@@ -6,6 +6,7 @@ target_link_libraries(paperbreak_service_core
     PUBLIC
         paperbreak_common
         paperbreak_config
+        paperbreak_camera
         paperbreak_ipc
         paperbreak_logging
         paperbreak_monitoring

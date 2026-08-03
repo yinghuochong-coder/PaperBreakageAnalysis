@@ -1,4 +1,6 @@
 #include "paperbreak/camera/camera.hpp"
+#include "paperbreak/camera/control.hpp"
+#include "paperbreak/camera/mock_camera.hpp"
 
 #include <gtest/gtest.h>
 
@@ -431,4 +433,31 @@ TEST(CameraInterfaces, WorkThroughVendorIndependentProviderAndDeviceContracts)
     EXPECT_EQ(destination.size(), 4U);
     EXPECT_TRUE(created.value()->stop_acquisition());
     EXPECT_TRUE(created.value()->disconnect());
+}
+
+TEST(CameraControlRuntime, ControlsMockDeviceAndReadsBackActualValues)
+{
+    auto provider = paperbreak::camera::mock::MockCameraProvider::create(
+        {{.descriptor = {.model_name = "Mock",
+                         .serial_number = "MOCK-01",
+                         .ip_address = "127.0.0.1",
+                         .network_interface = "loopback"},
+          .width = 64U,
+          .height = 48U,
+          .frame_rate = 30.0}});
+    ASSERT_TRUE(provider);
+    std::shared_ptr<paperbreak::camera::ICameraProvider> shared{std::move(provider).value()};
+    paperbreak::camera::CameraControlRuntime runtime{shared};
+    ASSERT_TRUE(runtime.discover());
+    ASSERT_TRUE(runtime.connect("CAM01", "MOCK-01"));
+    auto conflicting = runtime.connect("CAM01", "OTHER-SERIAL");
+    ASSERT_FALSE(conflicting);
+    EXPECT_EQ(conflicting.error().business_code, "CAMERA_CONFIG_FAILED");
+    auto configured = runtime.update("CAM01", {.exposure_us = 100.0, .gain_db = 2.0});
+    ASSERT_TRUE(configured);
+    ASSERT_TRUE(configured.value().actual.has_value());
+    EXPECT_DOUBLE_EQ(configured.value().actual->exposure_us.value(), 100.0);
+    ASSERT_TRUE(runtime.start("CAM01"));
+    ASSERT_TRUE(runtime.stop("CAM01"));
+    ASSERT_TRUE(runtime.disconnect("CAM01"));
 }

@@ -1,6 +1,7 @@
 add_library(paperbreak_camera STATIC
     src/acquisition.cpp
     src/camera.cpp
+    src/control.cpp
     src/frame.cpp
     src/frame_pool.cpp
     src/state.cpp
