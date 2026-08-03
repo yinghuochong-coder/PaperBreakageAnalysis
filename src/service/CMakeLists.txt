@@ -16,11 +16,8 @@ target_link_libraries(PaperBreakEdgeService
         paperbreak_compiler_options
         Qt6::Core
         nlohmann_json::nlohmann_json)
-if(PAPERBREAK_ENABLE_HIKROBOT)
-    target_link_libraries(PaperBreakEdgeService PRIVATE paperbreak_camera_hikrobot)
-    target_compile_definitions(PaperBreakEdgeService PRIVATE PAPERBREAK_ENABLE_HIKROBOT=1)
-    paperbreak_stage_hikrobot_runtime(PaperBreakEdgeService)
-endif()
+target_link_libraries(PaperBreakEdgeService PRIVATE paperbreak_camera_hikrobot)
+paperbreak_stage_hikrobot_runtime(PaperBreakEdgeService)
 set_target_properties(PaperBreakEdgeService PROPERTIES
     OUTPUT_NAME PaperBreakEdgeService
     FOLDER "PaperBreak/Applications")

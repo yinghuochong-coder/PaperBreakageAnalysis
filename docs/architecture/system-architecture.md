@@ -26,7 +26,7 @@
 3. **资源有界**：线程、帧池、内存缓存、队列、在途上传、日志和磁盘缓存均具有上限。
 4. **确定性关闭**：所有工作线程和外部 I/O 都支持取消、超时和 join；服务停止不依赖无限等待。
 5. **故障可诊断**：业务错误码稳定，同时保留厂商码、操作阶段和上下文；关键指标、队列深度和报警可查询。
-6. **可测试性**：无 MVS SDK、无实体相机、无上位机时，使用 Mock 运行绝大多数单元和集成测试。
+6. **可测试性**：无实体相机、无上位机时，使用测试专用 Mock 运行绝大多数单元和集成测试；生产构建仍固定验证 MVS SDK。
 7. **平台可控**：Windows、SCM、MVS 和具体网络协议代码位于适配层，领域与业务模块不直接依赖它们。
 
 ### 2.2 强制实现约束
@@ -109,7 +109,7 @@ ConsoleHost --------┘
 
 - `WindowsServiceHost` 只负责 SCM 注册入口、状态上报和控制码转发；
 - `ConsoleHost` 只负责开发时的控制台生命周期；
-- 进程 `Bootstrap` 是唯一依赖装配组合根，负责选择 Mock 或生产适配器；
+- 进程 `Bootstrap` 是唯一依赖装配组合根，负责装配 Hikrobot 生产适配器；
 - `ServiceRuntime` 是注入完成后的业务生命周期和组件所有权根，不自行定位全局依赖；
 - SCM 回调不得直接执行耗时停止，而是向控制通道投递高优先级停止请求；
 - 两个宿主不能复制业务启动/关闭逻辑。
@@ -158,10 +158,10 @@ Qt 桌面客户端只承担：
 │ Config   CameraManager  Pipeline  EventMgr   Monitoring     IPC Server │
 │              │           │  │        │             │            │      │
 │      ICameraProvider     │  │        ├─ Storage    │            │      │
-│        ┌─────┴─────┐     │  │        ├─ SQLite     │            │      │
-│        ▼           ▼     │  │        └─ KeyFrames  │            │      │
-│     MockCamera  Hikrobot │  │                                      IPC│
-│                  Adapter │  ├─ IBreakDetector                         │
+│             │            │  │        ├─ SQLite     │            │      │
+│             ▼            │  │        └─ KeyFrames  │            │      │
+│         Hikrobot         │  │                                      IPC│
+│          Adapter         │  ├─ IBreakDetector                         │
 │                          │  └─ PreviewEncoder                         │
 │                          │                                           │
 │                 IUplinkTransport        IPlantIoAdapter               │
@@ -184,7 +184,7 @@ Qt 桌面客户端只承担：
 | `paperbreak_config` | 强类型配置、schema 校验、版本、原子存储 | common、JSON、受控平台文件适配 | 相机实现、UI、上传实现 |
 | `paperbreak_logging` | 日志门面、分类、脱敏、滚动和刷新 | common、spdlog | 业务模块反向依赖 |
 | `paperbreak_camera` | 相机接口、能力、状态机、FramePacket、最多四路的运维控制会话 | common、monitoring 接口 | MVS 头文件、Widgets |
-| `paperbreak_camera_mock` | 模拟设备、模拟帧和故障注入 | camera、common | MVS |
+| `paperbreak_camera_mock` | 仅在 `BUILD_TESTING=ON` 时提供模拟设备、模拟帧和故障注入；不安装 | camera、common | MVS、生产应用 |
 | `paperbreak_camera_hikrobot` | MVS 枚举、句柄、参数、取流和错误翻译 | camera、common、MVS SDK | UI、事件、上传 |
 | `paperbreak_pipeline` | 预处理节点、帧路由、顺序和背压策略 | common、camera、algorithm 接口、event 接口 | MVS、SQLite、网络实现 |
 | `paperbreak_algorithm` | `IBreakDetector`、结果模型、候选判定接口 | common、camera 的只读帧视图 | MVS、存储、UI |
@@ -229,7 +229,7 @@ UI ──仅通过 IPC──> 服务用例
 4. `storage` 实现事件持久化端口，`event` 不依赖 SQLite；
 5. `uplink_transport` 实现上传端口，事件模块不依赖网络；
 6. `PaperBreakEdgeConsole` 不链接任何服务内部实现；
-7. 只有进程组合根可以选择 Mock 或生产适配器；
+7. 只有进程组合根可以装配 Hikrobot 生产适配器；测试目标可显式注入 Mock；
 8. 平台类型、SDK 句柄、Qt Widget、SQLite 句柄不得出现在领域公开头文件中。
 9. 通用业务模块只依赖 `paperbreak_platform` 的窄端口；除 Hikrobot 适配器因 SDK 所需外，Win32 类型只允许出现在 Windows 平台实现和服务宿主。
 
@@ -242,7 +242,7 @@ UI ──仅通过 IPC──> 服务用例
 - CI 扫描 MVS 头文件引用，只允许出现在 `src/camera/hikrobot`；
 - CI 扫描 Qt Widgets 引用，只允许在 console/UI 目录；
 - CI 扫描 `Windows.h`/Win32 句柄，只允许在 `src/platform/windows`、`src/service/windows` 和经记录的 Hikrobot 适配代码；
-- 链接测试证明 Mock 构建不需要 MVS SDK；
+- 链接和安装测试证明所有生产配置包含 MVS 适配器与所需 Runtime，测试专用 Mock 不进入安装树；
 - 架构测试或脚本检查禁止的 target 依赖；
 - 公开头文件自包含编译测试。
 
@@ -458,7 +458,7 @@ requiredBytes = bytesPerFrame × 所有池化缓冲数 + 元数据与编码工�
 ### 9.1 正常采集
 
 ```text
-Hikrobot/Mock Device
+ICameraDevice（生产为 Hikrobot，自动化测试可注入 Mock）
         │ SDK 回调或限时取流
         ▼
 FrameBufferPool → FramePacket 元数据

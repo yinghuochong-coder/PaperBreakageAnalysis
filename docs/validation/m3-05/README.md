@@ -4,14 +4,14 @@
 
 本目录提供 M3-05 的真机验证方法和空白记录输入。自动化测试、SDK 链接 smoke 或 Mock 结果不能代替实体相机证据。M3 路线图退出门禁要求自动化适配层测试通过，并由至少一台 `MV-CS020-60GM` 完成功能验证。四路最终吞吐、物理恢复、服务重启以及 M4 真实预览/日志并发属于 M5/M9 前的生产等价验证，不反向阻塞可与 M4 并行的 M3，但缺失项不得宣称已通过。
 
-`PaperBreakCameraHardwareTest` 仅在 `PAPERBREAK_ENABLE_HIKROBOT=ON` 时构建。它通过公开相机接口工作，工具源码不直接调用 MVS。`--probe` 只枚举；`--run` 必须显式提供计划，才会打开设备、写入参数、回读、取流和发软件触发命令。输出记录若已存在会拒绝覆盖。
+`PaperBreakCameraHardwareTest` 随所有生产配置构建。它通过公开相机接口工作，工具源码不直接调用 MVS。`--probe` 只枚举；`--run` 必须显式提供计划，才会打开设备、写入参数、回读、取流和发软件触发命令。输出记录若已存在会拒绝覆盖。
 
 ## 构建
 
 ```powershell
 $env:PAPERBREAK_MVS_ROOT = 'C:\Program Files (x86)\MVS'
 $env:PAPERBREAK_MVS_RUNTIME_DIR = 'C:\Program Files (x86)\Common Files\MVS\Runtime\Win64_x64'
-cmake --preset local-windows-vs2026-release -DPAPERBREAK_ENABLE_HIKROBOT=ON
+cmake --preset local-windows-vs2026-release
 cmake --build --preset local-windows-vs2026-release --target PaperBreakCameraHardwareTest
 ```
 
@@ -88,7 +88,7 @@ M3-05 工具的 `consumerDelayMs` 可模拟有界慢消费者，证明队列满�
 
 ## 6. 门禁判定
 
-- 自动化适配层、Mock、OFF/ON Debug/Release 与质量检查全部通过；
+- 自动化适配层、Debug/Release 与质量检查全部通过；
 - 至少一台目标相机的发现/绑定、参数回读和真实取流有通过记录；使用到的软件或硬件触发模式必须有对应真机记录；
 - 汇总评审以上证据后解除 M3 门禁。单次工具记录只表示本次功能证据是否通过，不单独代替里程碑评审。
 

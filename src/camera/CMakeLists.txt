@@ -14,8 +14,7 @@ set_target_properties(paperbreak_camera PROPERTIES FOLDER "PaperBreak/Libraries"
 install(TARGETS paperbreak_camera ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
-add_subdirectory(mock)
-
-if(PAPERBREAK_ENABLE_HIKROBOT)
-    add_subdirectory(hikrobot)
+add_subdirectory(hikrobot)
+if(BUILD_TESTING)
+    add_subdirectory(mock)
 endif()

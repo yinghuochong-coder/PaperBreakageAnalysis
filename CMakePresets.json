@@ -22,7 +22,6 @@
         "VCPKG_HOST_TRIPLET": "x64-windows",
         "VCPKG_MANIFEST_FEATURES": "tests",
         "BUILD_TESTING": "ON",
-        "PAPERBREAK_ENABLE_HIKROBOT": "OFF",
         "PAPERBREAK_WARNINGS_AS_ERRORS": "ON"
       }
     },
@@ -40,22 +39,6 @@
       "inherits": "windows-vs2026-base",
       "cacheVariables": {
         "CMAKE_CONFIGURATION_TYPES": "Release"
-      }
-    },
-    {
-      "name": "windows-vs2026-hikrobot-debug",
-      "displayName": "Visual Studio 2026 x64 Debug with Hikrobot MVS",
-      "inherits": "windows-vs2026-debug",
-      "cacheVariables": {
-        "PAPERBREAK_ENABLE_HIKROBOT": "ON"
-      }
-    },
-    {
-      "name": "windows-vs2026-hikrobot-release",
-      "displayName": "Visual Studio 2026 x64 Release with Hikrobot MVS",
-      "inherits": "windows-vs2026-release",
-      "cacheVariables": {
-        "PAPERBREAK_ENABLE_HIKROBOT": "ON"
       }
     },
     {
@@ -80,18 +63,6 @@
     {
       "name": "windows-vs2026-release",
       "configurePreset": "windows-vs2026-release",
-      "configuration": "Release",
-      "jobs": 0
-    },
-    {
-      "name": "windows-vs2026-hikrobot-debug",
-      "configurePreset": "windows-vs2026-hikrobot-debug",
-      "configuration": "Debug",
-      "jobs": 0
-    },
-    {
-      "name": "windows-vs2026-hikrobot-release",
-      "configurePreset": "windows-vs2026-hikrobot-release",
       "configuration": "Release",
       "jobs": 0
     },
@@ -123,40 +94,6 @@
     {
       "name": "windows-vs2026-release",
       "configurePreset": "windows-vs2026-release",
-      "configuration": "Release",
-      "filter": {
-        "exclude": {
-          "label": "hardware-integration"
-        }
-      },
-      "output": {
-        "outputOnFailure": true,
-        "verbosity": "verbose"
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "windows-vs2026-hikrobot-debug",
-      "configurePreset": "windows-vs2026-hikrobot-debug",
-      "configuration": "Debug",
-      "filter": {
-        "exclude": {
-          "label": "hardware-integration"
-        }
-      },
-      "output": {
-        "outputOnFailure": true,
-        "verbosity": "verbose"
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
-    },
-    {
-      "name": "windows-vs2026-hikrobot-release",
-      "configurePreset": "windows-vs2026-hikrobot-release",
       "configuration": "Release",
       "filter": {
         "exclude": {

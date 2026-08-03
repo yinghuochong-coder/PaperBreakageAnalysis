@@ -530,7 +530,7 @@ TEST(SystemCommand, BindsDiscoveredApprovedCameraFromActualReadbackAndRequiresRe
     EXPECT_EQ(fixture.repository.snapshot().value().stored->cameras.size(), 1U);
 }
 
-TEST(SystemCommand, MockOnlyDiscoveryReturnsActionableHikrobotBuildHint)
+TEST(SystemCommand, MissingCameraProviderReturnsDeploymentError)
 {
     CommandFixture fixture;
     auto runtime = std::make_shared<paperbreak::camera::CameraControlRuntime>();
@@ -549,7 +549,7 @@ TEST(SystemCommand, MockOnlyDiscoveryReturnsActionableHikrobotBuildHint)
     auto discovered = commands.handle(fixture.request("camera.discover"), reader, {});
     ASSERT_FALSE(discovered);
     EXPECT_EQ(discovered.error().business_code, "SYS_NOT_SUPPORTED");
-    EXPECT_NE(discovered.error().message.find("windows-vs2026-hikrobot-debug"), std::string::npos);
+    EXPECT_NE(discovered.error().message.find("部署完整性"), std::string::npos);
 }
 
 TEST(SystemCommand, RejectsOccupiedOrUnapprovedCameraBindingWithoutChangingConfiguration)

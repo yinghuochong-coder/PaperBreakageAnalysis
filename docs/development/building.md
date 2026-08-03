@@ -4,7 +4,7 @@
 
 当前工程只支持 Windows 10/11 x64、Visual Studio 2026 MSVC v145、C++20 和 CMake 4.2 以上版本。日常开发、IDE 和 CI 统一使用 `Visual Studio 18 2026` x64 generator，不提供 Ninja 预设。
 
-默认构建是 Mock-only，不查找 Hikrobot MVS SDK，也不依赖实体相机。`PAPERBREAK_ENABLE_HIKROBOT=ON` 会创建独立 `paperbreak_camera_hikrobot` 目标，并由生产服务注入支持发现、参数读写和取流的 MVS 提供者。Mock-only 服务的 `camera.discover` 会明确返回构建提示，不会把“未启用 MVS”伪装成网络中没有相机。
+Debug、Release 和静态分析均为真实相机构建：配置阶段固定创建 `paperbreak_camera_hikrobot`，生产服务固定装配支持发现、参数读写和取流的 MVS 提供者。工程不再提供关闭 Hikrobot 适配器的构建开关或单独的 Hikrobot 预设。模拟相机只作为 `BUILD_TESTING=ON` 时的自动化测试依赖，不安装到生产产物。
 
 ## 2. 依赖准备
 
@@ -12,6 +12,7 @@
 
 - Qt 6.10.2 `msvc2022_64`；
 - OpenCV 4.12.0 Windows SDK；
+- Hikrobot MVS Development/Runtime 4.8.0.3；
 - Visual Studio 2026 随附或批准版本的 vcpkg；
 - Visual Studio 2026 C++ 工作负载中的 CMake 和 clang-format。
 
@@ -23,23 +24,13 @@
 $env:VCPKG_ROOT = '<VS-or-approved-vcpkg-root>'
 $env:PAPERBREAK_QT_ROOT = '<Qt-6.10.2-msvc2022_64-root>'
 $env:OpenCV_DIR = '<OpenCVConfig.cmake-containing-directory>'
-```
-
-也可以在被 `.gitignore` 排除的 `CMakeUserPresets.json` 中设置这些值。不要把本机盘符、用户名或 SDK 绝对路径加入 `CMakePresets.json`、源码、默认配置或发布产物。
-
-需要构建 Hikrobot 适配器时，另行注入批准的 MVS 4.8.0.3 Development 和 x64 Runtime：
-
-```powershell
 $env:PAPERBREAK_MVS_ROOT = '<MVS-Development-or-install-root>'
 $env:PAPERBREAK_MVS_RUNTIME_DIR = '<MVS-Runtime-Win64-x64-directory>'
-cmake --preset windows-vs2026-hikrobot-debug
-cmake --build --preset windows-vs2026-hikrobot-debug
-ctest --preset windows-vs2026-hikrobot-debug
 ```
 
-Release 对应使用 `windows-vs2026-hikrobot-release`。普通 `windows-vs2026-debug` 和
-`windows-vs2026-release` 继续显式保持 `PAPERBREAK_ENABLE_HIKROBOT=OFF`，用于 Mock-only 开发与 CI。
-配置会逐项检查头文件、x64 import library、Runtime DLL 及 DLL 文件版本。Runtime DLL 随启用的适配器安装到 `bin`；不得把 Win32 Runtime 目录或开发机绝对路径写入提交预设。`hikrobot_adapter_unit` 使用伪 C API 验证 RAII/回调并调用真实 `MV_CC_GetSDKVersion()` 做 4.8.0.3 link smoke，不访问相机。实体相机发现、连接、取流与拔线测试不属于该测试。
+本机已在被 `.gitignore` 排除的 `CMakeUserPresets.json` 中为上述五项及 `VSINSTALLDIR` 设置实际安装路径，日常开发和 Codex 构建使用 `local-windows-vs2026-*` 预设即可，无需重复设置环境变量；`VSINSTALLDIR` 还用于定位 VS 随附的 `clang-format`。可移植的 `windows-vs2026-*` 预设仍只引用逻辑环境变量，供 CI 或其他开发机注入。不要把本机盘符、用户名或 SDK 绝对路径加入 `CMakePresets.json`、源码、默认配置或发布产物。
+
+配置会逐项检查 MVS 头文件、x64 import library、Runtime DLL 及 DLL 文件版本，缺失或版本不匹配时直接失败。Runtime DLL 固定安装到 `bin`；不得把 Win32 Runtime 目录或开发机绝对路径写入提交预设。`hikrobot_adapter_unit` 使用伪 C API 验证 RAII/回调并调用真实 `MV_CC_GetSDKVersion()` 做 4.8.0.3 link smoke，不访问相机。实体相机发现、连接、取流与拔线测试不属于该测试。
 
 从普通 PowerShell 构建前，先进入 VS 2026 x64 开发环境：
 
@@ -53,17 +44,17 @@ Release 对应使用 `windows-vs2026-hikrobot-release`。普通 `windows-vs2026-
 Debug：
 
 ```powershell
-cmake --preset windows-vs2026-debug
-cmake --build --preset windows-vs2026-debug
-ctest --preset windows-vs2026-debug
+cmake --preset local-windows-vs2026-debug
+cmake --build --preset local-windows-vs2026-debug
+ctest --preset local-windows-vs2026-debug
 ```
 
 Release：
 
 ```powershell
-cmake --preset windows-vs2026-release
-cmake --build --preset windows-vs2026-release
-ctest --preset windows-vs2026-release
+cmake --preset local-windows-vs2026-release
+cmake --build --preset local-windows-vs2026-release
+ctest --preset local-windows-vs2026-release
 ```
 
 测试预设默认排除 `hardware-integration` 标签。当前标签为：
@@ -117,10 +108,10 @@ Qt 客户端直接启动后创建最小系统托盘，右键菜单提供“退�
 ## 5. 格式、静态分析与报告
 
 ```powershell
-cmake --build --preset windows-vs2026-debug --target format-check
-cmake --preset windows-vs2026-static-analysis
-cmake --build --preset windows-vs2026-static-analysis
-ctest --preset windows-vs2026-debug --output-junit out/test-results/debug-ctest.xml
+cmake --build --preset local-windows-vs2026-debug --target format-check
+cmake --preset local-windows-vs2026-static-analysis
+cmake --build --preset local-windows-vs2026-static-analysis
+ctest --preset local-windows-vs2026-debug --output-junit out/test-results/debug-ctest.xml
 ```
 
 格式检查使用 clang-format 的 `--dry-run --Werror`。静态分析预设对生产源码目标启用 MSVC `/analyze` 并跳过 GoogleTest/OpenCV smoke 目标，第三方头由 `/analyze:external-` 排除；普通 Debug/Release 不承担其额外构建成本。所有项目目标默认 `/utf-8 /W4 /WX /permissive-`。
@@ -128,16 +119,16 @@ ctest --preset windows-vs2026-debug --output-junit out/test-results/debug-ctest.
 ## 6. 安装布局
 
 ```powershell
-cmake --install out\build\windows-vs2026-release `
+cmake --install out\build\local-windows-vs2026-release `
   --config Release `
-  --prefix out\install\windows-vs2026-release
+  --prefix out\install\local-windows-vs2026-release
 ```
 
-当前安装布局包含 `bin`、`lib` 和 `include`，并通过 CMake/Qt 部署脚本复制服务所需的 vcpkg 动态库、Qt 动态库和 Qt 平台插件。启用 Hikrobot 预设时，`bin` 还必须包含同为 4.8.0.3 的 `MvCameraControl.dll` 和 GigE 动态传输组件 `MVGigEVisionSDK.dll`；不复制未使用的 USB、采集卡或 GUI Runtime。它不制作安装器，也不替代 M9 的驱动、签名、完整许可证/SBOM 和企业部署物料。CTest 会检查必需运行时文件，从安装树启动两个程序的 `--version` smoke，并扫描产物，拒绝泄漏注入的 Qt、OpenCV、MVS 或 vcpkg 根路径。
+当前安装布局包含 `bin`、`lib` 和 `include`，并通过 CMake/Qt 部署脚本复制服务所需的 vcpkg 动态库、Qt 动态库和 Qt 平台插件。`bin` 固定包含同为 4.8.0.3 的 `MvCameraControl.dll` 和 GigE 动态传输组件 `MVGigEVisionSDK.dll`；不复制未使用的 USB、采集卡、GUI Runtime 或模拟相机库。它不制作安装器，也不替代 M9 的驱动、签名、完整许可证/SBOM 和企业部署物料。CTest 会检查必需运行时文件，从安装树启动两个程序的 `--version` smoke，并扫描产物，拒绝泄漏注入的 Qt、OpenCV、MVS 或 vcpkg 根路径。
 
 ## 7. CI 入口
 
-`.ci/windows-build.ps1` 是 provider-neutral 的 Windows CI 入口，要求执行器预先设置三项逻辑路径并具备 `windows/x64/vs2026/msvc-v145/cmake-4.2/mock-only` 能力。脚本执行：
+`.ci/windows-build.ps1` 是 Windows CI 入口，要求执行器预先设置 Qt、OpenCV、MVS Development/Runtime 和 vcpkg 五项逻辑路径，并具备 `windows/x64/vs2026/msvc-v145/cmake-4.2/mvs-4.8.0.3` 能力。脚本执行：
 
 1. Debug/Release 配置、构建和默认非硬件 CTest；
 2. JUnit XML 报告写入 `out/test-results/`；
@@ -148,4 +139,4 @@ cmake --install out\build\windows-vs2026-release `
 
 ## 8. M0 验证边界
 
-M0 自动验证不访问 MVS SDK、相机、PLC 或上位机。Qt 6.10.2 `msvc2022_64` 与 v145、OpenCV 4.12.0 与 v145 的最小链接/启动由 smoke test 覆盖；真实取流、拔线、四路带宽及 7×24 小时测试均未执行，也不属于 M0。
+M0 自动验证会链接并执行不打开设备的 MVS SDK smoke，但不连接、配置或取流实体相机，也不访问 PLC 或上位机。Qt 6.10.2 `msvc2022_64` 与 v145、OpenCV 4.12.0 与 v145 的最小链接/启动由 smoke test 覆盖；真实取流、拔线、四路带宽及 7×24 小时测试均未执行，也不属于 M0。

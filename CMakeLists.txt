@@ -9,7 +9,6 @@ paperbreak_validate_platform()
 include(CTest)
 include(GNUInstallDirs)
 
-option(PAPERBREAK_ENABLE_HIKROBOT "Enable the Hikrobot MVS production adapter" OFF)
 option(PAPERBREAK_ENABLE_STATIC_ANALYSIS "Enable MSVC native static analysis" OFF)
 option(PAPERBREAK_WARNINGS_AS_ERRORS "Treat project compiler warnings as errors" ON)
 
@@ -54,9 +53,7 @@ add_subdirectory(src/uplink)
 add_subdirectory(src/ipc)
 add_subdirectory(src/service)
 add_subdirectory(src/console)
-if(PAPERBREAK_ENABLE_HIKROBOT)
-    add_subdirectory(tools/hardware)
-endif()
+add_subdirectory(tools/hardware)
 
 file(GLOB_RECURSE PAPERBREAK_FORMAT_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
@@ -83,16 +80,14 @@ set(paperbreak_runtime_dependency_dirs
     "$<TARGET_FILE_DIR:spdlog::spdlog>"
     "$<TARGET_FILE_DIR:Qt6::Core>"
     "$<TARGET_FILE_DIR:opencv_core>")
-if(PAPERBREAK_ENABLE_HIKROBOT)
-    if(DEFINED PAPERBREAK_MVS_RUNTIME_DIR AND NOT PAPERBREAK_MVS_RUNTIME_DIR STREQUAL "")
-        set(paperbreak_runtime_dependency_mvs_dir "${PAPERBREAK_MVS_RUNTIME_DIR}")
-    else()
-        set(paperbreak_runtime_dependency_mvs_dir "$ENV{PAPERBREAK_MVS_RUNTIME_DIR}")
-    endif()
-    cmake_path(CONVERT "${paperbreak_runtime_dependency_mvs_dir}" TO_CMAKE_PATH_LIST
-        paperbreak_runtime_dependency_mvs_dir NORMALIZE)
-    list(APPEND paperbreak_runtime_dependency_dirs "${paperbreak_runtime_dependency_mvs_dir}")
+if(DEFINED PAPERBREAK_MVS_RUNTIME_DIR AND NOT PAPERBREAK_MVS_RUNTIME_DIR STREQUAL "")
+    set(paperbreak_runtime_dependency_mvs_dir "${PAPERBREAK_MVS_RUNTIME_DIR}")
+else()
+    set(paperbreak_runtime_dependency_mvs_dir "$ENV{PAPERBREAK_MVS_RUNTIME_DIR}")
 endif()
+cmake_path(CONVERT "${paperbreak_runtime_dependency_mvs_dir}" TO_CMAKE_PATH_LIST
+    paperbreak_runtime_dependency_mvs_dir NORMALIZE)
+list(APPEND paperbreak_runtime_dependency_dirs "${paperbreak_runtime_dependency_mvs_dir}")
 install(RUNTIME_DEPENDENCY_SET paperbreak_service_runtime
     DIRECTORIES ${paperbreak_runtime_dependency_dirs}
     PRE_EXCLUDE_REGEXES

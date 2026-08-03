@@ -207,22 +207,19 @@ add_test(NAME hikrobot_sdk_boundary
 set_tests_properties(hikrobot_sdk_boundary PROPERTIES LABELS "integration")
 
 set(path_scan_inputs "$ENV{PAPERBREAK_QT_ROOT}|${OpenCV_DIR}|$ENV{VCPKG_ROOT}")
-set(required_install_files "")
-if(PAPERBREAK_ENABLE_HIKROBOT)
-    if(DEFINED PAPERBREAK_MVS_ROOT AND NOT PAPERBREAK_MVS_ROOT STREQUAL "")
-        set(path_scan_mvs_root "${PAPERBREAK_MVS_ROOT}")
-    else()
-        set(path_scan_mvs_root "$ENV{PAPERBREAK_MVS_ROOT}")
-    endif()
-    if(DEFINED PAPERBREAK_MVS_RUNTIME_DIR AND NOT PAPERBREAK_MVS_RUNTIME_DIR STREQUAL "")
-        set(path_scan_mvs_runtime "${PAPERBREAK_MVS_RUNTIME_DIR}")
-    else()
-        set(path_scan_mvs_runtime "$ENV{PAPERBREAK_MVS_RUNTIME_DIR}")
-    endif()
-    string(APPEND path_scan_inputs "|${path_scan_mvs_root}|${path_scan_mvs_runtime}")
-    set(required_install_files
-        "${CMAKE_INSTALL_BINDIR}/MvCameraControl.dll|${CMAKE_INSTALL_BINDIR}/MVGigEVisionSDK.dll")
+if(DEFINED PAPERBREAK_MVS_ROOT AND NOT PAPERBREAK_MVS_ROOT STREQUAL "")
+    set(path_scan_mvs_root "${PAPERBREAK_MVS_ROOT}")
+else()
+    set(path_scan_mvs_root "$ENV{PAPERBREAK_MVS_ROOT}")
 endif()
+if(DEFINED PAPERBREAK_MVS_RUNTIME_DIR AND NOT PAPERBREAK_MVS_RUNTIME_DIR STREQUAL "")
+    set(path_scan_mvs_runtime "${PAPERBREAK_MVS_RUNTIME_DIR}")
+else()
+    set(path_scan_mvs_runtime "$ENV{PAPERBREAK_MVS_RUNTIME_DIR}")
+endif()
+string(APPEND path_scan_inputs "|${path_scan_mvs_root}|${path_scan_mvs_runtime}")
+set(required_install_files
+    "${CMAKE_INSTALL_BINDIR}/MvCameraControl.dll|${CMAKE_INSTALL_BINDIR}/MVGigEVisionSDK.dll")
 add_test(NAME install_tree_no_sdk_path_leaks
     COMMAND "${CMAKE_COMMAND}"
         "-DBUILD_DIR=${PROJECT_BINARY_DIR}"

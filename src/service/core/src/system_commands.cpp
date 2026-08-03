@@ -32,12 +32,10 @@ Error command_error(std::string code, const Severity severity, std::string messa
                       retryable);
 }
 
-Error hikrobot_build_required(std::string operation)
+Error camera_provider_required(std::string operation)
 {
     return command_error("SYS_NOT_SUPPORTED", Severity::warning,
-                         "当前服务为 Mock-only 构建，未启用 Hikrobot MVS；请使用 "
-                         "windows-vs2026-hikrobot-debug 或 windows-vs2026-hikrobot-release "
-                         "预设重新构建并部署服务",
+                         "当前服务未装配 Hikrobot MVS 相机提供者；请检查部署完整性",
                          std::move(operation));
 }
 
@@ -742,7 +740,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
     {
         if (!cameras_)
             return Result<ipc::CommandResponse>::failure(
-                hikrobot_build_required("ipc.camera.dispatch"));
+                camera_provider_required("ipc.camera.dispatch"));
         if (is_camera_write_command(request.command) &&
             (!peer.local || !peer.authenticated || !peer.administrator))
             return Result<ipc::CommandResponse>::failure(
@@ -763,7 +761,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
             {
                 if (discovered.error().business_code == "SYS_NOT_SUPPORTED")
                     return Result<ipc::CommandResponse>::failure(
-                        hikrobot_build_required("ipc.camera.discover"));
+                        camera_provider_required("ipc.camera.discover"));
                 return Result<ipc::CommandResponse>::failure(discovered.error());
             }
             Json devices = Json::array();
@@ -870,7 +868,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
             {
                 if (discovered.error().business_code == "SYS_NOT_SUPPORTED")
                     return Result<ipc::CommandResponse>::failure(
-                        hikrobot_build_required("ipc.camera.bind"));
+                        camera_provider_required("ipc.camera.bind"));
                 return Result<ipc::CommandResponse>::failure(discovered.error());
             }
             auto device = camera::find_device_by_serial(discovered.value(), serial);

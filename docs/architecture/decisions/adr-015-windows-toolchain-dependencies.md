@@ -2,7 +2,7 @@
 
 - 状态：Accepted
 - 日期：2026-07-31
-- 修订日期：2026-08-01（统一为 Visual Studio 2026 generator）
+- 修订日期：2026-08-03（生产构建固定启用 Hikrobot MVS）
 - 决策者：项目架构基线
 - 关联：G0-03、路线图 DEC-001～DEC-003
 
@@ -12,7 +12,7 @@
 
 Qt 6.10.2 官方 Windows kit 使用 MSVC 2022 构建，Qt 官方支持表也只列 MSVC 2022；项目目标编译器则是 VS 2026 v145。Microsoft 明确保证 v140～v145 工具集的二进制兼容，但对 `/GL`/`/LTCG` 跨工具集混用和链接器版本有额外限制。
 
-项目还需要在没有实体相机和 MVS SDK 的普通 CI 中运行 Mock 测试，同时保留供应商 SDK/硬件验证路径。依赖获取必须可复现，且 Release 不得依赖开发机绝对路径。
+项目需要在没有实体相机的普通 CI 中运行自动化测试，同时所有生产构建都使用与目标机一致的 Hikrobot MVS 适配器。依赖获取必须可复现，且 Release 不得依赖开发机绝对路径。
 
 ## 决策
 
@@ -34,7 +34,7 @@ Qt 6.10.2 官方 Windows kit 使用 MSVC 2022 构建，Qt 官方支持表也只�
 
 - SDK 安装根目录只通过环境或不提交的用户预设注入；项目预设和 Release 配置只保存逻辑变量/相对路径；
 - Qt 的商业或 LGPLv3 路径必须在发布前明确，MVS Runtime 分发权必须由供应商条款确认；
-- 默认 CI 使用 Windows 11 x64 自托管执行器能力，Mock-only 且不要求 MVS；MVS/实体相机使用隔离硬件 lane；
+- 默认 CI 使用安装 MVS 4.8.0.3 的 Windows 11 x64 自托管执行器并固定构建生产适配器；实体相机操作使用隔离硬件 lane；
 - 当前本机工具链可作为 runner 配置参考，但具体 CI 平台注册和 workflow 属于 M0-04。
 
 完整版本、组件、许可证和门禁见 `docs/architecture/dependencies.md`。
@@ -45,7 +45,7 @@ Qt 6.10.2 官方 Windows kit 使用 MSVC 2022 构建，Qt 官方支持表也只�
 
 - VS 2026 IDE、编译器和 CMake generator 形成一致且可实证的基线；
 - 开源依赖由 manifest/baseline 可复现解析，外部 SDK 保持供应商验证边界；
-- 普通 CI 不依赖 MVS 或实体相机，硬件验证又不会被伪装为普通单元测试；
+- 普通 CI 固定验证 MVS 的配置、链接和部署边界，但不依赖实体相机，硬件验证不会被伪装为普通单元测试；
 - Release 配置与开发机安装路径解耦，许可证和 SBOM 有明确门禁。
 
 代价与风险：
@@ -76,7 +76,7 @@ Qt 6.10.2 官方 Windows kit 使用 MSVC 2022 构建，Qt 官方支持表也只�
 
 ### 默认 CI 依赖装有相机的硬件 runner
 
-否决。普通测试必须在无实体相机时可运行；硬件 lane 只用于明确标记的集成和验收。
+否决。普通测试必须在无实体相机时可运行；MVS SDK 是构建依赖，硬件 lane 只用于明确标记的集成和验收。
 
 ## 验证要求
 
@@ -84,8 +84,7 @@ M0 将本决策落地时必须证明：
 
 - CMake 4.2+ 能用 Visual Studio 18 2026 generator 配置 x64 Debug/Release；
 - v145 能链接并启动 Qt 6.10.2 与 OpenCV 4.12.0 最小程序；
-- Mock-only Debug/Release 构建不发现 MVS；
-- 启用 MVS 的配置只把 SDK include/lib 暴露给 Hikrobot 适配器；
+- Debug/Release 配置均构建 MVS 适配器，且 SDK include/lib 只暴露给 Hikrobot 适配器；
 - 提交文件和安装树不包含开发机 SDK 绝对路径；
 - vcpkg 解析版本、SBOM 和许可证清单与依赖基线一致。
 

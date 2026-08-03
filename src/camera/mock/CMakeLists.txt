@@ -9,5 +9,3 @@ target_include_directories(paperbreak_camera_mock PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 set_target_properties(paperbreak_camera_mock PROPERTIES FOLDER "PaperBreak/Libraries")
-install(TARGETS paperbreak_camera_mock ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")

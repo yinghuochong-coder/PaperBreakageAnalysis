@@ -22,7 +22,7 @@
 4. Qt 6.10.2、OpenCV 4.12.0、Hikrobot MVS SDK 4.8.0.3 是外部 SDK，不由 vcpkg 下载或重新打包。
 5. spdlog、nlohmann/json、GoogleTest、SQLite3 和可选 zstd 使用 vcpkg manifest mode；版本由提交的 baseline 和 manifest 约束。
 6. 项目文件只引用逻辑变量、CMake imported target 和仓库相对路径。开发机安装根目录只能由环境或不提交的 `CMakeUserPresets.json` 注入。
-7. CI 采用具备下述能力的 Windows 11 x64 自托管执行器。默认构建和测试只使用 Mock；MVS/实体相机任务在隔离的硬件 lane 执行。
+7. CI 采用安装 MVS 4.8.0.3 的 Windows 11 x64 自托管执行器；所有配置均构建真实适配器，实体相机操作仍只在隔离的硬件 lane 执行。
 
 ## 3. 工具链
 
@@ -53,12 +53,12 @@ Qt 6.10 官方 Windows 支持表只列 MSVC 2022。项目使用 Qt 官方 `msvc2
 - Qt 类型不得泄漏到领域接口，Widgets 只允许进入控制台/UI 目标。
 - OpenCV 只允许进入批准的算法或图像编解码实现目标，不得成为相机接口、领域模型或 IPC 协议的公开类型。
 - MVS 头文件、库目录、DLL 和 API 只允许进入 `paperbreak_camera_hikrobot` 的私有编译/链接/部署属性。
-- 默认 Mock 构建不能要求 MVS 已安装。启用生产适配器时，缺少或版本不匹配必须在配置阶段失败。
+- 所有生产构建都要求 MVS Development/Runtime 已安装；缺少或版本不匹配必须在配置阶段失败。模拟相机只供自动化测试目标使用。
 - 外部 SDK 不提交到 `external/`、Git LFS、Release 配置或源代码树。
 
 ### 4.1 Hikrobot MVS 构建与运行时部署
 
-`PAPERBREAK_ENABLE_HIKROBOT` 默认关闭；关闭时不读取任何 MVS 路径，也不创建或链接生产适配器。启用时：
+所有 Debug、Release 和静态分析配置都创建并链接 Hikrobot 生产适配器，不提供禁用开关：
 
 - `PAPERBREAK_MVS_ROOT` 可以指向 MVS 安装根或 `Development` 根；未显式设置时允许读取供应商安装器创建的 `MVCAM_COMMON_RUNENV`；
 - `PAPERBREAK_MVS_RUNTIME_DIR` 必须指向同时包含 `MvCameraControl.dll` 和 `MVGigEVisionSDK.dll` 的 x64 Runtime 目录，不能依赖 PATH 中碰巧先出现的 Win32/未知版本 DLL；
@@ -137,14 +137,14 @@ x64
 vs2026
 msvc-v145
 cmake-4.2
-mock-only
+mvs-4.8.0.3
 ```
 
-执行器必须安装 VS 2026 stable 的 C++ 工作负载、v145、Windows SDK、CMake 4.2+、Qt 6.10.2 和 OpenCV 4.12.0，并能访问锁定 vcpkg registry/cache。默认 lane：
+执行器必须安装 VS 2026 stable 的 C++ 工作负载、v145、Windows SDK、CMake 4.2+、Qt 6.10.2、OpenCV 4.12.0 和 MVS Development/Runtime 4.8.0.3，并能访问锁定 vcpkg registry/cache。默认 lane：
 
 - 配置、构建并运行 Debug/Release 的非硬件 CTest；
-- 不要求 MVS SDK、相机、PLC 或上位机在线；
-- 明确禁用 Hikrobot 生产适配器，使用 Mock Camera；
+- 构建并链接 Hikrobot 生产适配器，执行不打开设备的 SDK smoke；
+- 不要求实体相机、PLC 或上位机在线，自动化业务测试继续使用测试专用模拟相机；
 - 每次作业输出 VS、MSVC、CMake、Qt、OpenCV、vcpkg baseline 和直接依赖版本；
 - runner 不满足精确能力时失败，不降级到其他编译器或未锁定依赖。
 

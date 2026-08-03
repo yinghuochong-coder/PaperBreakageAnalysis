@@ -7,7 +7,7 @@ if(NOT DEFINED PAPERBREAK_MVS_ROOT OR PAPERBREAK_MVS_ROOT STREQUAL "")
         set(PAPERBREAK_MVS_ROOT "$ENV{MVCAM_COMMON_RUNENV}")
     else()
         message(FATAL_ERROR
-            "PAPERBREAK_ENABLE_HIKROBOT=ON requires PAPERBREAK_MVS_ROOT. "
+            "The production build requires PAPERBREAK_MVS_ROOT. "
             "Install Hikrobot MVS Development SDK 4.8.0.3 and inject its root via "
             "CMakeUserPresets.json or the PAPERBREAK_MVS_ROOT environment variable.")
     endif()
@@ -43,7 +43,7 @@ if(NOT DEFINED PAPERBREAK_MVS_RUNTIME_DIR OR PAPERBREAK_MVS_RUNTIME_DIR STREQUAL
         set(PAPERBREAK_MVS_RUNTIME_DIR "$ENV{PAPERBREAK_MVS_RUNTIME_DIR}")
     else()
         message(FATAL_ERROR
-            "PAPERBREAK_ENABLE_HIKROBOT=ON requires PAPERBREAK_MVS_RUNTIME_DIR to name "
+            "The production build requires PAPERBREAK_MVS_RUNTIME_DIR to name "
             "the MVS 4.8.0.3 x64 Runtime directory containing MvCameraControl.dll and "
             "MVGigEVisionSDK.dll.")
     endif()

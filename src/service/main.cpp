@@ -1,7 +1,5 @@
 #include "paperbreak/camera/control.hpp"
-#if defined(PAPERBREAK_ENABLE_HIKROBOT)
 #include "paperbreak/camera/hikrobot_camera.hpp"
-#endif
 #include "paperbreak/common/version.hpp"
 #include "paperbreak/config/basic_config.hpp"
 #include "paperbreak/config/config_repository.hpp"
@@ -861,14 +859,10 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     auto metrics = std::make_shared<paperbreak::monitoring::MetricRegistry>();
     auto alarms = std::make_shared<paperbreak::monitoring::AlarmRegistry>();
     std::shared_ptr<paperbreak::pipeline::PreviewRuntime> preview;
-#if defined(PAPERBREAK_ENABLE_HIKROBOT)
     std::shared_ptr<paperbreak::camera::ICameraProvider> camera_provider{
         paperbreak::camera::hikrobot::create_hikrobot_camera_provider()};
     auto cameras =
         std::make_shared<paperbreak::camera::CameraControlRuntime>(std::move(camera_provider));
-#else
-    auto cameras = std::make_shared<paperbreak::camera::CameraControlRuntime>();
-#endif
     std::shared_ptr<PreviewPublisher> preview_publisher;
     if (loaded.value().effective->preview.enabled)
     {

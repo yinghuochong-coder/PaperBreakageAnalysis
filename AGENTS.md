@@ -43,12 +43,12 @@
 
 使用已配置的 CMake 预设。
 
-典型命令：
+本机已通过忽略的 `CMakeUserPresets.json` 配置 Visual Studio、Qt、OpenCV、MVS 和 vcpkg 路径，优先使用本机预设：
 
 ```powershell
-cmake --preset windows-vs2026-debug
-cmake --build --preset windows-vs2026-debug
-ctest --preset windows-vs2026-debug
+cmake --preset local-windows-vs2026-debug
+cmake --build --preset local-windows-vs2026-debug
+ctest --preset local-windows-vs2026-debug
 ```
 
 如果这些预设尚不存在，仅在当前分配的任务确实需要时才创建它们。

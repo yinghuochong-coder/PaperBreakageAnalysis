@@ -4,7 +4,13 @@ param()
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$requiredEnvironment = @('VCPKG_ROOT', 'PAPERBREAK_QT_ROOT', 'OpenCV_DIR')
+$requiredEnvironment = @(
+    'VCPKG_ROOT',
+    'PAPERBREAK_QT_ROOT',
+    'OpenCV_DIR',
+    'PAPERBREAK_MVS_ROOT',
+    'PAPERBREAK_MVS_RUNTIME_DIR'
+)
 foreach ($name in $requiredEnvironment) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ([string]::IsNullOrWhiteSpace($value)) {

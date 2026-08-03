@@ -855,9 +855,8 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
         else if (!operation.succeeded)
         {
             if (snapshot.error && snapshot.error->business_code == "SYS_NOT_SUPPORTED")
-                camera_operation_value_->setText(
-                    QStringLiteral("失败：后台服务是 Mock-only 构建，未启用 Hikrobot MVS "
-                                   "生产适配器；请使用 Hikrobot 构建预设重新构建并部署服务。"));
+                camera_operation_value_->setText(QStringLiteral(
+                    "失败：后台服务未装配 Hikrobot MVS 相机提供者，请检查部署完整性。"));
             else
                 camera_operation_value_->setText(
                     QStringLiteral("失败：%1").arg(QString::fromStdString(operation.message)));
