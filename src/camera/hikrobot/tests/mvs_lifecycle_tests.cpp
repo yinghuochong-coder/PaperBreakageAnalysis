@@ -875,5 +875,13 @@ TEST(MvsSdkSmokeTest, ApprovedRuntimeVersionIsLoaded)
 {
     EXPECT_EQ(production_mvs_api().get_sdk_version(), 0x04080003U);
 }
+
+TEST(MvsSdkSmokeTest, GigeEnumerationRuntimeCanBeLoadedWithoutOpeningDevices)
+{
+    const auto result = DeviceList::enumerate(production_mvs_api(), MV_GIGE_DEVICE);
+
+    ASSERT_TRUE(result) << result.error().message
+                        << " [native=" << result.error().native_code.value_or("unknown") << ']';
+}
 } // namespace
 } // namespace paperbreak::camera::hikrobot::detail

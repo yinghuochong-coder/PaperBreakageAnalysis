@@ -23,30 +23,8 @@
     },
     "type": "mock"
   },
-  "cameras": [
-    {
-      "enabled": true,
-      "exposureUs": 4989.0,
-      "frameRate": 59.0,
-      "gainDb": 23.0,
-      "id": "CAM01",
-      "interPacketDelayNs": 400,
-      "location": "安装工位",
-      "packetSizeBytes": 1500,
-      "pixelFormat": "Mono8",
-      "roi": {
-        "height": 1240,
-        "offsetX": 0,
-        "offsetY": 0,
-        "width": 1623
-      },
-      "serialNumber": "DB1888674",
-      "triggerDelayUs": 0,
-      "triggerMode": "Continuous",
-      "triggerSource": "0"
-    }
-  ],
-  "configRevision": 6,
+  "cameras": [],
+  "configRevision": 1,
   "configSchemaVersion": 1,
   "event": {
     "generatePreviewVideo": false,
@@ -74,7 +52,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-03T07:12:08.208Z",
+  "modifiedAt": "2026-08-01T00:00:00.000Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

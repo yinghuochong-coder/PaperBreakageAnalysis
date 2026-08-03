@@ -19,6 +19,7 @@ target_link_libraries(PaperBreakEdgeService
 if(PAPERBREAK_ENABLE_HIKROBOT)
     target_link_libraries(PaperBreakEdgeService PRIVATE paperbreak_camera_hikrobot)
     target_compile_definitions(PaperBreakEdgeService PRIVATE PAPERBREAK_ENABLE_HIKROBOT=1)
+    paperbreak_stage_hikrobot_runtime(PaperBreakEdgeService)
 endif()
 set_target_properties(PaperBreakEdgeService PROPERTIES
     OUTPUT_NAME PaperBreakEdgeService

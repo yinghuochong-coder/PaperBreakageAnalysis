@@ -43,10 +43,10 @@
       "serialNumber": "DB1888674",
       "triggerDelayUs": 0,
       "triggerMode": "Continuous",
-      "triggerSource": "0"
+      "triggerSource": ""
     }
   ],
-  "configRevision": 6,
+  "configRevision": 5,
   "configSchemaVersion": 1,
   "event": {
     "generatePreviewVideo": false,
@@ -74,7 +74,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-03T07:12:08.208Z",
+  "modifiedAt": "2026-08-03T07:11:28.714Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

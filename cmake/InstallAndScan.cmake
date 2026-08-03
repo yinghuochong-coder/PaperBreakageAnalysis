@@ -16,6 +16,16 @@ if(NOT install_result EQUAL 0)
     message(FATAL_ERROR "Install failed.\n${install_output}\n${install_error}")
 endif()
 
+if(DEFINED REQUIRED_FILES AND NOT REQUIRED_FILES STREQUAL "")
+    string(REPLACE "|" ";" required_files "${REQUIRED_FILES}")
+    foreach(required_file IN LISTS required_files)
+        if(NOT EXISTS "${INSTALL_DIR}/${required_file}")
+            message(FATAL_ERROR
+                "Installed runtime file is missing: '${INSTALL_DIR}/${required_file}'.")
+        endif()
+    endforeach()
+endif()
+
 string(REPLACE "|" ";" forbidden_paths "${FORBIDDEN_PATHS}")
 file(GLOB_RECURSE installed_files LIST_DIRECTORIES FALSE "${INSTALL_DIR}/*")
 foreach(installed_file IN LISTS installed_files)

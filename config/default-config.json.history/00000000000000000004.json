@@ -36,17 +36,17 @@
       "pixelFormat": "Mono8",
       "roi": {
         "height": 1240,
-        "offsetX": 0,
+        "offsetX": 1,
         "offsetY": 0,
         "width": 1623
       },
       "serialNumber": "DB1888674",
-      "triggerDelayUs": 0,
+      "triggerDelayUs": 5,
       "triggerMode": "Continuous",
-      "triggerSource": "0"
+      "triggerSource": ""
     }
   ],
-  "configRevision": 6,
+  "configRevision": 4,
   "configSchemaVersion": 1,
   "event": {
     "generatePreviewVideo": false,
@@ -74,7 +74,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-03T07:12:08.208Z",
+  "modifiedAt": "2026-08-03T07:10:25.869Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

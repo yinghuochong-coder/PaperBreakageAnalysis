@@ -12,6 +12,7 @@ target_link_libraries(PaperBreakCameraHardwareTest
 target_compile_definitions(PaperBreakCameraHardwareTest PRIVATE _WIN32_WINNT=0x0A00)
 set_target_properties(PaperBreakCameraHardwareTest PROPERTIES
     FOLDER "PaperBreak/Tools")
+paperbreak_stage_hikrobot_runtime(PaperBreakCameraHardwareTest)
 install(TARGETS PaperBreakCameraHardwareTest
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 

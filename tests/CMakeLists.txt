@@ -191,6 +191,15 @@ add_test(NAME missing_dependency_diagnostic
         -P "${PROJECT_SOURCE_DIR}/cmake/ExpectConfigureFailure.cmake")
 set_tests_properties(missing_dependency_diagnostic PROPERTIES LABELS "integration")
 
+add_test(NAME missing_hikrobot_gige_runtime_diagnostic
+    COMMAND "${CMAKE_COMMAND}"
+        "-DTEST_SOURCE=${PROJECT_SOURCE_DIR}/cmake/tests/hikrobot_runtime"
+        "-DTEST_BINARY=${PROJECT_BINARY_DIR}/configure-tests/hikrobot-runtime"
+        "-DFAILURE_CASE=hikrobot-runtime"
+        "-DEXPECTED_TEXT=MVGigEVisionSDK.dll"
+        -P "${PROJECT_SOURCE_DIR}/cmake/ExpectConfigureFailure.cmake")
+set_tests_properties(missing_hikrobot_gige_runtime_diagnostic PROPERTIES LABELS "integration")
+
 add_test(NAME hikrobot_sdk_boundary
     COMMAND "${CMAKE_COMMAND}"
         "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
@@ -198,6 +207,7 @@ add_test(NAME hikrobot_sdk_boundary
 set_tests_properties(hikrobot_sdk_boundary PROPERTIES LABELS "integration")
 
 set(path_scan_inputs "$ENV{PAPERBREAK_QT_ROOT}|${OpenCV_DIR}|$ENV{VCPKG_ROOT}")
+set(required_install_files "")
 if(PAPERBREAK_ENABLE_HIKROBOT)
     if(DEFINED PAPERBREAK_MVS_ROOT AND NOT PAPERBREAK_MVS_ROOT STREQUAL "")
         set(path_scan_mvs_root "${PAPERBREAK_MVS_ROOT}")
@@ -210,6 +220,8 @@ if(PAPERBREAK_ENABLE_HIKROBOT)
         set(path_scan_mvs_runtime "$ENV{PAPERBREAK_MVS_RUNTIME_DIR}")
     endif()
     string(APPEND path_scan_inputs "|${path_scan_mvs_root}|${path_scan_mvs_runtime}")
+    set(required_install_files
+        "${CMAKE_INSTALL_BINDIR}/MvCameraControl.dll|${CMAKE_INSTALL_BINDIR}/MVGigEVisionSDK.dll")
 endif()
 add_test(NAME install_tree_no_sdk_path_leaks
     COMMAND "${CMAKE_COMMAND}"
@@ -217,6 +229,7 @@ add_test(NAME install_tree_no_sdk_path_leaks
         "-DINSTALL_DIR=${PROJECT_BINARY_DIR}/test-install"
         "-DCONFIG=$<CONFIG>"
         "-DFORBIDDEN_PATHS=${path_scan_inputs}"
+        "-DREQUIRED_FILES=${required_install_files}"
         "-DSERVICE_RELATIVE=${CMAKE_INSTALL_BINDIR}/PaperBreakEdgeService.exe"
         "-DCONSOLE_RELATIVE=${CMAKE_INSTALL_BINDIR}/PaperBreakEdgeConsole.exe"
         -P "${PROJECT_SOURCE_DIR}/cmake/InstallAndScan.cmake")

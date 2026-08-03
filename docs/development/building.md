@@ -133,7 +133,7 @@ cmake --install out\build\windows-vs2026-release `
   --prefix out\install\windows-vs2026-release
 ```
 
-当前安装布局包含 `bin`、`lib` 和 `include`，并通过 CMake/Qt 部署脚本复制服务所需的 vcpkg 动态库、Qt 动态库和 Qt 平台插件。它不制作安装器，也不替代 M9 的签名、完整许可证/SBOM 和企业部署物料。CTest 会从安装树启动两个程序的 `--version` smoke，并扫描产物，拒绝泄漏注入的 Qt、OpenCV 或 vcpkg 根路径。
+当前安装布局包含 `bin`、`lib` 和 `include`，并通过 CMake/Qt 部署脚本复制服务所需的 vcpkg 动态库、Qt 动态库和 Qt 平台插件。启用 Hikrobot 预设时，`bin` 还必须包含同为 4.8.0.3 的 `MvCameraControl.dll` 和 GigE 动态传输组件 `MVGigEVisionSDK.dll`；不复制未使用的 USB、采集卡或 GUI Runtime。它不制作安装器，也不替代 M9 的驱动、签名、完整许可证/SBOM 和企业部署物料。CTest 会检查必需运行时文件，从安装树启动两个程序的 `--version` smoke，并扫描产物，拒绝泄漏注入的 Qt、OpenCV、MVS 或 vcpkg 根路径。
 
 ## 7. CI 入口
 
