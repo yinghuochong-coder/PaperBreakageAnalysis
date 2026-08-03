@@ -1,7 +1,7 @@
 # M4-05：相机配置与实际值回显 ExecPlan
 
 ## 元数据
-- 状态：completed（2026-08-03 GigE Runtime 部署缺陷修复）
+- 状态：completed（2026-08-03 相机连接参数不匹配与显式读参整改）
 - 负责人：Codex
 - 创建日期：2026-08-03
 - 最后更新：2026-08-03
@@ -16,6 +16,8 @@
 
 2026-08-03 GigE Runtime 补充：修复安装树只部署 `MvCameraControl.dll`、遗漏其在 GigE 枚举时动态加载的 `MVGigEVisionSDK.dll`，导致安装版服务返回 `MV_E_LOAD_LIBRARY (0x8000000C)` 的缺陷。部署范围保持为目标 GigE 相机所需的最小组件，不引入 USB、采集卡或 GUI Runtime。
 
+2026-08-03 读参整改补充：修复人工连接已打开设备后，因历史保存参数不符合当前设备能力而把整个连接报告为失败的问题；连接响应明确区分“设备已连接”和“保存参数未应用”，并在同一页面提供显式参数读取，将设备回读值载入编辑器，避免继续使用不合理的历史值。
+
 ## 范围
 
 ### 范围内
@@ -25,6 +27,7 @@
 - 更新 IPC 文档、路线图和测试。
 - 增加 `camera.bind`、发现后自动展示/绑定、Hikrobot 显式构建预设以及应用级主题控制器。
 - 修复 Hikrobot 构建输出和安装树的最小 GigE Runtime 部署，增加真实 SDK 只读枚举 smoke 与安装文件门禁。
+- 连接成功但保存参数不受设备支持时保留连接与实际回读，并在 UI 增加“读取当前参数”入口。
 
 ### 范围外
 - MVS SDK 的实体设备验证（M3 硬件验证范围）；无 SDK 或硬件时不得模拟成真机。
@@ -72,6 +75,7 @@ IPC 响应分别返回保存配置、下发请求、设备实际回读与重启�
 - [x] 2. 扩展服务命令分发、配置写入和 IPC 文档，严格校验全部 M4-05 DTO，并覆盖权限、停止、冲突、失败和实际值回读。
 - [x] 3. 增加控制台相机状态/命令模型及相机配置页，完成操作确认、状态标签和总览相机计数；增加离屏 UI 与模型测试。
 - [x] 4. 更新路线图/本计划，运行 Debug、Release、CTest、格式检查与差异检查，回填证据。
+- [x] 5. 修复连接后的参数应用结果语义，新增显式读参到编辑器流程，并以 Mock 覆盖不合理保存参数与读参行为。
 
 ## 验证计划
 
@@ -113,12 +117,16 @@ ctest --preset windows-vs2026-release
 - 2026-08-03：完成发现字段、空配置 UI、`camera.bind`、拓扑待重启、显式 Hikrobot 预设和三模式主题整改。最新只读 probe 显示设备已恢复独占可用；启用 Hikrobot 的临时服务 IPC 返回完整发现字段，空配置 list 返回修订与拓扑状态。当前令牌未提升，真机绑定按设计返回 `IPC_UNAUTHORIZED`，临时与生产配置均未改变。计划状态置为 completed。
 - 2026-08-03：安装版再次复现 `camera.discover` 失败；安装树中的硬件 probe 返回 `MV_E_LOAD_LIBRARY (0x8000000C)`，而使用供应商 Runtime 的构建树 probe 成功。隔离验证确认补齐 `MVGigEVisionSDK.dll` 后，安装版 probe 和服务 IPC 均恢复发现。计划状态重新置为 in-progress，仅修复 GigE Runtime 部署和相应门禁。
 - 2026-08-03：完成两项必需 Runtime 的存在性/版本配置门禁、服务/适配器测试/硬件工具构建输出部署、安装清单门禁和真实 SDK GigE 枚举 smoke。Hikrobot 与 Mock 的 Debug/Release 全量构建和 CTest 均通过；从安装目录运行的只读 probe 与实际 IPC `camera.discover` 均成功，计划状态置为 completed。
+- 2026-08-03：用户复现连接时报“相机参数不符合设备能力”。确认设备实际已打开，但 `camera.connect` 随即整包下发历史保存参数，校验失败后把连接误报为失败；UI 缺少将 `camera.getConfig` 回读值载入编辑器的入口。计划重新置为 in-progress。
+- 2026-08-03：完成连接部分成功语义、已连接设备保存前能力校验、客户端回读解析和同页“读取当前参数”入口；Mock Debug/Release、Hikrobot Debug、Qt 离屏与完整非硬件 CTest 通过，计划状态置为 completed。
 
 ## 决策记录
 
 - DEC-001：控制门面只依赖 `camera` 领域接口；MVS SDK 调用继续限定在 Hikrobot 适配器模块。
 - DEC-002：本任务的 `captureSnapshot` 只返回内存帧元数据，图像持久化留给 M5，以避免在控制路径加入不受控 I/O。
 - DEC-003：只部署 4.8.0.3 的 `MvCameraControl.dll` 与目标 GigE 相机所需的 `MVGigEVisionSDK.dll`；不复制约 128 MB 的完整 Runtime，避免扩大未使用组件、安装体积和许可证清单。
+- DEC-004：`camera.connect` 的设备打开成功后，即使保存参数下发失败也返回成功响应并携带结构化 `applyError`；设备保持连接，客户端展示实际回读值，避免把“参数未应用”误报为“连接失败”。
+- DEC-005：显式读参复用只读 `camera.getConfig`，不增加新的 SDK 或服务接口；客户端把该响应的 `actual` 更新到快照，UI 仅在用户点击读取后将其载入编辑器，仍需用户确认才保存。
 
 ## 意外发现
 
@@ -146,7 +154,11 @@ ctest --preset windows-vs2026-release
 | 2026-08-03 | 安装目录 `PaperBreakCameraHardwareTest --probe` | 通过 | 两个 DLL 文件版本均为 4.8.0.3；只读发现 `MV-CS020-60GM`/`DB1888674`、相机 IP `192.168.11.115`、主机网卡 `192.168.11.102`，`exclusiveAccessAvailable=true`，不再出现 `0x8000000C` |
 | 2026-08-03 | 安装目录服务实际 IPC `camera.discover` | 通过 | 从子进程 `PATH` 排除 MVS 目录后启动安装树服务，响应成功并返回型号、序列号、IP、网卡和独占可用状态；未执行绑定、打开、参数写入或取流 |
 | 2026-08-03 | 变更文件 clang-format dry-run；SDK 边界/安装路径泄漏扫描 | 通过 | 变更 C++ 文件格式通过；SDK 边界与两项 Runtime 安装清单/路径泄漏扫描均通过。全局 `format-check` 仍仅命中无关既有 `src/console/src/preview_client.cpp` 格式差异 |
+| 2026-08-03 | `cmake --preset local-windows-vs2026-debug`; Debug 全量构建；`ctest --preset local-windows-vs2026-debug` | 通过 | 完整非硬件 CTest 19/19；unit 168 项，新增不匹配连接、保存前设备能力校验和客户端显式回读覆盖；Qt 离屏 smoke 通过 |
+| 2026-08-03 | `cmake --preset local-windows-vs2026-release`; Release 全量构建；`ctest --preset local-windows-vs2026-release` | 通过 | 完整非硬件 CTest 19/19 |
+| 2026-08-03 | 注入本机 Qt/OpenCV/MVS 路径后配置、构建和执行 `windows-vs2026-hikrobot-debug` CTest | 通过 | 生产适配器 Debug 构建成功，非硬件 CTest 23/23；hardware-integration 按预设排除，未连接实体相机、未读取或写入实体相机参数 |
+| 2026-08-03 | 变更 C++ 文件 `clang-format --dry-run --Werror`; `git diff --check` | 通过 | 仅检查本次 6 个 C++/头文件；无格式或空白错误 |
 
 ## 完成摘要
 
-已完成厂商无关的相机控制会话、十一个服务 IPC 命令、配置原子保存与设备回读、控制台模型、绑定页面和应用级主题。启用 Hikrobot 的生产构建会注入现有 MVS 提供者，并在服务、测试、硬件工具和安装树中就地部署版本锁定为 4.8.0.3 的核心控制与 GigE 传输 DLL；未启用 SDK 时不读取或部署 MVS 文件。Mock/Hikrobot Debug/Release、Qt 离屏、SDK 边界、运行时安装树、安装目录只读 probe 和实际 IPC 发现均已验证；硬件门禁仍为 incomplete，未执行或宣称绑定、相机打开、参数写入、取流、断链及其他故障场景通过。
+已完成厂商无关的相机控制会话、十一个服务 IPC 命令、配置原子保存与设备回读、控制台模型、绑定页面和应用级主题。启用 Hikrobot 的生产构建会注入现有 MVS 提供者，并在服务、测试、硬件工具和安装树中就地部署版本锁定为 4.8.0.3 的核心控制与 GigE 传输 DLL；未启用 SDK 时不读取或部署 MVS 文件。连接现会区分设备打开与历史参数应用结果，参数不符合设备能力时保持连接并提供实际回读；同页可显式读取实际参数到编辑器，已连接设备的候选参数会在保存前按能力校验。Mock Debug/Release、Hikrobot Debug、Qt 离屏、SDK 边界和运行时安装树均已验证；硬件门禁仍为 incomplete，本次未执行或宣称实体相机连接、参数读取/写入、取流、断链及其他故障场景通过。

@@ -243,7 +243,10 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 
 支持 `camera.connect`、`camera.disconnect`、`camera.start`、`camera.stop`、
 `camera.getConfig`、`camera.captureSnapshot` 和 `camera.softwareTrigger`。连接时服务把当前保存参数
-下发给设备并回读实际值；断开会先停止仍在进行的采集。`camera.captureSnapshot` 只返回帧号、宽和高，
+下发给设备并回读实际值；如果设备已打开但保存参数不符合当前设备能力，连接仍返回成功并保持设备
+连接，响应包含 `state="connected"`、设备 `actual`、`applied=false` 和结构化 `applyError`，客户端应
+提示用户先用只读 `camera.getConfig` 读取当前参数再确认保存，不得把该情况显示成连接失败。断开会先
+停止仍在进行的采集。`camera.captureSnapshot` 只返回帧号、宽和高，
 不在 IPC 工作线程进行磁盘写入或 JPEG 编码。软件触发仅在设备实际处于软件触发采集模式时成功。
 
 `camera.bind` 要求提升后的本机管理员身份，payload 为：
@@ -284,8 +287,9 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 }
 ```
 
-`parameters` 只允许上述字段，并由配置 schema 与设备能力共同校验。服务先通过配置仓储的乐观修订、
-审计和原子替换保存，再尝试向已连接设备下发完整参数并回读。成功响应以 `saved`、`dispatched`、
+`parameters` 只允许上述字段，并由配置 schema 与设备能力共同校验。服务先解析完整候选配置；设备
+已连接时，还必须在保存前按该设备能力校验候选完整参数，校验失败不得提高配置修订号。通过后再由
+配置仓储执行乐观修订、审计和原子替换，并向已连接设备下发完整参数及回读。成功响应以 `saved`、`dispatched`、
 `applied`、`restartRequired` 和 `storedConfigRevision` 区分阶段；保存成功但设备未连接或拒绝参数时，
 响应仍保留 `saved=true`，同时返回 `applied=false` 和结构化 `applyError`，客户端不得把保存值显示为
 实际值。

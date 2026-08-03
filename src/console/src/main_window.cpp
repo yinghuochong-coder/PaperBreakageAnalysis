@@ -520,6 +520,20 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                 action_layout->addWidget(button);
             };
             add_action(QStringLiteral("连接"), "camera.connect", false);
+            camera_read_parameters_button_ =
+                make_child<QPushButton>(camera_control_actions_, QStringLiteral("读取当前参数"));
+            camera_read_parameters_button_->setObjectName(QStringLiteral("camera-read-parameters"));
+            QObject::connect(camera_read_parameters_button_, &QPushButton::clicked, this, [this] {
+                if (!camera_actions_.control || !camera_selector_ ||
+                    camera_selector_->currentIndex() < 0)
+                    return;
+                const auto result = camera_actions_.control(
+                    "camera.getConfig", camera_selector_->currentText().toStdString());
+                if (result)
+                    camera_parameter_read_pending_ = true;
+                show_camera_result(result);
+            });
+            action_layout->addWidget(camera_read_parameters_button_);
             add_action(QStringLiteral("断开"), "camera.disconnect", true);
             add_action(QStringLiteral("开始采集"), "camera.start", true);
             add_action(QStringLiteral("停止采集"), "camera.stop", true);
@@ -848,6 +862,13 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
                 camera_operation_value_->setText(
                     QStringLiteral("失败：%1").arg(QString::fromStdString(operation.message)));
         }
+        else if (operation.operation == "camera.getConfig")
+            camera_operation_value_->setText(
+                QStringLiteral("成功：已读取相机当前参数并载入编辑区；确认后再保存下发。"));
+        else if (operation.operation == "camera.connect" && !operation.applied)
+            camera_operation_value_->setText(
+                QStringLiteral("相机已连接，但保存参数未应用：%1。请读取当前参数并确认保存。")
+                    .arg(QString::fromStdString(operation.message)));
         else
             camera_operation_value_->setText(
                 QStringLiteral("成功：已保存=%1，已下发=%2，已应用=%3，需重启=%4")
@@ -856,12 +877,32 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
                          operation.applied ? QStringLiteral("是") : QStringLiteral("否"),
                          operation.restart_required ? QStringLiteral("是") : QStringLiteral("否")));
     }
+    bool loaded_actual = false;
+    if (camera_parameter_read_pending_ && snapshot.operation &&
+        snapshot.operation->operation == "camera.getConfig" && !snapshot.operation->pending)
+    {
+        camera_parameter_read_pending_ = false;
+        if (snapshot.operation->succeeded)
+        {
+            const auto actual = std::find_if(
+                camera_snapshot_.cameras.begin(), camera_snapshot_.cameras.end(),
+                [&](const auto& item) { return item.id == snapshot.operation->camera_id; });
+            if (actual != camera_snapshot_.cameras.end() && actual->actual.exposure_us &&
+                camera_selector_->currentText().toStdString() == actual->id)
+            {
+                camera_editor_id_ = actual->id;
+                camera_editor_revision_ = actual->saved_config_revision;
+                populate_camera_editor(actual->actual);
+                loaded_actual = true;
+            }
+        }
+    }
     const auto selected_index = static_cast<std::size_t>(camera_selector_->currentIndex());
     if (selected_index < camera_snapshot_.cameras.size())
     {
         const auto& selected_camera = camera_snapshot_.cameras[selected_index];
-        if (camera_editor_id_ != selected_camera.id ||
-            camera_editor_revision_ != selected_camera.saved_config_revision)
+        if (!loaded_actual && (camera_editor_id_ != selected_camera.id ||
+                               camera_editor_revision_ != selected_camera.saved_config_revision))
             populate_camera_editor();
     }
     update_camera_controls();
@@ -877,6 +918,11 @@ void MainWindow::populate_camera_editor()
     const auto& value = camera_snapshot_.cameras[index].saved;
     camera_editor_id_ = camera_snapshot_.cameras[index].id;
     camera_editor_revision_ = camera_snapshot_.cameras[index].saved_config_revision;
+    populate_camera_editor(value);
+}
+
+void MainWindow::populate_camera_editor(const CameraParameterValue& value)
+{
     camera_exposure_->setValue(value.exposure_us.value_or(1.0));
     camera_gain_->setValue(value.gain_db.value_or(0.0));
     camera_fps_->setValue(value.frame_rate.value_or(1.0));
@@ -897,12 +943,22 @@ void MainWindow::populate_camera_editor()
 
 void MainWindow::update_camera_controls()
 {
-    if (!camera_editor_ || !camera_control_actions_ || !camera_bind_button_)
+    if (!camera_editor_ || !camera_control_actions_ || !camera_bind_button_ ||
+        !camera_read_parameters_button_)
         return;
     const bool configured = camera_selector_ && camera_selector_->currentIndex() >= 0 &&
                             !camera_snapshot_.stale && !camera_snapshot_.topology_restart_required;
     camera_editor_->setEnabled(configured);
     camera_control_actions_->setEnabled(configured);
+    bool connected = false;
+    if (configured)
+    {
+        const auto index = static_cast<std::size_t>(camera_selector_->currentIndex());
+        connected = index < camera_snapshot_.cameras.size() &&
+                    (camera_snapshot_.cameras[index].state == "connected" ||
+                     camera_snapshot_.cameras[index].state == "acquiring");
+    }
+    camera_read_parameters_button_->setEnabled(connected);
 
     const int row = discovered_devices_ ? discovered_devices_->currentRow() : -1;
     const bool valid_row =
@@ -1069,6 +1125,7 @@ bool MainWindow::camera_configuration_ready() const noexcept
            camera_trigger_mode_ && camera_trigger_source_ && camera_packet_size_ &&
            discovered_devices_ && camera_bind_slot_ && camera_bind_location_ &&
            camera_bind_button_ && findChild<QPushButton*>(QStringLiteral("camera-discover")) &&
+           findChild<QPushButton*>(QStringLiteral("camera-read-parameters")) &&
            findChild<QPushButton*>(QStringLiteral("camera-camera.disconnect")) &&
            findChild<QPushButton*>(QStringLiteral("camera-update-config"));
 }

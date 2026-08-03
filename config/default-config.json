@@ -26,9 +26,9 @@
   "cameras": [
     {
       "enabled": true,
-      "exposureUs": 4989.0,
-      "frameRate": 59.0,
-      "gainDb": 23.0,
+      "exposureUs": 5000.0,
+      "frameRate": 60.0,
+      "gainDb": 23.01,
       "id": "CAM01",
       "interPacketDelayNs": 400,
       "location": "安装工位",
@@ -38,15 +38,15 @@
         "height": 1240,
         "offsetX": 0,
         "offsetY": 0,
-        "width": 1623
+        "width": 1624
       },
       "serialNumber": "DB1888674",
       "triggerDelayUs": 0,
       "triggerMode": "Continuous",
-      "triggerSource": "0"
+      "triggerSource": ""
     }
   ],
-  "configRevision": 6,
+  "configRevision": 8,
   "configSchemaVersion": 1,
   "event": {
     "generatePreviewVideo": false,
@@ -74,7 +74,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-03T07:12:08.208Z",
+  "modifiedAt": "2026-08-03T07:35:32.317Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

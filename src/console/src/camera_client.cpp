@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <utility>
 
 namespace paperbreak::console
@@ -353,6 +354,23 @@ void CameraClient::operation_completed(ipc::ClientRequestHandle handle,
         }
         snapshot_.discovered_devices = std::move(devices).value();
     }
+    else if ((operation == "camera.getConfig" || operation == "camera.connect") &&
+             payload.is_object())
+    {
+        const auto camera = std::find_if(
+            snapshot_.cameras.begin(), snapshot_.cameras.end(),
+            [this](const auto& item) { return item.id == snapshot_.operation->camera_id; });
+        if (camera != snapshot_.cameras.end())
+        {
+            if (payload.contains("state") && payload["state"].is_string())
+                camera->state = payload["state"].get<std::string>();
+            if (payload.contains("actual") && payload["actual"].is_object())
+            {
+                camera->actual = {};
+                parse_parameters(payload["actual"], camera->actual);
+            }
+        }
+    }
     snapshot_.operation->succeeded = true;
     snapshot_.operation->message = "操作成功";
     if (!payload.is_discarded() && payload.is_object())
@@ -361,6 +379,10 @@ void CameraClient::operation_completed(ipc::ClientRequestHandle handle,
         snapshot_.operation->dispatched = payload.value("dispatched", true);
         snapshot_.operation->applied = payload.value("applied", true);
         snapshot_.operation->restart_required = payload.value("restartRequired", false);
+        if (payload.contains("applyError") && payload["applyError"].is_object() &&
+            payload["applyError"].contains("message") &&
+            payload["applyError"]["message"].is_string())
+            snapshot_.operation->message = payload["applyError"]["message"].get<std::string>();
     }
     snapshot_.error.reset();
     notify();

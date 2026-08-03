@@ -946,9 +946,26 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
                 "IPC_REQUEST_INVALID", Severity::error, "未知相机命令", "ipc.camera"));
         if (request.command == "camera.connect")
         {
-            result = cameras_->connect(id.value(), found->serial_number);
-            if (result)
-                result = cameras_->update(id.value(), camera_parameters(*found));
+            auto connected = cameras_->connect(id.value(), found->serial_number);
+            if (!connected)
+                return Result<ipc::CommandResponse>::failure(connected.error());
+
+            auto applied = cameras_->update(id.value(), camera_parameters(*found));
+            if (!applied)
+            {
+                if (applied.error().business_code != "CAMERA_CONFIG_FAILED")
+                    return Result<ipc::CommandResponse>::failure(applied.error());
+                Json response = camera_snapshot_json(connected.value());
+                response["saved"] = false;
+                response["dispatched"] = false;
+                response["applied"] = false;
+                response["restartRequired"] = false;
+                response["applyError"] = {{"code", applied.error().business_code},
+                                          {"message", applied.error().message}};
+                return Result<ipc::CommandResponse>::success(
+                    {.payload_json = response.dump(), .binary = {}});
+            }
+            result = std::move(applied);
         }
         else if (request.command == "camera.disconnect")
             result = cameras_->disconnect(id.value());
@@ -993,6 +1010,29 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
                                   "ipc.camera.updateConfig"));
             for (auto it = parameters.begin(); it != parameters.end(); ++it)
                 (*target)[it.key()] = it.value();
+
+            auto candidate = config::parse_config(document.dump(), config_directory_);
+            if (!candidate)
+                return Result<ipc::CommandResponse>::failure(candidate.error());
+            const auto candidate_camera =
+                std::find_if(candidate.value().cameras.begin(), candidate.value().cameras.end(),
+                             [&](const auto& item) { return item.id == id.value(); });
+            if (candidate_camera == candidate.value().cameras.end())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("CAMERA_NOT_FOUND", Severity::error, "候选配置中逻辑相机不存在",
+                                  "ipc.camera.updateConfig"));
+
+            auto current = cameras_->get(id.value(), found->serial_number);
+            if (!current)
+                return Result<ipc::CommandResponse>::failure(current.error());
+            if (current.value().capabilities)
+            {
+                auto validated = camera::validate_parameters(*current.value().capabilities,
+                                                             camera_parameters(*candidate_camera));
+                if (!validated)
+                    return Result<ipc::CommandResponse>::failure(validated.error());
+            }
+
             auto saved = repository_.update(
                 document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
                 {.source = config::ConfigChangeSource::local_ipc,

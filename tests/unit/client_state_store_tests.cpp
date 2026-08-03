@@ -134,6 +134,10 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
             {.payload_json =
                  request.command == "camera.discover"
                      ? R"({"devices":[{"model":"Mock","serialNumber":"MOCK-01","ip":"127.0.0.1","networkInterface":"mock0","exclusiveAccessAvailable":true}]})"
+                 : request.command == "camera.getConfig"
+                     ? R"({"cameraId":"CAM01","state":"connected","actual":{"exposureUs":777.0,"gainDb":3.0,"frameRate":25.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}})"
+                 : request.command == "camera.connect"
+                     ? R"({"cameraId":"CAM01","state":"connected","actual":{"exposureUs":101.0},"saved":false,"dispatched":false,"applied":false,"restartRequired":false,"applyError":{"code":"CAMERA_CONFIG_FAILED","message":"保存参数不符合当前设备能力"}})"
                  : request.command == "camera.updateConfig" || request.command == "camera.bind"
                      ? R"({"saved":true,"dispatched":true,"applied":true,"restartRequired":false})"
                      : R"({"state":"connected"})",
@@ -376,8 +380,16 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     ASSERT_TRUE(server.start());
 
     paperbreak::console::CameraClientSnapshot latest;
-    paperbreak::console::CameraClient client([&](const auto& snapshot) { latest = snapshot; },
-                                             client_options(name));
+    std::atomic_bool explicit_readback_observed{};
+    paperbreak::console::CameraClient client(
+        [&](const auto& snapshot) {
+            latest = snapshot;
+            if (snapshot.operation && snapshot.operation->operation == "camera.getConfig" &&
+                !snapshot.operation->pending && snapshot.operation->succeeded &&
+                !snapshot.cameras.empty() && snapshot.cameras.front().actual.exposure_us == 777.0)
+                explicit_readback_observed = true;
+        },
+        client_options(name));
     ASSERT_TRUE(client.start());
     ASSERT_TRUE(wait_until([&] {
         return !latest.stale && latest.cameras.size() == 1U &&
@@ -403,6 +415,12 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
                latest.operation->succeeded;
     }));
     EXPECT_EQ(handler->last_command, "camera.connect");
+    EXPECT_FALSE(latest.operation->applied);
+    EXPECT_EQ(latest.operation->message, "保存参数不符合当前设备能力");
+
+    ASSERT_TRUE(client.control("camera.getConfig", "CAM01"));
+    ASSERT_TRUE(wait_until([&] { return explicit_readback_observed.load(); }));
+    EXPECT_EQ(handler->last_command, "camera.getConfig");
 
     ASSERT_TRUE(client.discover());
     ASSERT_TRUE(wait_until([&] {

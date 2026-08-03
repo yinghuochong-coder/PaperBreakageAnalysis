@@ -322,6 +322,20 @@ TEST(SystemCommand, ControlsMockCameraPersistsConfigAndReturnsReadback)
     ASSERT_TRUE(software_mode);
     EXPECT_EQ(Json::parse(software_mode.value().payload_json)["actual"]["triggerMode"], "Software");
 
+    auto unsupported_roi = commands.handle(
+        fixture.request(
+            "camera.updateConfig",
+            R"({"cameraId":"CAM01","expectedConfigRevision":4,"parameters":{"roi":{"width":65,"height":48,"offsetX":0,"offsetY":0}}})"),
+        administrator, {});
+    ASSERT_FALSE(unsupported_roi);
+    EXPECT_EQ(unsupported_roi.error().business_code, "CAMERA_CONFIG_FAILED");
+    ASSERT_TRUE(fixture.repository.snapshot());
+    EXPECT_EQ(fixture.repository.snapshot().value().stored_config_revision, 4U);
+    auto unchanged =
+        commands.handle(fixture.request("camera.getConfig", R"({"cameraId":"CAM01"})"), reader, {});
+    ASSERT_TRUE(unchanged);
+    EXPECT_EQ(Json::parse(unchanged.value().payload_json)["actual"]["roi"]["width"], 64U);
+
     ASSERT_TRUE(commands.handle(fixture.request("camera.start", R"({"cameraId":"CAM01"})"),
                                 administrator, {}));
     ASSERT_TRUE(commands.handle(
@@ -354,6 +368,73 @@ TEST(SystemCommand, ControlsMockCameraPersistsConfigAndReturnsReadback)
                                     administrator, stopped.get_token());
     ASSERT_FALSE(stopping);
     EXPECT_EQ(stopping.error().business_code, "SYS_SERVICE_STOPPING");
+}
+
+TEST(SystemCommand, KeepsCameraConnectedWhenSavedParametersDoNotMatchDeviceCapabilities)
+{
+    CommandFixture fixture;
+    auto current = fixture.repository.snapshot();
+    ASSERT_TRUE(current);
+    Json document = Json::parse(paperbreak::config::serialize_config(*current.value().stored));
+    document["cameras"] =
+        Json::array({{{"id", "CAM01"},
+                      {"enabled", true},
+                      {"serialNumber", "MOCK-MISMATCH-01"},
+                      {"location", "测试位置"},
+                      {"exposureUs", 100.0},
+                      {"gainDb", 2.0},
+                      {"frameRate", 30.0},
+                      {"roi", {{"width", 65}, {"height", 48}, {"offsetX", 0}, {"offsetY", 0}}},
+                      {"pixelFormat", "Mono8"},
+                      {"triggerMode", "Continuous"},
+                      {"triggerSource", ""},
+                      {"triggerDelayUs", 0},
+                      {"packetSizeBytes", 1500},
+                      {"interPacketDelayNs", 0}}});
+    ASSERT_TRUE(
+        fixture.repository.update(document.dump(), 1U,
+                                  {.source = paperbreak::config::ConfigChangeSource::local_ipc,
+                                   .actor = "test",
+                                   .correlation_id = "mismatch-setup"}));
+
+    auto provider = paperbreak::camera::mock::MockCameraProvider::create(
+        {{.descriptor = {.model_name = "Mock",
+                         .serial_number = "MOCK-MISMATCH-01",
+                         .ip_address = "127.0.0.1",
+                         .network_interface = "loopback"},
+          .width = 64U,
+          .height = 48U,
+          .frame_rate = 30.0}});
+    ASSERT_TRUE(provider);
+    std::shared_ptr<paperbreak::camera::ICameraProvider> shared_provider{
+        std::move(provider).value()};
+    auto runtime = std::make_shared<paperbreak::camera::CameraControlRuntime>(shared_provider);
+    paperbreak::service::SystemCommandService commands{fixture.repository,
+                                                       fixture.status,
+                                                       {},
+                                                       {},
+                                                       {},
+                                                       fixture.config_path.parent_path(),
+                                                       {},
+                                                       runtime};
+
+    auto connected = commands.handle(fixture.request("camera.connect", R"({"cameraId":"CAM01"})"),
+                                     administrator, {});
+    ASSERT_TRUE(connected);
+    const Json response = Json::parse(connected.value().payload_json);
+    EXPECT_EQ(response["state"], "connected");
+    EXPECT_FALSE(response["applied"].get<bool>());
+    EXPECT_EQ(response["applyError"]["code"], "CAMERA_CONFIG_FAILED");
+    EXPECT_EQ(response["actual"]["roi"]["width"], 64U);
+
+    auto readback =
+        commands.handle(fixture.request("camera.getConfig", R"({"cameraId":"CAM01"})"), reader, {});
+    ASSERT_TRUE(readback);
+    EXPECT_EQ(Json::parse(readback.value().payload_json)["actual"]["roi"]["width"], 64U);
+
+    auto listed = commands.handle(fixture.request("camera.list"), reader, {});
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(Json::parse(listed.value().payload_json)["cameras"][0]["state"], "connected");
 }
 
 TEST(SystemCommand, BindsDiscoveredApprovedCameraFromActualReadbackAndRequiresRestart)
