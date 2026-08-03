@@ -52,7 +52,14 @@ struct AlarmOverviewSummary final
 {
     std::size_t active_count{};
     bool count_truncated{};
+    std::string highest_severity{"Info"};
     std::vector<ActiveAlarmSummary> recent;
+    std::uint64_t generation{};
+};
+
+struct ServiceLocationsSummary final
+{
+    std::string event_root;
     std::uint64_t generation{};
 };
 
@@ -71,6 +78,9 @@ struct ClientStateSnapshot final
     std::optional<AlarmOverviewSummary> alarms;
     bool alarms_stale{true};
     std::optional<Error> alarms_error;
+    std::optional<ServiceLocationsSummary> locations;
+    bool locations_stale{true};
+    std::optional<Error> locations_error;
 };
 
 using ClientStateObserver = std::function<void(const ClientStateSnapshot&)>;
@@ -100,10 +110,12 @@ class ClientStateStore final
     void synchronize_version(std::uint64_t generation);
     void synchronize_metrics(std::uint64_t generation);
     void synchronize_alarms(std::uint64_t generation);
+    void synchronize_locations(std::uint64_t generation);
     void status_completed(ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result);
     void version_completed(ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result);
     void metrics_completed(ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result);
     void alarms_completed(ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result);
+    void locations_completed(ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result);
     void notify() const noexcept;
 
     ClientStateObserver observer_;
@@ -113,6 +125,7 @@ class ClientStateStore final
     std::optional<ipc::ClientRequestHandle> version_request_;
     std::optional<ipc::ClientRequestHandle> metrics_request_;
     std::optional<ipc::ClientRequestHandle> alarms_request_;
+    std::optional<ipc::ClientRequestHandle> locations_request_;
     bool alarm_push_refresh_pending_{};
 };
 

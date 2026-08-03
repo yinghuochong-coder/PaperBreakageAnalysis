@@ -1,6 +1,7 @@
 add_library(paperbreak_console_model STATIC
     src/client_state_store.cpp
-    src/navigation_model.cpp)
+    src/navigation_model.cpp
+    src/tray_status_model.cpp)
 target_link_libraries(paperbreak_console_model
     PUBLIC
         paperbreak_common
@@ -17,12 +18,14 @@ set_target_properties(paperbreak_console_model PROPERTIES
 
 add_executable(PaperBreakEdgeConsole WIN32
     main.cpp
-    src/main_window.cpp)
+    src/main_window.cpp
+    src/system_tray_controller.cpp)
 target_link_libraries(PaperBreakEdgeConsole
     PRIVATE
         paperbreak_common
         paperbreak_console_model
         paperbreak_logging
+        paperbreak_windows_service_control
         paperbreak_compiler_options
         Qt6::Core
         Qt6::Gui

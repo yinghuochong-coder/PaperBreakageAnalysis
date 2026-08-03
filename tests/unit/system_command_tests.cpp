@@ -56,7 +56,7 @@ struct CommandFixture final
     CommandFixture()
         : config_path(temp.path / "edge-config.json"), repository(config_path, files, audit),
           status(std::make_shared<paperbreak::service::ServiceStatusStore>()),
-          commands(repository, status)
+          commands(repository, status, {}, {}, {}, config_path.parent_path())
     {
         const std::filesystem::path source =
             std::filesystem::path{PAPERBREAK_TEST_SOURCE_DIR} / "data" / "basic-config-valid.json";
@@ -114,6 +114,27 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json version_json = Json::parse(version.value().payload_json);
     EXPECT_FALSE(version_json.at("applicationVersion").get<std::string>().empty());
     EXPECT_TRUE(version_json.at("dependencies").contains("qt"));
+}
+
+TEST(SystemCommand, ReturnsResolvedEventLocationAndRejectsFields)
+{
+    CommandFixture fixture;
+    auto result = fixture.commands.handle(fixture.request("system.getLocations"), reader, {});
+    ASSERT_TRUE(result);
+    const Json payload = Json::parse(result.value().payload_json);
+    ASSERT_EQ(payload.size(), 1U);
+    const auto expected =
+        (fixture.config_path.parent_path() / std::filesystem::path{u8"数据/事件 文件"})
+            .lexically_normal();
+    const std::u8string expected_utf8 = expected.generic_u8string();
+    EXPECT_EQ(
+        payload.at("eventRoot").get<std::string>(),
+        std::string(reinterpret_cast<const char*>(expected_utf8.data()), expected_utf8.size()));
+
+    auto invalid = fixture.commands.handle(
+        fixture.request("system.getLocations", R"({"path":"C:/arbitrary"})"), reader, {});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
 }
 
 TEST(SystemCommand, RequiresElevatedAdministratorForReload)

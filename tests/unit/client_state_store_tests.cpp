@@ -1,5 +1,6 @@
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/navigation_model.hpp"
+#include "paperbreak/console/tray_status_model.hpp"
 #include "paperbreak/ipc/server.hpp"
 
 #include <QCoreApplication>
@@ -37,9 +38,11 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
 {
   public:
     StatusHandler(std::string state, std::string machine,
-                  const std::uint64_t malformed_metrics_responses = 0U)
+                  const std::uint64_t malformed_metrics_responses = 0U,
+                  const bool malformed_locations = false)
         : state_(std::move(state)), machine_(std::move(machine)),
-          malformed_metrics_responses_(malformed_metrics_responses)
+          malformed_metrics_responses_(malformed_metrics_responses),
+          malformed_locations_(malformed_locations)
     {
     }
 
@@ -82,7 +85,14 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
             alarm_requests_.fetch_add(1U, std::memory_order_relaxed);
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json =
-                     R"({"registryRevision":3,"alarms":[{"alarmId":7,"revision":2,"code":"DISK_WARNING","severity":"warning","source":"storage","firstOccurredAt":"2026-08-03T00:59:00.000Z","lastOccurredAt":"2026-08-03T01:00:00.000Z","active":true,"occurrenceCount":2,"message":"事件盘空间偏低","details":{},"acknowledged":false}],"truncated":false,"nextBeforeAlarmId":null})",
+                     R"({"registryRevision":3,"alarms":[{"alarmId":7,"revision":2,"code":"DISK_WARNING","severity":"Warning","source":"storage","firstOccurredAt":"2026-08-03T00:59:00.000Z","lastOccurredAt":"2026-08-03T01:00:00.000Z","active":true,"occurrenceCount":2,"message":"事件盘空间偏低","details":{},"acknowledged":false}],"truncated":false,"nextBeforeAlarmId":null})",
+                 .binary = {}});
+        }
+        if (request.command == "system.getLocations")
+        {
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = malformed_locations_ ? R"({"eventRoot":42})"
+                                                      : R"({"eventRoot":"C:/PaperBreak/events"})",
                  .binary = {}});
         }
         return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
@@ -96,6 +106,7 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
     std::string state_;
     std::string machine_;
     std::uint64_t malformed_metrics_responses_{};
+    bool malformed_locations_{};
     std::atomic_uint64_t metrics_requests_{};
     std::atomic_uint64_t alarm_requests_{};
 };
@@ -166,7 +177,8 @@ TEST(ClientStateStore, SynchronizesMarksStaleAndRefreshesAfterReconnect)
         const bool ready = latest.service_status.has_value() && !latest.service_status_stale &&
                            latest.version.has_value() && !latest.version_stale &&
                            latest.metrics.has_value() && !latest.metrics_stale &&
-                           latest.alarms.has_value() && !latest.alarms_stale;
+                           latest.alarms.has_value() && !latest.alarms_stale &&
+                           latest.locations.has_value() && !latest.locations_stale;
         if (!ready)
         {
             store.refresh_dynamic();
@@ -190,6 +202,8 @@ TEST(ClientStateStore, SynchronizesMarksStaleAndRefreshesAfterReconnect)
     EXPECT_DOUBLE_EQ(latest.metrics->event_disk_free_gib.value(), 512.25);
     ASSERT_EQ(latest.alarms->recent.size(), 1U);
     EXPECT_EQ(latest.alarms->recent.front().message, "事件盘空间偏低");
+    EXPECT_EQ(latest.alarms->highest_severity, "Warning");
+    EXPECT_EQ(latest.locations->event_root, "C:/PaperBreak/events");
     const std::uint64_t first_generation = latest.service_status->generation;
     const std::uint64_t metrics_before_burst = first_handler->metrics_requests();
     const std::uint64_t alarms_before_burst = first_handler->alarm_requests();
@@ -221,6 +235,7 @@ TEST(ClientStateStore, SynchronizesMarksStaleAndRefreshesAfterReconnect)
     EXPECT_TRUE(latest.version_stale);
     EXPECT_TRUE(latest.metrics_stale);
     EXPECT_TRUE(latest.alarms_stale);
+    EXPECT_TRUE(latest.locations_stale);
 
     auto second = std::make_unique<paperbreak::ipc::IpcServer>(
         std::make_shared<StatusHandler>("degraded", "EDGE-01"), std::make_unique<StateAuthorizer>(),
@@ -293,6 +308,31 @@ TEST(ClientStateStore, InvalidMetricsDoNotInvalidateOtherDataAndCanRecover)
     stop_server(server);
 }
 
+TEST(ClientStateStore, InvalidLocationsStayStaleWithoutInvalidatingStatus)
+{
+    const std::string name = state_name();
+    auto handler = std::make_shared<StatusHandler>("running", "EDGE-03", 0U, true);
+    paperbreak::ipc::IpcServer server(handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name));
+    ASSERT_TRUE(server.start());
+
+    paperbreak::console::ClientStateSnapshot latest;
+    paperbreak::console::ClientStateStore store([&](const auto& snapshot) { latest = snapshot; },
+                                                client_options(name));
+    ASSERT_TRUE(store.start());
+    ASSERT_TRUE(wait_until([&] {
+        return latest.service_status.has_value() && !latest.service_status_stale &&
+               latest.locations_error.has_value();
+    }));
+    EXPECT_TRUE(latest.locations_stale);
+    EXPECT_FALSE(latest.locations.has_value());
+    EXPECT_EQ(latest.locations_error->business_code, "IPC_PROTOCOL_ERROR");
+    EXPECT_EQ(latest.service_status->service_state, "running");
+
+    store.stop();
+    stop_server(server);
+}
+
 TEST(ConsoleNavigationModel, DefinesStableUniquePageOrder)
 {
     const auto pages = paperbreak::console::console_pages();
@@ -309,4 +349,38 @@ TEST(ConsoleNavigationModel, DefinesStableUniquePageOrder)
         ASSERT_TRUE(paperbreak::console::console_page_index(page.id).has_value());
         EXPECT_EQ(pages[paperbreak::console::console_page_index(page.id).value()].key, page.key);
     }
+}
+
+TEST(ConsoleTrayStatusModel, MapsConnectionServiceAndAlarmPriority)
+{
+    using paperbreak::console::TrayStatusColor;
+    paperbreak::console::ClientStateSnapshot snapshot;
+    snapshot.connection.state = paperbreak::ipc::ClientConnectionState::retry_wait;
+    snapshot.service_status = paperbreak::console::ServiceStatusSummary{.service_state = "running"};
+    snapshot.service_status_stale = false;
+    snapshot.alarms = paperbreak::console::AlarmOverviewSummary{};
+    snapshot.alarms_stale = false;
+    EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::gray);
+
+    snapshot.connection.state = paperbreak::ipc::ClientConnectionState::connected;
+    snapshot.service_status_stale = true;
+    EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::gray);
+
+    snapshot.service_status_stale = false;
+    snapshot.service_status->service_state = "starting";
+    EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::red);
+
+    snapshot.service_status->service_state = "running";
+    snapshot.alarms_stale = true;
+    EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::gray);
+
+    snapshot.alarms_stale = false;
+    snapshot.alarms->highest_severity = "Info";
+    EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::green);
+    snapshot.alarms->highest_severity = "Warning";
+    EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::yellow);
+    snapshot.alarms->highest_severity = "Error";
+    EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::red);
+    snapshot.alarms->highest_severity = "Critical";
+    EXPECT_EQ(paperbreak::console::tray_status(snapshot).color, TrayStatusColor::red);
 }

@@ -98,6 +98,8 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `SYS_SERVICE_START_FAILED` | Critical | 视阶段 | 必需启动阶段失败；按逆序回滚已启动组件 |
 | `SYS_SERVICE_INSTALL_FAILED` | Error | 否 | SCM 注册或配置收敛失败；保留 Win32 原始码，新建服务的扩展配置失败时尝试删除回滚 |
 | `SYS_SERVICE_UNINSTALL_FAILED` | Error | 视服务状态 | 服务停止、等待或删除失败；停止超时保留服务注册，不谎报卸载成功 |
+| `SYS_SERVICE_RESTART_FAILED` | Error | 否 | 用户请求的 SCM 重启未能在单次总截止时间内完成，或服务不存在、权限不足、停止/启动失败；保留 Win32 原始码，不自动循环重试 |
+| `SYS_SERVICE_RESTART_CANCELLED` | Warning | 否 | Qt 客户端退出时取消尚未完成的重启等待；不再启动新的 SCM 操作，保留服务实际状态 |
 | `SYS_SERVICE_CONTROL_FAILED` | Critical | 视操作 | SCM 调度、控制回调注册或状态上报失败；服务进入受控停止并保留 Win32 原始码 |
 | `SYS_SERVICE_STOPPING` | Warning | 是 | 服务已拒绝新的写命令；客户端可在服务重新运行后重试 |
 | `SYS_SHUTDOWN_TIMEOUT` | Critical | 否 | 组件未在共享关闭截止时间内停止；记录未完成阶段 |

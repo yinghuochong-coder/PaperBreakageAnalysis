@@ -2,6 +2,7 @@
 
 #include "paperbreak/console/navigation_model.hpp"
 
+#include <QCloseEvent>
 #include <QDateTime>
 #include <QFrame>
 #include <QGridLayout>
@@ -495,6 +496,12 @@ bool MainWindow::select_page(const std::size_t index) noexcept
     }
     navigation_->setCurrentRow(static_cast<int>(index));
     return pages_->currentIndex() == static_cast<int>(index);
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    hide();
+    event->ignore();
 }
 
 } // namespace paperbreak::console

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <initializer_list>
 #include <limits>
 #include <optional>
@@ -88,6 +89,39 @@ Result<ipc::CommandResponse> version_response()
                    {"nlohmannJson", version.json_version},
                    {"sqlite", version.sqlite_version}}}};
     return Result<ipc::CommandResponse>::success({.payload_json = payload.dump(), .binary = {}});
+}
+
+std::filesystem::path path_from_utf8(const std::string_view value)
+{
+    std::u8string converted;
+    converted.reserve(value.size());
+    for (const unsigned char byte : value)
+        converted.push_back(static_cast<char8_t>(byte));
+    return std::filesystem::path{converted};
+}
+
+std::string path_to_utf8(const std::filesystem::path& path)
+{
+    const std::u8string value = path.generic_u8string();
+    return {reinterpret_cast<const char*>(value.data()), value.size()};
+}
+
+Result<ipc::CommandResponse> locations_response(config::ConfigRepository& repository,
+                                                const std::filesystem::path& config_directory)
+{
+    auto configuration = repository.snapshot();
+    if (!configuration)
+        return Result<ipc::CommandResponse>::failure(configuration.error());
+    auto event_root = path_from_utf8(configuration.value().effective->storage.event_root);
+    if (event_root.is_relative())
+        event_root = config_directory / event_root;
+    std::error_code path_error;
+    event_root = std::filesystem::absolute(event_root, path_error).lexically_normal();
+    if (path_error)
+        return Result<ipc::CommandResponse>::failure(command_error(
+            "SYS_INTERNAL_ERROR", Severity::error, "无法解析事件目录", "ipc.system.getLocations"));
+    return Result<ipc::CommandResponse>::success(
+        {.payload_json = Json{{"eventRoot", path_to_utf8(event_root)}}.dump(), .binary = {}});
 }
 
 bool has_only_field(const Json& object, const std::string_view field)
@@ -406,9 +440,11 @@ SystemCommandService::SystemCommandService(config::ConfigRepository& repository,
                                            std::shared_ptr<ServiceStatusStore> status,
                                            std::shared_ptr<monitoring::MetricRegistry> metrics,
                                            std::shared_ptr<monitoring::AlarmRegistry> alarms,
-                                           std::shared_ptr<logging::LoggingRuntime> logging)
+                                           std::shared_ptr<logging::LoggingRuntime> logging,
+                                           std::filesystem::path config_directory)
     : repository_(repository), status_(std::move(status)), metrics_(std::move(metrics)),
-      alarms_(std::move(alarms)), logging_(std::move(logging))
+      alarms_(std::move(alarms)), logging_(std::move(logging)),
+      config_directory_(std::move(config_directory))
 {
 }
 
@@ -441,6 +477,14 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
                               "system.getVersion payload 必须为空", "ipc.system.getVersion"));
         }
         return version_response();
+    }
+    if (request.command == "system.getLocations")
+    {
+        if (!payload.value().empty())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "system.getLocations payload 必须为空", "ipc.system.getLocations"));
+        return locations_response(repository_, config_directory_);
     }
     if (request.command == "system.getMetrics")
     {

@@ -1,19 +1,25 @@
 #include "paperbreak/common/version.hpp"
 #include "paperbreak/console/client_state_store.hpp"
+#include "paperbreak/console/navigation_model.hpp"
 #include "paperbreak/logging/logging.hpp"
+#include "paperbreak/service/windows/scm.hpp"
 #include "src/main_window.hpp"
+#include "src/system_tray_controller.hpp"
 
-#include <QAction>
 #include <QApplication>
-#include <QIcon>
-#include <QMenu>
-#include <QStyle>
-#include <QSystemTrayIcon>
+#include <QDesktopServices>
+#include <QMessageBox>
+#include <QMetaObject>
 #include <QTimer>
+#include <QUrl>
 
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string_view>
+#include <thread>
 
 namespace
 {
@@ -23,9 +29,7 @@ bool has_argument(const int argc, char* argv[], const std::string_view expected)
     for (int index = 1; index < argc; ++index)
     {
         if (std::string_view{argv[index]} == expected)
-        {
             return true;
-        }
     }
     return false;
 }
@@ -51,64 +55,108 @@ int main(int argc, char* argv[])
     log_config.directory = std::filesystem::temp_directory_path() / "PaperBreakEdge" / "logs";
     auto logging_result = paperbreak::logging::LoggingRuntime::create(log_config);
     if (!logging_result)
-    {
         return 1;
-    }
     auto logging = std::move(logging_result).value();
-
-    QMenu tray_menu;
-    QAction status_action(QStringLiteral("后台服务：正在初始化"), &tray_menu);
-    status_action.setEnabled(false);
-    QAction about_action(QStringLiteral("关于 PaperBreakEdge"), &tray_menu);
-    about_action.setEnabled(false);
-    QAction quit_action(QStringLiteral("退出界面"), &tray_menu);
-    tray_menu.addAction(&status_action);
-    tray_menu.addSeparator();
-    tray_menu.addAction(&about_action);
-    tray_menu.addSeparator();
-    tray_menu.addAction(&quit_action);
-
-    QSystemTrayIcon tray;
-    tray.setIcon(application.style()->standardIcon(QStyle::SP_ComputerIcon));
-    tray.setToolTip(QStringLiteral("PaperBreakEdge Console — M4-01"));
-    tray.setContextMenu(&tray_menu);
-    QObject::connect(&quit_action, &QAction::triggered, &application, &QApplication::quit);
-    tray.show();
+    auto* const logging_runtime = logging.get();
 
     paperbreak::console::MainWindow main_window;
+    paperbreak::console::ClientStateSnapshot latest_snapshot;
+    std::atomic_bool restart_running{};
+    std::jthread restart_task;
+
+    const auto open_console = [&main_window] {
+        main_window.showNormal();
+        main_window.raise();
+        main_window.activateWindow();
+    };
+    const auto show_status = [&main_window, &open_console] {
+        if (const auto index = paperbreak::console::console_page_index(
+                paperbreak::console::ConsolePageId::device_status))
+            static_cast<void>(main_window.select_page(index.value()));
+        open_console();
+    };
+
+    paperbreak::console::SystemTrayController tray({
+        .open_console = open_console,
+        .show_status = show_status,
+        .restart_service =
+            [&] {
+                if (restart_running.exchange(true))
+                {
+                    QMessageBox::information(&main_window, QStringLiteral("重启后台服务"),
+                                             QStringLiteral("后台服务重启正在进行中。"));
+                    return;
+                }
+                if (restart_task.joinable())
+                    restart_task.join();
+                restart_task = std::jthread([&application, &main_window, &restart_running,
+                                             logging_runtime](const std::stop_token stop_token) {
+                    auto api = paperbreak::service::windows::make_windows_service_manager_api();
+                    paperbreak::service::windows::ServiceManager manager{*api};
+                    auto result = std::make_shared<paperbreak::Result<void>>(
+                        manager.restart(paperbreak::service::windows::service_name,
+                                        std::chrono::seconds{30}, stop_token));
+                    QMetaObject::invokeMethod(
+                        &application,
+                        [&main_window, &restart_running, logging_runtime, result] {
+                            restart_running.store(false);
+                            if (*result)
+                            {
+                                static_cast<void>(logging_runtime->log(
+                                    paperbreak::logging::Category::ui,
+                                    paperbreak::logging::Level::info,
+                                    "Windows background service restart completed"));
+                                QMessageBox::information(&main_window,
+                                                         QStringLiteral("重启后台服务"),
+                                                         QStringLiteral("后台服务已恢复运行。"));
+                            }
+                            else
+                            {
+                                static_cast<void>(logging_runtime->log(
+                                    paperbreak::logging::Category::ui,
+                                    paperbreak::logging::Level::error,
+                                    "Windows background service restart failed: " +
+                                        result->error().business_code));
+                                QMessageBox::warning(
+                                    &main_window, QStringLiteral("重启后台服务失败"),
+                                    QString::fromStdString(result->error().message));
+                            }
+                        },
+                        Qt::QueuedConnection);
+                });
+            },
+        .open_event_directory =
+            [&] {
+                if (latest_snapshot.locations_stale || !latest_snapshot.locations.has_value())
+                {
+                    QMessageBox::warning(&main_window, QStringLiteral("打开事件目录"),
+                                         QStringLiteral("事件目录尚未从后台服务同步。"));
+                    return;
+                }
+                const QString path = QString::fromUtf8(latest_snapshot.locations->event_root);
+                if (!QDesktopServices::openUrl(QUrl::fromLocalFile(path)))
+                    QMessageBox::warning(&main_window, QStringLiteral("打开事件目录"),
+                                         QStringLiteral("Windows 无法打开事件目录：%1").arg(path));
+            },
+        .show_about =
+            [&main_window] {
+                QMessageBox::about(
+                    &main_window, QStringLiteral("关于 PaperBreakEdge"),
+                    QStringLiteral("PaperBreakEdge Console\n版本 %1\n纸机断纸分析边缘运维客户端")
+                        .arg(QApplication::applicationVersion()));
+            },
+        .quit_interface = [&application] { application.quit(); },
+    });
+    tray.show();
     main_window.show();
 
     paperbreak::console::ClientStateStore state_store(
-        [&status_action, &tray,
-         &main_window](const paperbreak::console::ClientStateSnapshot& snapshot) {
-            QString text;
-            switch (snapshot.connection.state)
-            {
-            case paperbreak::ipc::ClientConnectionState::stopped:
-                text = QStringLiteral("后台服务：客户端已停止");
-                break;
-            case paperbreak::ipc::ClientConnectionState::connecting:
-                text = QStringLiteral("后台服务：连接中");
-                break;
-            case paperbreak::ipc::ClientConnectionState::retry_wait:
-                text = QStringLiteral("后台服务连接中断（状态已过期）");
-                break;
-            case paperbreak::ipc::ClientConnectionState::connected:
-                if (snapshot.service_status_stale || !snapshot.service_status.has_value())
-                {
-                    text = QStringLiteral("后台服务：已连接，状态同步中");
-                }
-                else
-                {
-                    text = QStringLiteral("后台服务状态：%1")
-                               .arg(QString::fromStdString(snapshot.service_status->service_state));
-                }
-                break;
-            }
-            status_action.setText(text);
-            tray.setToolTip(QStringLiteral("PaperBreakEdge Console — %1").arg(text));
+        [&](const paperbreak::console::ClientStateSnapshot& snapshot) {
+            latest_snapshot = snapshot;
+            tray.apply_snapshot(snapshot);
             main_window.apply_snapshot(snapshot);
         });
+    tray.apply_snapshot(state_store.snapshot());
     main_window.apply_snapshot(state_store.snapshot());
     auto client_start = state_store.start();
     if (!client_start)
@@ -122,10 +170,22 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    if (has_argument(argc, argv, "--smoke-test") &&
-        (!tray.isVisible() || !main_window.isVisible() || main_window.page_count() != 12U ||
-         main_window.current_page_index() != 0 || !main_window.select_page(11U) ||
-         !main_window.select_page(0U)))
+    bool smoke_ok = true;
+    if (has_argument(argc, argv, "--smoke-test"))
+    {
+        smoke_ok = tray.is_visible() && main_window.isVisible() && tray.action_count() == 8U &&
+                   !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
+                   main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
+                   main_window.select_page(11U) && main_window.select_page(0U);
+        for (int iteration = 0; iteration < 20 && smoke_ok; ++iteration)
+        {
+            main_window.close();
+            smoke_ok = !main_window.isVisible();
+            open_console();
+            smoke_ok = smoke_ok && main_window.isVisible();
+        }
+    }
+    if (!smoke_ok)
     {
         state_store.stop();
         main_window.hide();
@@ -138,7 +198,6 @@ int main(int argc, char* argv[])
     QObject::connect(&refresh_timer, &QTimer::timeout,
                      [&state_store] { state_store.refresh_dynamic(); });
     refresh_timer.start(1000);
-
     QTimer clock_timer;
     QObject::connect(&clock_timer, &QTimer::timeout, &main_window,
                      [&main_window] { main_window.update_clock(); });
@@ -147,16 +206,18 @@ int main(int argc, char* argv[])
     static_cast<void>(logging->log(paperbreak::logging::Category::ui,
                                    paperbreak::logging::Level::info,
                                    "PaperBreakEdgeConsole tray started"));
-
     if (has_argument(argc, argv, "--smoke-test"))
-    {
         QTimer::singleShot(100, &application, &QApplication::quit);
-    }
 
     const int result = application.exec();
     refresh_timer.stop();
     clock_timer.stop();
     state_store.stop();
+    if (restart_task.joinable())
+    {
+        restart_task.request_stop();
+        restart_task.join();
+    }
     main_window.hide();
     tray.hide();
     static_cast<void>(logging->log(paperbreak::logging::Category::ui,

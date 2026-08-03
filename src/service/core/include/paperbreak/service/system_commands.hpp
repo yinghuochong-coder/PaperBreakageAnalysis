@@ -7,6 +7,7 @@
 #include "paperbreak/service/runtime.hpp"
 
 #include <atomic>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -43,7 +44,8 @@ class SystemCommandService final : public ipc::IRequestHandler
                          std::shared_ptr<ServiceStatusStore> status,
                          std::shared_ptr<monitoring::MetricRegistry> metrics = {},
                          std::shared_ptr<monitoring::AlarmRegistry> alarms = {},
-                         std::shared_ptr<logging::LoggingRuntime> logging = {});
+                         std::shared_ptr<logging::LoggingRuntime> logging = {},
+                         std::filesystem::path config_directory = {});
 
     [[nodiscard]] Result<ipc::CommandResponse> handle(const ipc::RequestMessage& request,
                                                       const ipc::PeerIdentity& peer,
@@ -55,6 +57,7 @@ class SystemCommandService final : public ipc::IRequestHandler
     std::shared_ptr<monitoring::MetricRegistry> metrics_;
     std::shared_ptr<monitoring::AlarmRegistry> alarms_;
     std::shared_ptr<logging::LoggingRuntime> logging_;
+    std::filesystem::path config_directory_;
 };
 
 } // namespace paperbreak::service

@@ -1,12 +1,26 @@
+add_library(paperbreak_windows_service_control STATIC
+    src/scm.cpp
+    src/scm_win32.cpp)
+
+target_link_libraries(paperbreak_windows_service_control
+    PUBLIC paperbreak_common paperbreak_compiler_options
+    PRIVATE advapi32)
+target_include_directories(paperbreak_windows_service_control
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+set_target_properties(paperbreak_windows_service_control PROPERTIES
+    OUTPUT_NAME paperbreak_windows_service_control
+    FOLDER "PaperBreak/Libraries")
+
 add_library(paperbreak_windows_service STATIC
     src/console_control.cpp
-    src/scm.cpp
-    src/scm_host.cpp
-    src/scm_win32.cpp)
+    src/scm_host.cpp)
 
 target_link_libraries(paperbreak_windows_service
     PUBLIC
         paperbreak_common
+        paperbreak_windows_service_control
         paperbreak_service_core
         paperbreak_compiler_options)
 target_include_directories(paperbreak_windows_service
@@ -18,7 +32,7 @@ set_target_properties(paperbreak_windows_service PROPERTIES
     OUTPUT_NAME paperbreak_windows_service
     FOLDER "PaperBreak/Libraries")
 
-install(TARGETS paperbreak_windows_service
+install(TARGETS paperbreak_windows_service paperbreak_windows_service_control
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

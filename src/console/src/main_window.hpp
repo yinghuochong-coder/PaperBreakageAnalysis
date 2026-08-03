@@ -26,6 +26,8 @@ class MainWindow final : public QMainWindow
     [[nodiscard]] bool select_page(std::size_t index) noexcept;
 
   private:
+    void closeEvent(QCloseEvent* event) override;
+
     QLabel* connection_banner_{};
     QLabel* service_value_{};
     QLabel* clock_value_{};

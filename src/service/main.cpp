@@ -768,7 +768,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     auto metrics = std::make_shared<paperbreak::monitoring::MetricRegistry>();
     auto alarms = std::make_shared<paperbreak::monitoring::AlarmRegistry>();
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
-        configuration->repository, status, metrics, alarms, logging);
+        configuration->repository, status, metrics, alarms, logging, config_path.parent_path());
     auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(commands);
 
     auto monitor = std::make_shared<paperbreak::monitoring::HealthMonitor>(

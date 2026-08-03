@@ -171,6 +171,7 @@ Result<AlarmOverviewSummary> parse_alarms(const ipc::ResponseMessage& response,
     summary.count_truncated = payload["truncated"].get<bool>();
     summary.generation = generation;
     summary.recent.reserve(std::min<std::size_t>(5U, summary.active_count));
+    int highest_rank = 0;
     for (const auto& alarm : payload["alarms"])
     {
         if (!alarm.is_object() || !alarm.contains("alarmId") ||
@@ -185,18 +186,56 @@ Result<AlarmOverviewSummary> parse_alarms(const ipc::ResponseMessage& response,
             return Result<AlarmOverviewSummary>::failure(
                 state_error("alarm.list 报警结构无效", "console.alarms.parse"));
         }
-        if (!alarm["active"].get<bool>() || summary.recent.size() >= 5U)
+        if (!alarm["active"].get<bool>())
         {
             continue;
         }
-        summary.recent.push_back({.alarm_id = alarm["alarmId"].get<std::uint64_t>(),
-                                  .severity = alarm["severity"].get<std::string>(),
-                                  .source = alarm["source"].get<std::string>(),
-                                  .last_occurred_at = alarm["lastOccurredAt"].get<std::string>(),
-                                  .message = alarm["message"].get<std::string>(),
-                                  .acknowledged = alarm["acknowledged"].get<bool>()});
+        const std::string severity = alarm["severity"].get<std::string>();
+        int rank = 0;
+        if (severity == "Warning")
+            rank = 1;
+        else if (severity == "Error")
+            rank = 2;
+        else if (severity == "Critical")
+            rank = 3;
+        else if (severity != "Info")
+            return Result<AlarmOverviewSummary>::failure(
+                state_error("alarm.list 包含未知报警等级", "console.alarms.parse"));
+        if (rank > highest_rank)
+        {
+            highest_rank = rank;
+            summary.highest_severity = severity;
+        }
+        if (summary.recent.size() < 5U)
+        {
+            summary.recent.push_back(
+                {.alarm_id = alarm["alarmId"].get<std::uint64_t>(),
+                 .severity = severity,
+                 .source = alarm["source"].get<std::string>(),
+                 .last_occurred_at = alarm["lastOccurredAt"].get<std::string>(),
+                 .message = alarm["message"].get<std::string>(),
+                 .acknowledged = alarm["acknowledged"].get<bool>()});
+        }
     }
     return Result<AlarmOverviewSummary>::success(std::move(summary));
+}
+
+Result<ServiceLocationsSummary> parse_locations(const ipc::ResponseMessage& response,
+                                                const std::uint64_t generation)
+{
+    auto parsed = response_payload(response, "console.locations.parse");
+    if (!parsed)
+        return Result<ServiceLocationsSummary>::failure(parsed.error());
+    const Json& payload = parsed.value();
+    if (payload.size() != 1U || !payload.contains("eventRoot") ||
+        !payload["eventRoot"].is_string() ||
+        payload["eventRoot"].get_ref<const std::string&>().empty())
+    {
+        return Result<ServiceLocationsSummary>::failure(
+            state_error("system.getLocations 响应结构无效", "console.locations.parse"));
+    }
+    return Result<ServiceLocationsSummary>::success(
+        {.event_root = payload["eventRoot"].get<std::string>(), .generation = generation});
 }
 
 bool current_request(const ipc::ClientRequestHandle& handle,
@@ -240,6 +279,7 @@ void ClientStateStore::stop() noexcept
     version_request_.reset();
     metrics_request_.reset();
     alarms_request_.reset();
+    locations_request_.reset();
     alarm_push_refresh_pending_ = false;
 }
 
@@ -259,6 +299,8 @@ void ClientStateStore::refresh_dynamic()
     }
     synchronize_metrics(snapshot_.connection.generation);
     synchronize_alarms(snapshot_.connection.generation);
+    if (snapshot_.locations_stale)
+        synchronize_locations(snapshot_.connection.generation);
 }
 
 const ClientStateSnapshot& ClientStateStore::snapshot() const noexcept
@@ -279,10 +321,12 @@ void ClientStateStore::connection_changed(const ipc::ClientConnectionSnapshot& c
         snapshot_.version_stale = true;
         snapshot_.metrics_stale = true;
         snapshot_.alarms_stale = true;
+        snapshot_.locations_stale = true;
         status_request_.reset();
         version_request_.reset();
         metrics_request_.reset();
         alarms_request_.reset();
+        locations_request_.reset();
         alarm_push_refresh_pending_ = false;
         notify();
         return;
@@ -297,20 +341,24 @@ void ClientStateStore::connection_changed(const ipc::ClientConnectionSnapshot& c
     snapshot_.version_stale = true;
     snapshot_.metrics_stale = true;
     snapshot_.alarms_stale = true;
+    snapshot_.locations_stale = true;
     snapshot_.synchronization_error.reset();
     snapshot_.version_error.reset();
     snapshot_.metrics_error.reset();
     snapshot_.alarms_error.reset();
+    snapshot_.locations_error.reset();
     status_request_.reset();
     version_request_.reset();
     metrics_request_.reset();
     alarms_request_.reset();
+    locations_request_.reset();
     alarm_push_refresh_pending_ = false;
     notify();
     synchronize_status(connection.generation);
     synchronize_version(connection.generation);
     synchronize_metrics(connection.generation);
     synchronize_alarms(connection.generation);
+    synchronize_locations(connection.generation);
 }
 
 void ClientStateStore::push_received(const std::uint64_t generation, const ipc::PushMessage& push)
@@ -444,6 +492,28 @@ void ClientStateStore::synchronize_alarms(const std::uint64_t generation)
     alarms_request_ = std::move(request).value();
 }
 
+void ClientStateStore::synchronize_locations(const std::uint64_t generation)
+{
+    if (generation != snapshot_.connection.generation ||
+        snapshot_.connection.state != ipc::ClientConnectionState::connected ||
+        locations_request_.has_value())
+        return;
+    auto request = client_->send_request(
+        "system.getLocations", "{}", {},
+        [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
+            locations_completed(std::move(handle), std::move(result));
+        },
+        std::chrono::seconds{2});
+    if (!request)
+    {
+        snapshot_.locations_error = request.error();
+        snapshot_.locations_stale = true;
+        notify();
+        return;
+    }
+    locations_request_ = std::move(request).value();
+}
+
 void ClientStateStore::status_completed(ipc::ClientRequestHandle handle,
                                         Result<ipc::ResponseMessage> result)
 {
@@ -570,6 +640,33 @@ void ClientStateStore::alarms_completed(ipc::ClientRequestHandle handle,
     snapshot_.alarms_error.reset();
     notify();
     refresh_after_push();
+}
+
+void ClientStateStore::locations_completed(ipc::ClientRequestHandle handle,
+                                           Result<ipc::ResponseMessage> result)
+{
+    if (!current_request(handle, locations_request_, snapshot_))
+        return;
+    locations_request_.reset();
+    if (!result)
+    {
+        snapshot_.locations_error = result.error();
+        snapshot_.locations_stale = true;
+        notify();
+        return;
+    }
+    auto locations = parse_locations(result.value(), handle.generation);
+    if (!locations)
+    {
+        snapshot_.locations_error = locations.error();
+        snapshot_.locations_stale = true;
+        notify();
+        return;
+    }
+    snapshot_.locations = std::move(locations).value();
+    snapshot_.locations_stale = false;
+    snapshot_.locations_error.reset();
+    notify();
 }
 
 void ClientStateStore::notify() const noexcept

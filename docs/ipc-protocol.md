@@ -77,7 +77,8 @@ binaryLength bytes optional binary payload
 ```
 
 失败响应的 `error` 使用 `docs/error-codes.md` 的公共错误对象；不公开 Win32 原始码、绝对路径或
-敏感配置。无法提取有效 requestId 的非法前缀、非法 JSON 或通用畸形消息直接断开。
+敏感配置。只读 `system.getLocations` 的事件根目录是经服务校验、仅供本机资源管理器打开的窄例外，
+不进入错误对象、日志详情或上位机响应。无法提取有效 requestId 的非法前缀、非法 JSON 或通用畸形消息直接断开。
 
 推送：
 
@@ -113,6 +114,14 @@ binaryLength bytes optional binary payload
 
 响应包含应用版本、Git 提交/dirty 状态、构建时间、编译器以及 Qt、OpenCV、spdlog、
 nlohmann/json 和 SQLite 版本。
+
+### `system.getLocations`
+
+权限：已认证本机用户。请求 payload 必须为空。
+
+响应只包含 `eventRoot`：服务以当前有效配置和配置文件目录解析、规范化后的 UTF-8 绝对路径。
+该命令只允许 Qt 客户端打开既定事件根目录，不接受客户端路径，也不授予目录写权限。连接断开或
+响应失效后客户端必须把路径标记过期并禁用打开动作，不能继续无提示使用旧路径。
 
 ### `system.reloadConfig`
 

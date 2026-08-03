@@ -386,6 +386,24 @@ class WindowsServiceManagerApi final : public IServiceManagerApi
         return Result<void>::success();
     }
 
+    [[nodiscard]] Result<void> request_start(const std::string_view name) override
+    {
+        auto service_result =
+            open_named_service(name, SERVICE_START | SERVICE_QUERY_STATUS,
+                               "SYS_SERVICE_RESTART_FAILED", "service.scm.restart.start");
+        if (!service_result)
+            return Result<void>::failure(service_result.error());
+        if (StartServiceW(service_result.value().get(), 0, nullptr) == FALSE)
+        {
+            const DWORD native_code = GetLastError();
+            if (native_code != ERROR_SERVICE_ALREADY_RUNNING)
+                return Result<void>::failure(win32_error("SYS_SERVICE_RESTART_FAILED",
+                                                         "无法启动 Windows 服务",
+                                                         "service.scm.restart.start", native_code));
+        }
+        return Result<void>::success();
+    }
+
     [[nodiscard]] Result<bool> wait_for_stopped(const std::string_view name,
                                                 const std::chrono::milliseconds timeout) override
     {

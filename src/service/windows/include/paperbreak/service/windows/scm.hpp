@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -72,6 +73,7 @@ class IServiceManagerApi
     [[nodiscard]] virtual Result<void> configure(const ServiceDefinition& definition) = 0;
     [[nodiscard]] virtual Result<ManagedServiceState> query_state(std::string_view name) = 0;
     [[nodiscard]] virtual Result<void> request_stop(std::string_view name) = 0;
+    [[nodiscard]] virtual Result<void> request_start(std::string_view name) = 0;
     [[nodiscard]] virtual Result<bool> wait_for_stopped(std::string_view name,
                                                         std::chrono::milliseconds timeout) = 0;
     [[nodiscard]] virtual Result<void> remove(std::string_view name) = 0;
@@ -84,6 +86,9 @@ class ServiceManager final
 
     [[nodiscard]] Result<InstallOutcome> install(const ServiceDefinition& definition);
     [[nodiscard]] Result<UninstallOutcome> uninstall(std::string_view name = service_name);
+    [[nodiscard]] Result<void> restart(std::string_view name = service_name,
+                                       std::chrono::milliseconds timeout = service_stop_timeout,
+                                       std::stop_token stop_token = {});
 
   private:
     IServiceManagerApi& api_;

@@ -102,6 +102,18 @@ class FakeServiceManagerApi final : public paperbreak::service::windows::IServic
     [[nodiscard]] paperbreak::Result<void> request_stop(std::string_view) override
     {
         ++stop_calls;
+        if (stop_transitions)
+            state = paperbreak::service::windows::ManagedServiceState::stopped;
+        return paperbreak::Result<void>::success();
+    }
+
+    [[nodiscard]] paperbreak::Result<void> request_start(std::string_view) override
+    {
+        ++start_calls;
+        if (fail_start)
+            return paperbreak::Result<void>::failure(
+                fake_error("SYS_SERVICE_RESTART_FAILED", "fake.start"));
+        state = paperbreak::service::windows::ManagedServiceState::running;
         return paperbreak::Result<void>::success();
     }
 
@@ -137,6 +149,7 @@ class FakeServiceManagerApi final : public paperbreak::service::windows::IServic
     int configure_calls{0};
     int query_state_calls{0};
     int stop_calls{0};
+    int start_calls{0};
     int wait_calls{0};
     int remove_calls{0};
     bool wait_succeeds{true};
@@ -146,6 +159,8 @@ class FakeServiceManagerApi final : public paperbreak::service::windows::IServic
     bool fail_update{false};
     bool fail_configure{false};
     bool fail_remove{false};
+    bool fail_start{false};
+    bool stop_transitions{true};
 };
 
 class FakeHostedService final : public paperbreak::service::windows::IHostedService
@@ -199,6 +214,56 @@ TEST(WindowsScmManager, CreatesAndConfiguresTheServiceDefinition)
     EXPECT_EQ(api.last_definition.failure_reset, std::chrono::hours{24});
     EXPECT_EQ(api.last_definition.preshutdown_wait, std::chrono::seconds{30});
     EXPECT_TRUE(api.last_definition.restart_on_non_crash_failure);
+}
+
+TEST(WindowsScmManager, RestartsRunningAndStartsStoppedService)
+{
+    FakeServiceManagerApi api;
+    api.presence = paperbreak::service::windows::ServicePresence::present;
+    api.state = paperbreak::service::windows::ManagedServiceState::running;
+    paperbreak::service::windows::ServiceManager manager{api};
+    ASSERT_TRUE(manager.restart({}, std::chrono::milliseconds{10}));
+    EXPECT_EQ(api.stop_calls, 1);
+    EXPECT_EQ(api.start_calls, 1);
+
+    api.state = paperbreak::service::windows::ManagedServiceState::stopped;
+    ASSERT_TRUE(manager.restart({}, std::chrono::milliseconds{10}));
+    EXPECT_EQ(api.stop_calls, 1);
+    EXPECT_EQ(api.start_calls, 2);
+}
+
+TEST(WindowsScmManager, RestartReportsMissingAndStartFailure)
+{
+    FakeServiceManagerApi api;
+    paperbreak::service::windows::ServiceManager manager{api};
+    auto missing = manager.restart({}, std::chrono::milliseconds{0});
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().business_code, "SYS_SERVICE_RESTART_FAILED");
+
+    api.presence = paperbreak::service::windows::ServicePresence::present;
+    api.fail_start = true;
+    auto failed = manager.restart({}, std::chrono::milliseconds{10});
+    ASSERT_FALSE(failed);
+    EXPECT_EQ(failed.error().business_code, "SYS_SERVICE_RESTART_FAILED");
+}
+
+TEST(WindowsScmManager, RestartIsBoundedAndCancellable)
+{
+    FakeServiceManagerApi api;
+    api.presence = paperbreak::service::windows::ServicePresence::present;
+    api.state = paperbreak::service::windows::ManagedServiceState::pending;
+    api.stop_transitions = false;
+    paperbreak::service::windows::ServiceManager manager{api};
+
+    auto timeout = manager.restart({}, std::chrono::milliseconds{0});
+    ASSERT_FALSE(timeout);
+    EXPECT_EQ(timeout.error().business_code, "SYS_SERVICE_RESTART_FAILED");
+
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    auto cancelled = manager.restart({}, std::chrono::seconds{1}, cancellation.get_token());
+    ASSERT_FALSE(cancelled);
+    EXPECT_EQ(cancelled.error().business_code, "SYS_SERVICE_RESTART_CANCELLED");
 }
 
 TEST(WindowsScmManager, RepeatedInstallConvergesExistingConfiguration)
