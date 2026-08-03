@@ -9,15 +9,19 @@
 #include <QEventLoop>
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace
 {
@@ -147,6 +151,63 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
     std::atomic_uint64_t list_requests{};
     std::atomic_uint64_t operation_requests{};
     std::string last_command;
+};
+
+class PreviewSubscriptionHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage& request, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        if (request.command == "preview.unsubscribe")
+        {
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = R"({"subscribed":false})", .binary = {}});
+        }
+        const auto payload = nlohmann::json::parse(request.payload_json);
+        std::unique_lock lock{mutex_};
+        ++requests_;
+        if (requests_ == 1U)
+        {
+            first_request_entered_ = true;
+            condition_.notify_all();
+            condition_.wait(lock, [this] { return release_first_request_; });
+        }
+        camera_ids_ = payload.at("cameraIds").get<std::vector<std::string>>();
+        condition_.notify_all();
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+            {.payload_json = R"({"subscribed":true})", .binary = {}});
+    }
+
+    [[nodiscard]] bool first_request_entered() const
+    {
+        std::scoped_lock lock{mutex_};
+        return first_request_entered_;
+    }
+
+    void release_first_request()
+    {
+        {
+            std::scoped_lock lock{mutex_};
+            release_first_request_ = true;
+        }
+        condition_.notify_all();
+    }
+
+    [[nodiscard]] bool received_single_camera() const
+    {
+        std::scoped_lock lock{mutex_};
+        return requests_ >= 2U && camera_ids_ == std::vector<std::string>{"CAM01"};
+    }
+
+  private:
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    std::uint64_t requests_{};
+    bool first_request_entered_{};
+    bool release_first_request_{};
+    std::vector<std::string> camera_ids_;
 };
 
 std::string state_name()
@@ -529,4 +590,37 @@ TEST(PreviewClient, PausesWithoutStartingAnyServiceControlOperation)
     EXPECT_FALSE(latest.paused);
     EXPECT_FALSE(latest.subscribed);
     client.stop();
+}
+
+TEST(PreviewClient, UsesConfiguredCameraSlotsInsteadOfAlwaysRequestingFourCameras)
+{
+    paperbreak::console::PreviewClient client;
+
+    client.set_camera_ids({"CAM01"});
+
+    ASSERT_EQ(client.camera_ids().size(), 1U);
+    EXPECT_EQ(client.camera_ids().front(), "CAM01");
+    EXPECT_FALSE(client.snapshot().last_error.has_value());
+}
+
+TEST(PreviewClient, ReplacesAnInFlightDefaultSubscriptionWithConfiguredCameraSlots)
+{
+    const auto name = state_name();
+    auto handler = std::make_shared<PreviewSubscriptionHandler>();
+    paperbreak::ipc::IpcServer server{handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name)};
+    ASSERT_TRUE(server.start());
+    paperbreak::console::PreviewClient client{{}, client_options(name)};
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until([&] { return handler->first_request_entered(); }));
+
+    client.set_camera_ids({"CAM01"});
+    handler->release_first_request();
+
+    ASSERT_TRUE(wait_until(
+        [&] { return handler->received_single_camera() && client.snapshot().subscribed; }));
+    EXPECT_EQ(client.camera_ids(), std::vector<std::string>{"CAM01"});
+    client.stop();
+    server.request_stop();
+    ASSERT_TRUE(server.join(std::chrono::steady_clock::now() + std::chrono::seconds{2}));
 }

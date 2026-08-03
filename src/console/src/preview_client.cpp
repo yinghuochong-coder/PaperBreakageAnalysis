@@ -84,6 +84,11 @@ void PreviewClient::set_camera_ids(std::vector<std::string> camera_ids)
         notify();
         return;
     }
+    if (camera_ids == camera_ids_)
+        return;
+    if (subscription_request_)
+        static_cast<void>(client_->cancel_request(subscription_request_.value()));
+    subscription_request_.reset();
     camera_ids_ = std::move(camera_ids);
     snapshot_.images = {};
     snapshot_.subscribed = false;
@@ -107,6 +112,11 @@ void PreviewClient::set_paused(const bool paused)
 const PreviewSnapshot& PreviewClient::snapshot() const noexcept
 {
     return snapshot_;
+}
+
+const std::vector<std::string>& PreviewClient::camera_ids() const noexcept
+{
+    return camera_ids_;
 }
 
 void PreviewClient::connection_changed(const ipc::ClientConnectionSnapshot& connection)

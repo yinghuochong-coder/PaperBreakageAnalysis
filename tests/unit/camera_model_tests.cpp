@@ -6,11 +6,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -459,5 +462,69 @@ TEST(CameraControlRuntime, ControlsMockDeviceAndReadsBackActualValues)
     EXPECT_DOUBLE_EQ(configured.value().actual->exposure_us.value(), 100.0);
     ASSERT_TRUE(runtime.start("CAM01"));
     ASSERT_TRUE(runtime.stop("CAM01"));
+    ASSERT_TRUE(runtime.disconnect("CAM01"));
+}
+
+TEST(CameraControlRuntime, ForwardsBoundedFramesWhileAcquiringAndStopsDeterministically)
+{
+    auto provider = paperbreak::camera::mock::MockCameraProvider::create(
+        {{.descriptor = {.model_name = "Mock",
+                         .serial_number = "MOCK-PREVIEW-01",
+                         .ip_address = "127.0.0.1",
+                         .network_interface = "loopback"},
+          .width = 64U,
+          .height = 48U,
+          .frame_rate = 30.0}});
+    ASSERT_TRUE(provider);
+    std::shared_ptr<paperbreak::camera::ICameraProvider> shared{std::move(provider).value()};
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::uint64_t delivered{};
+    bool frames_valid{true};
+    paperbreak::camera::CameraControlRuntime runtime{
+        shared, [&](paperbreak::camera::FrameView frame) {
+            {
+                std::scoped_lock lock{mutex};
+                frames_valid =
+                    frames_valid && frame.camera_id() == "CAM01" &&
+                    frame.geometry() == paperbreak::camera::FrameGeometry{64U, 48U, 64U} &&
+                    frame.bytes().size() == 64U * 48U;
+                ++delivered;
+            }
+            condition.notify_all();
+        }};
+
+    ASSERT_TRUE(runtime.connect("CAM01", "MOCK-PREVIEW-01"));
+    ASSERT_TRUE(runtime.start("CAM01"));
+    {
+        std::unique_lock lock{mutex};
+        ASSERT_TRUE(
+            condition.wait_for(lock, std::chrono::seconds{2}, [&] { return delivered >= 2U; }));
+        EXPECT_TRUE(frames_valid);
+    }
+    std::uint64_t before_update{};
+    {
+        std::scoped_lock lock{mutex};
+        before_update = delivered;
+    }
+    auto updated = runtime.update("CAM01", {.exposure_us = 100.0});
+    ASSERT_TRUE(updated);
+    EXPECT_EQ(updated.value().state, paperbreak::camera::CameraControlState::acquiring);
+    {
+        std::unique_lock lock{mutex};
+        ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds{2},
+                                       [&] { return delivered > before_update; }));
+    }
+    ASSERT_TRUE(runtime.stop("CAM01"));
+    std::uint64_t stopped_count{};
+    {
+        std::scoped_lock lock{mutex};
+        stopped_count = delivered;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    {
+        std::scoped_lock lock{mutex};
+        EXPECT_EQ(delivered, stopped_count);
+    }
     ASSERT_TRUE(runtime.disconnect("CAM01"));
 }

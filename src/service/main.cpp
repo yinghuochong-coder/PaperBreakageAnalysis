@@ -861,8 +861,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     std::shared_ptr<paperbreak::pipeline::PreviewRuntime> preview;
     std::shared_ptr<paperbreak::camera::ICameraProvider> camera_provider{
         paperbreak::camera::hikrobot::create_hikrobot_camera_provider()};
-    auto cameras =
-        std::make_shared<paperbreak::camera::CameraControlRuntime>(std::move(camera_provider));
+    std::shared_ptr<paperbreak::camera::CameraControlRuntime> cameras;
     std::shared_ptr<PreviewPublisher> preview_publisher;
     if (loaded.value().effective->preview.enabled)
     {
@@ -888,6 +887,12 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                 preview_options);
         }
     }
+    const std::weak_ptr<paperbreak::pipeline::PreviewRuntime> weak_preview = preview;
+    cameras = std::make_shared<paperbreak::camera::CameraControlRuntime>(
+        std::move(camera_provider), [weak_preview](paperbreak::camera::FrameView frame) {
+            if (auto runtime = weak_preview.lock())
+                runtime->submit(std::move(frame), {.camera_status = "acquiring"});
+        });
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
         configuration->repository, status, metrics, alarms, logging, config_path.parent_path(),
         preview, cameras);

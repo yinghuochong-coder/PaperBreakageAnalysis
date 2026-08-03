@@ -54,6 +54,7 @@ class PreviewClient final
     void set_camera_ids(std::vector<std::string> camera_ids);
     void set_paused(bool paused);
     [[nodiscard]] const PreviewSnapshot& snapshot() const noexcept;
+    [[nodiscard]] const std::vector<std::string>& camera_ids() const noexcept;
 
   private:
     void connection_changed(const ipc::ClientConnectionSnapshot& connection);

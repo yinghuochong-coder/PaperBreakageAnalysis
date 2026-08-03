@@ -2,14 +2,18 @@
 
 #include "paperbreak/camera/camera.hpp"
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <vector>
 
 namespace paperbreak::camera
 {
+using CameraFrameObserver = std::function<void(FrameView)>;
+
 enum class CameraControlState
 {
     disconnected,
@@ -29,7 +33,8 @@ struct CameraControlSnapshot final
 class CameraControlRuntime final
 {
   public:
-    explicit CameraControlRuntime(std::shared_ptr<ICameraProvider> provider = {});
+    explicit CameraControlRuntime(std::shared_ptr<ICameraProvider> provider = {},
+                                  CameraFrameObserver frame_observer = {});
     ~CameraControlRuntime();
     CameraControlRuntime(const CameraControlRuntime&) = delete;
     [[nodiscard]] Result<std::vector<CameraDeviceDescriptor>> discover();
@@ -48,7 +53,11 @@ class CameraControlRuntime final
     struct Session;
     [[nodiscard]] Result<Session*> find(std::string_view id);
     [[nodiscard]] Result<CameraControlSnapshot> read(Session& session);
+    [[nodiscard]] Result<void> start_frame_delivery(Session& session);
+    [[nodiscard]] Result<void> stop_frame_delivery(Session& session);
+    void forward_frames(Session& session, std::stop_token stop_token) noexcept;
     std::shared_ptr<ICameraProvider> provider_;
+    CameraFrameObserver frame_observer_;
     std::mutex mutex_;
     std::vector<std::unique_ptr<Session>> sessions_;
 };

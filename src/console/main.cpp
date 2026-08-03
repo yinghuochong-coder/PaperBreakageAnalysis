@@ -25,6 +25,7 @@
 #include <memory>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace
 {
@@ -130,8 +131,14 @@ int main(int argc, char* argv[])
             main_window.apply_preview_snapshot(snapshot);
         });
     camera_client = std::make_unique<paperbreak::console::CameraClient>(
-        [&main_window](const paperbreak::console::CameraClientSnapshot& snapshot) {
+        [&main_window, &preview_client](const paperbreak::console::CameraClientSnapshot& snapshot) {
             main_window.apply_camera_snapshot(snapshot);
+            std::vector<std::string> camera_ids;
+            camera_ids.reserve(snapshot.cameras.size());
+            for (const auto& camera : snapshot.cameras)
+                camera_ids.push_back(camera.id);
+            if (preview_client && !camera_ids.empty())
+                preview_client->set_camera_ids(std::move(camera_ids));
         });
     paperbreak::console::ClientStateSnapshot latest_snapshot;
     std::atomic_bool restart_running{};
