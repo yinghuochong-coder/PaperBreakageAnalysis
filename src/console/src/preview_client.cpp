@@ -15,8 +15,10 @@ constexpr std::size_t maximum_preview_binary_bytes = 16U * 1024U * 1024U;
 
 Error protocol_error(std::string message)
 {
-    return {.business_code = "IPC_PROTOCOL_ERROR", .severity = Severity::warning,
-            .message = std::move(message), .operation = "console.preview.frame"};
+    return {.business_code = "IPC_PROTOCOL_ERROR",
+            .severity = Severity::warning,
+            .message = std::move(message),
+            .operation = "console.preview.frame"};
 }
 
 std::optional<std::size_t> camera_index(const std::vector<std::string>& camera_ids,
@@ -33,13 +35,11 @@ PreviewClient::PreviewClient(PreviewObserver observer, ipc::IpcClientOptions opt
     : observer_(std::move(observer))
 {
     client_ = std::make_unique<ipc::IpcClient>(
-        ipc::IpcClientCallbacks{.connection_changed = [this](const auto& connection) {
-                                    connection_changed(connection);
-                                },
-                                .push_received = [this](const std::uint64_t generation,
-                                                        const auto& push) {
-                                    push_received(generation, push);
-                                }},
+        ipc::IpcClientCallbacks{
+            .connection_changed =
+                [this](const auto& connection) { connection_changed(connection); },
+            .push_received = [this](const std::uint64_t generation,
+                                    const auto& push) { push_received(generation, push); }},
         std::move(options));
 }
 
@@ -69,9 +69,8 @@ void PreviewClient::stop() noexcept
 void PreviewClient::set_camera_ids(std::vector<std::string> camera_ids)
 {
     if (camera_ids.empty() || camera_ids.size() > 4U ||
-        std::any_of(camera_ids.begin(), camera_ids.end(), [](const std::string& id) {
-            return id.empty() || id.size() > 32U;
-        }))
+        std::any_of(camera_ids.begin(), camera_ids.end(),
+                    [](const std::string& id) { return id.empty() || id.size() > 32U; }))
     {
         snapshot_.last_error = protocol_error("预览相机编号必须为 1 至 4 个非空值");
         notify();
@@ -146,7 +145,8 @@ void PreviewClient::push_received(const std::uint64_t generation, const ipc::Pus
         const auto payload = nlohmann::json::parse(push.payload_json);
         if (!payload.is_object() || !payload.contains("cameraId") ||
             !payload.contains("cameraFrameNumber") || !payload.contains("sequenceNumber") ||
-            !payload["cameraId"].is_string() || !payload["cameraFrameNumber"].is_number_unsigned() ||
+            !payload["cameraId"].is_string() ||
+            !payload["cameraFrameNumber"].is_number_unsigned() ||
             !payload["sequenceNumber"].is_number_unsigned())
             throw std::invalid_argument{"required fields"};
         const std::string camera_id = payload["cameraId"].get<std::string>();
@@ -187,10 +187,11 @@ void PreviewClient::subscribe()
         snapshot_.connection.state != ipc::ClientConnectionState::connected)
         return;
     const auto generation = snapshot_.connection.generation;
-    auto sent = client_->send_request("preview.subscribe", nlohmann::json{{"cameraIds", camera_ids_}}.dump(), {},
-                                      [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
-                                          subscription_completed(std::move(handle), std::move(result));
-                                      });
+    auto sent = client_->send_request(
+        "preview.subscribe", nlohmann::json{{"cameraIds", camera_ids_}}.dump(), {},
+        [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
+            subscription_completed(std::move(handle), std::move(result));
+        });
     if (!sent)
     {
         snapshot_.last_error = sent.error();
@@ -209,9 +210,9 @@ void PreviewClient::unsubscribe()
     subscription_request_.reset();
     if (snapshot_.connection.state == ipc::ClientConnectionState::connected)
     {
-        static_cast<void>(client_->send_request("preview.unsubscribe", "{}", {},
-                                                [](ipc::ClientRequestHandle,
-                                                   Result<ipc::ResponseMessage>) {}));
+        static_cast<void>(
+            client_->send_request("preview.unsubscribe", "{}", {},
+                                  [](ipc::ClientRequestHandle, Result<ipc::ResponseMessage>) {}));
     }
 }
 
@@ -241,7 +242,13 @@ void PreviewClient::notify() const noexcept
 {
     if (!observer_)
         return;
-    try { observer_(snapshot_); } catch (...) {}
+    try
+    {
+        observer_(snapshot_);
+    }
+    catch (...)
+    {
+    }
 }
 
 } // namespace paperbreak::console

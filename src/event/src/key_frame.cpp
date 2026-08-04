@@ -132,8 +132,14 @@ Result<KeyFrameSelectionResult> KeyFrameSelector::select(
     const FrozenEventWindow& event, const KeyFrameSelectionContext& context) const
 {
     if (event.event_id.empty() || event.camera_windows.empty() ||
-        event.camera_windows.size() > maximum_camera_count || event.triggers.empty() ||
+        event.camera_windows.size() > maximum_camera_count ||
         context.analyses.size() > config_.maximum_analysis_records)
+    {
+        return Result<KeyFrameSelectionResult>::failure(
+            key_frame_error("EVENT_KEYFRAME_SELECTION_FAILED", Severity::error,
+                            "关键帧事件或分析证据无效", "keyframe.select"));
+    }
+    if (event.triggers.empty())
     {
         return Result<KeyFrameSelectionResult>::failure(
             key_frame_error("EVENT_KEYFRAME_SELECTION_FAILED", Severity::error,
@@ -235,8 +241,8 @@ Result<KeyFrameSelectionResult> KeyFrameSelector::select(
                                             : frames.at(frame_key(earliest_abnormal->frame)),
                KeyFrameReason::earliest_abnormal);
 
-    const EventWindowTrigger* first_trigger = nullptr;
-    const EventWindowTrigger* last_trigger = nullptr;
+    const EventWindowTrigger* first_trigger = &event.triggers.front();
+    const EventWindowTrigger* last_trigger = first_trigger;
     for (const auto& trigger : event.triggers)
     {
         if (trigger.trigger.camera_id.empty() || trigger.trigger.sequence_number == 0U)
@@ -245,13 +251,13 @@ Result<KeyFrameSelectionResult> KeyFrameSelector::select(
                                 "关键帧触发记录无效", "keyframe.select"));
         const auto order = std::tuple{trigger.trigger.monotonic_time, trigger.trigger.camera_id,
                                       trigger.trigger.sequence_number};
-        if (first_trigger == nullptr || order < std::tuple{first_trigger->trigger.monotonic_time,
-                                                           first_trigger->trigger.camera_id,
-                                                           first_trigger->trigger.sequence_number})
+        if (order < std::tuple{first_trigger->trigger.monotonic_time,
+                               first_trigger->trigger.camera_id,
+                               first_trigger->trigger.sequence_number})
             first_trigger = &trigger;
-        if (last_trigger == nullptr || order > std::tuple{last_trigger->trigger.monotonic_time,
-                                                          last_trigger->trigger.camera_id,
-                                                          last_trigger->trigger.sequence_number})
+        if (order > std::tuple{last_trigger->trigger.monotonic_time,
+                               last_trigger->trigger.camera_id,
+                               last_trigger->trigger.sequence_number})
             last_trigger = &trigger;
     }
     const auto first_trigger_frame =
