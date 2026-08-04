@@ -12,6 +12,7 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -21,6 +22,8 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStringList>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -116,6 +119,27 @@ QWidget* make_placeholder_page(QWidget* parent, const QString& title, const QStr
     layout->addWidget(heading);
     layout->addWidget(description, 1);
     return page;
+}
+
+void configure_table(QTableWidget* table, const QStringList& headers)
+{
+    table->setColumnCount(headers.size());
+    table->setHorizontalHeaderLabels(headers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setAlternatingRowColors(true);
+    table->horizontalHeader()->setStretchLastSection(true);
+    table->verticalHeader()->setVisible(false);
+}
+
+void set_table_item(QTableWidget* table, const int row, const int column, const QString& text,
+                    const QVariant& data = {})
+{
+    auto item = std::make_unique<QTableWidgetItem>(text);
+    if (data.isValid())
+        item->setData(Qt::UserRole, data);
+    table->setItem(row, column, item.release());
 }
 
 QWidget* make_preview_tile(QWidget* parent, const int index, QLabel*& image, QLabel*& overlay)
@@ -237,9 +261,10 @@ QString placeholder_message(const ConsolePageId id)
 
 MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                        CameraUiActions camera_actions, ThemeUiActions theme_actions,
-                       QWidget* parent)
+                       OperationsUiActions operations_actions, QWidget* parent)
     : QMainWindow(parent), preview_pause_changed_(std::move(preview_pause_changed)),
-      camera_actions_(std::move(camera_actions)), theme_actions_(std::move(theme_actions))
+      camera_actions_(std::move(camera_actions)), theme_actions_(std::move(theme_actions)),
+      operations_actions_(std::move(operations_actions))
 {
     setObjectName(QStringLiteral("main-window"));
     setWindowTitle(QStringLiteral("PaperBreakEdge 断纸分析控制台"));
@@ -622,6 +647,211 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             pages_->addWidget(page);
             continue;
         }
+        if (descriptor.id == ConsolePageId::device_status)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-device-status"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            auto* heading = make_child<QLabel>(page, QStringLiteral("系统、相机与算法指标"));
+            heading->setProperty("role", "pageTitle");
+            layout->addWidget(heading);
+            auto* hint = make_child<QLabel>(
+                page,
+                QStringLiteral("指标来自后台服务有界快照；尚未实现的 M5/M6/M8 来源显示为不可用。"));
+            hint->setProperty("role", "muted");
+            hint->setWordWrap(true);
+            layout->addWidget(hint);
+            metrics_table_ = make_child<QTableWidget>(page);
+            metrics_table_->setObjectName(QStringLiteral("operations-metrics"));
+            configure_table(metrics_table_, {QStringLiteral("指标"), QStringLiteral("值"),
+                                             QStringLiteral("单位"), QStringLiteral("可用性")});
+            layout->addWidget(metrics_table_, 1);
+            auto* refresh = make_child<QPushButton>(page, QStringLiteral("刷新全部运维数据"));
+            refresh->setObjectName(QStringLiteral("operations-refresh"));
+            QObject::connect(refresh, &QPushButton::clicked, this, [this] {
+                if (operations_actions_.refresh)
+                    operations_actions_.refresh();
+            });
+            layout->addWidget(refresh);
+            pages_->addWidget(page);
+            continue;
+        }
+        if (descriptor.id == ConsolePageId::alarms)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-alarms"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            auto* heading = make_child<QLabel>(page, QStringLiteral("当前与历史报警"));
+            heading->setProperty("role", "pageTitle");
+            layout->addWidget(heading);
+            QWidget* filters = make_child<QWidget>(page);
+            auto* filter_layout = make_layout<QHBoxLayout>(filters);
+            filter_layout->setContentsMargins(0, 0, 0, 0);
+            alarm_scope_ = make_child<QComboBox>(filters);
+            alarm_scope_->setObjectName(QStringLiteral("alarm-scope"));
+            alarm_scope_->addItem(QStringLiteral("当前报警"), 1);
+            alarm_scope_->addItem(QStringLiteral("历史报警"), 0);
+            alarm_scope_->addItem(QStringLiteral("全部"), -1);
+            alarm_severity_ = make_child<QComboBox>(filters);
+            alarm_severity_->setObjectName(QStringLiteral("alarm-severity"));
+            alarm_severity_->addItems({QStringLiteral("全部级别"), QStringLiteral("Info"),
+                                       QStringLiteral("Warning"), QStringLiteral("Error"),
+                                       QStringLiteral("Critical")});
+            alarm_source_ = make_child<QLineEdit>(filters);
+            alarm_source_->setObjectName(QStringLiteral("alarm-source"));
+            alarm_source_->setMaxLength(128);
+            alarm_source_->setPlaceholderText(QStringLiteral("来源（精确匹配，可留空）"));
+            auto* apply = make_child<QPushButton>(filters, QStringLiteral("应用筛选"));
+            apply->setObjectName(QStringLiteral("alarm-filter-apply"));
+            QObject::connect(apply, &QPushButton::clicked, this, [this] {
+                if (!operations_actions_.query_alarms)
+                    return;
+                AlarmFilter filter;
+                const int scope = alarm_scope_->currentData().toInt();
+                filter.active = scope < 0 ? std::optional<bool>{} : std::optional<bool>{scope == 1};
+                if (alarm_severity_->currentIndex() > 0)
+                    filter.minimum_severity = alarm_severity_->currentText().toStdString();
+                const QString source = alarm_source_->text().trimmed();
+                if (!source.isEmpty())
+                    filter.source = source.toStdString();
+                show_operations_result(operations_actions_.query_alarms(std::move(filter)));
+            });
+            filter_layout->addWidget(alarm_scope_);
+            filter_layout->addWidget(alarm_severity_);
+            filter_layout->addWidget(alarm_source_, 1);
+            filter_layout->addWidget(apply);
+            layout->addWidget(filters);
+            alarm_table_ = make_child<QTableWidget>(page);
+            alarm_table_->setObjectName(QStringLiteral("operations-alarms"));
+            configure_table(alarm_table_, {QStringLiteral("ID"), QStringLiteral("最近发生"),
+                                           QStringLiteral("等级"), QStringLiteral("来源"),
+                                           QStringLiteral("代码"), QStringLiteral("状态"),
+                                           QStringLiteral("确认"), QStringLiteral("消息")});
+            QObject::connect(alarm_table_, &QTableWidget::itemSelectionChanged, this,
+                             [this] { update_alarm_details(); });
+            layout->addWidget(alarm_table_, 1);
+            alarm_details_ = make_child<QLabel>(page, QStringLiteral("选择报警查看详情"));
+            alarm_details_->setObjectName(QStringLiteral("alarm-details"));
+            alarm_details_->setWordWrap(true);
+            alarm_details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            layout->addWidget(alarm_details_);
+            QWidget* actions = make_child<QWidget>(page);
+            auto* action_layout = make_layout<QHBoxLayout>(actions);
+            action_layout->setContentsMargins(0, 0, 0, 0);
+            alarm_acknowledge_ = make_child<QPushButton>(actions, QStringLiteral("确认所选报警"));
+            alarm_acknowledge_->setObjectName(QStringLiteral("alarm-acknowledge"));
+            alarm_acknowledge_->setEnabled(false);
+            QObject::connect(alarm_acknowledge_, &QPushButton::clicked, this, [this] {
+                const int row = alarm_table_->currentRow();
+                if (row < 0 || !operations_actions_.acknowledge || !alarm_table_->item(row, 0))
+                    return;
+                show_operations_result(operations_actions_.acknowledge(
+                    alarm_table_->item(row, 0)->data(Qt::UserRole).toULongLong()));
+            });
+            alarm_export_ = make_child<QPushButton>(actions, QStringLiteral("导出当前结果 CSV"));
+            alarm_export_->setObjectName(QStringLiteral("alarm-export"));
+            QObject::connect(alarm_export_, &QPushButton::clicked, this, [this] {
+                if (!operations_actions_.export_alarm_csv)
+                    return;
+                const QString path =
+                    QFileDialog::getSaveFileName(this, QStringLiteral("导出报警记录"),
+                                                 QStringLiteral("PaperBreakEdge-alarms.csv"),
+                                                 QStringLiteral("CSV 文件 (*.csv)"));
+                if (!path.isEmpty())
+                    show_operations_result(operations_actions_.export_alarm_csv(
+                        std::filesystem::path{path.toStdWString()}));
+            });
+            action_layout->addWidget(alarm_acknowledge_);
+            action_layout->addWidget(alarm_export_);
+            action_layout->addStretch(1);
+            layout->addWidget(actions);
+            pages_->addWidget(page);
+            continue;
+        }
+        if (descriptor.id == ConsolePageId::logs)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-logs"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            auto* heading = make_child<QLabel>(page, QStringLiteral("最近结构化日志"));
+            heading->setProperty("role", "pageTitle");
+            layout->addWidget(heading);
+            QWidget* filters = make_child<QWidget>(page);
+            auto* filter_layout = make_layout<QHBoxLayout>(filters);
+            filter_layout->setContentsMargins(0, 0, 0, 0);
+            log_category_ = make_child<QComboBox>(filters);
+            log_category_->setObjectName(QStringLiteral("log-category"));
+            log_category_->addItems(
+                {QStringLiteral("全部分类"), QStringLiteral("service"), QStringLiteral("camera"),
+                 QStringLiteral("algorithm"), QStringLiteral("event"), QStringLiteral("storage"),
+                 QStringLiteral("uplink"), QStringLiteral("ipc"), QStringLiteral("ui"),
+                 QStringLiteral("audit"), QStringLiteral("performance")});
+            log_level_ = make_child<QComboBox>(filters);
+            log_level_->setObjectName(QStringLiteral("log-level"));
+            log_level_->addItems({QStringLiteral("全部级别"), QStringLiteral("trace"),
+                                  QStringLiteral("debug"), QStringLiteral("info"),
+                                  QStringLiteral("warning"), QStringLiteral("error"),
+                                  QStringLiteral("critical")});
+            auto* apply = make_child<QPushButton>(filters, QStringLiteral("应用筛选"));
+            apply->setObjectName(QStringLiteral("log-filter-apply"));
+            QObject::connect(apply, &QPushButton::clicked, this, [this] {
+                if (!operations_actions_.query_logs)
+                    return;
+                LogFilter filter;
+                if (log_category_->currentIndex() > 0)
+                    filter.category = log_category_->currentText().toStdString();
+                if (log_level_->currentIndex() > 0)
+                    filter.minimum_level = log_level_->currentText().toStdString();
+                show_operations_result(operations_actions_.query_logs(std::move(filter)));
+            });
+            filter_layout->addWidget(log_category_);
+            filter_layout->addWidget(log_level_);
+            filter_layout->addWidget(apply);
+            filter_layout->addStretch(1);
+            layout->addWidget(filters);
+            log_table_ = make_child<QTableWidget>(page);
+            log_table_->setObjectName(QStringLiteral("operations-logs"));
+            configure_table(log_table_, {QStringLiteral("序号"), QStringLiteral("时间"),
+                                         QStringLiteral("线程"), QStringLiteral("分类"),
+                                         QStringLiteral("等级"), QStringLiteral("消息")});
+            layout->addWidget(log_table_, 1);
+            pages_->addWidget(page);
+            continue;
+        }
+        if (descriptor.id == ConsolePageId::maintenance)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-maintenance"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            auto* heading = make_child<QLabel>(page, QStringLiteral("系统维护与诊断"));
+            heading->setProperty("role", "pageTitle");
+            layout->addWidget(heading);
+            auto* description = make_child<QLabel>(
+                page, QStringLiteral(
+                          "诊断 ZIP "
+                          "包含脱敏配置、系统/相机/算法/IPC/"
+                          "数据库指标、近期报警和日志、软件及依赖版本；不包含原始图像和凭据。"));
+            description->setWordWrap(true);
+            layout->addWidget(description);
+            diagnostics_export_ = make_child<QPushButton>(page, QStringLiteral("导出脱敏诊断包"));
+            diagnostics_export_->setObjectName(QStringLiteral("diagnostics-export"));
+            diagnostics_export_->setEnabled(false);
+            QObject::connect(diagnostics_export_, &QPushButton::clicked, this,
+                             [this] { request_diagnostics_export(); });
+            layout->addWidget(diagnostics_export_);
+            operations_status_ = make_child<QLabel>(page, QStringLiteral("等待后台服务连接"));
+            operations_status_->setObjectName(QStringLiteral("operations-status"));
+            operations_status_->setWordWrap(true);
+            operations_status_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            layout->addWidget(operations_status_);
+            layout->addStretch(1);
+            pages_->addWidget(page);
+            continue;
+        }
         if (descriptor.id != ConsolePageId::preview)
         {
             pages_->addWidget(
@@ -998,6 +1228,146 @@ void MainWindow::show_camera_result(const Result<void>& result)
             QStringLiteral("失败：%1").arg(QString::fromStdString(result.error().message)));
 }
 
+void MainWindow::show_operations_result(const Result<void>& result)
+{
+    if (!result && operations_status_)
+        operations_status_->setText(
+            QStringLiteral("失败：%1").arg(QString::fromStdString(result.error().message)));
+}
+
+void MainWindow::request_diagnostics_export()
+{
+    if (!operations_actions_.export_diagnostics)
+        return;
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("导出脱敏诊断包"), QStringLiteral("PaperBreakEdge-diagnostics.zip"),
+        QStringLiteral("ZIP 文件 (*.zip)"));
+    if (!path.isEmpty())
+        show_operations_result(
+            operations_actions_.export_diagnostics(std::filesystem::path{path.toStdWString()}));
+}
+
+void MainWindow::update_alarm_details()
+{
+    if (!alarm_table_ || !alarm_details_ || !alarm_acknowledge_)
+        return;
+    const int row = alarm_table_->currentRow();
+    if (row < 0 || !alarm_table_->item(row, 0))
+    {
+        alarm_details_->setText(QStringLiteral("选择报警查看详情"));
+        alarm_acknowledge_->setEnabled(false);
+        return;
+    }
+    const auto alarm_id = alarm_table_->item(row, 0)->data(Qt::UserRole).toULongLong();
+    const auto found =
+        std::find_if(operations_snapshot_.alarms.begin(), operations_snapshot_.alarms.end(),
+                     [alarm_id](const auto& item) { return item.alarm_id == alarm_id; });
+    if (found == operations_snapshot_.alarms.end())
+        return;
+    QStringList details;
+    details.push_back(QStringLiteral("%1 · 首次 %2 · 最近 %3 · 发生 %4 次")
+                          .arg(QString::fromStdString(found->code),
+                               QString::fromStdString(found->first_occurred_at),
+                               QString::fromStdString(found->last_occurred_at))
+                          .arg(found->occurrence_count));
+    details.push_back(QString::fromStdString(found->message));
+    for (const auto& [key, value] : found->details)
+        details.push_back(QStringLiteral("%1 = %2").arg(QString::fromStdString(key),
+                                                        QString::fromStdString(value)));
+    alarm_details_->setText(details.join(QChar{'\n'}));
+    alarm_acknowledge_->setEnabled(operations_snapshot_.connection.state ==
+                                       ipc::ClientConnectionState::connected &&
+                                   !operations_snapshot_.alarms_stale &&
+                                   !operations_snapshot_.operation_pending && !found->acknowledged);
+}
+
+void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
+{
+    operations_snapshot_ = snapshot;
+    if (!metrics_table_ || !alarm_table_ || !log_table_)
+        return;
+
+    metrics_table_->setRowCount(static_cast<int>(snapshot.metrics.size()));
+    for (std::size_t index = 0; index < snapshot.metrics.size(); ++index)
+    {
+        const auto& metric = snapshot.metrics[index];
+        const int row = static_cast<int>(index);
+        set_table_item(metrics_table_, row, 0, QString::fromStdString(metric.name));
+        set_table_item(metrics_table_, row, 1,
+                       metric.available ? QString::fromStdString(metric.value)
+                                        : QStringLiteral("不可用"));
+        set_table_item(metrics_table_, row, 2, QString::fromStdString(metric.unit));
+        set_table_item(metrics_table_, row, 3,
+                       stale_value(metric.available ? QStringLiteral("可用")
+                                                    : QStringLiteral("未初始化/不可用"),
+                                   snapshot.metrics_stale));
+    }
+    metrics_table_->resizeColumnsToContents();
+
+    std::optional<std::uint64_t> selected_alarm;
+    if (alarm_table_->currentRow() >= 0 && alarm_table_->item(alarm_table_->currentRow(), 0))
+        selected_alarm =
+            alarm_table_->item(alarm_table_->currentRow(), 0)->data(Qt::UserRole).toULongLong();
+    alarm_table_->setRowCount(static_cast<int>(snapshot.alarms.size()));
+    int selected_row = -1;
+    for (std::size_t index = 0; index < snapshot.alarms.size(); ++index)
+    {
+        const auto& alarm = snapshot.alarms[index];
+        const int row = static_cast<int>(index);
+        set_table_item(alarm_table_, row, 0, QString::number(alarm.alarm_id),
+                       QVariant::fromValue<qulonglong>(alarm.alarm_id));
+        set_table_item(alarm_table_, row, 1, QString::fromStdString(alarm.last_occurred_at));
+        set_table_item(alarm_table_, row, 2, QString::fromStdString(alarm.severity));
+        set_table_item(alarm_table_, row, 3, QString::fromStdString(alarm.source));
+        set_table_item(alarm_table_, row, 4, QString::fromStdString(alarm.code));
+        set_table_item(alarm_table_, row, 5,
+                       alarm.active ? QStringLiteral("当前") : QStringLiteral("已清除"));
+        set_table_item(alarm_table_, row, 6,
+                       alarm.acknowledged ? QStringLiteral("已确认") : QStringLiteral("未确认"));
+        set_table_item(alarm_table_, row, 7, QString::fromStdString(alarm.message));
+        if (selected_alarm && *selected_alarm == alarm.alarm_id)
+            selected_row = row;
+    }
+    if (selected_row >= 0)
+        alarm_table_->selectRow(selected_row);
+    alarm_table_->resizeColumnsToContents();
+    alarm_export_->setEnabled(!snapshot.alarms.empty() && !snapshot.operation_pending);
+    update_alarm_details();
+
+    log_table_->setRowCount(static_cast<int>(snapshot.logs.size()));
+    for (std::size_t index = 0; index < snapshot.logs.size(); ++index)
+    {
+        const auto& record = snapshot.logs[index];
+        const int row = static_cast<int>(index);
+        set_table_item(log_table_, row, 0, QString::number(record.sequence));
+        set_table_item(log_table_, row, 1, QString::fromStdString(record.timestamp));
+        set_table_item(log_table_, row, 2, QString::number(record.thread_id));
+        set_table_item(log_table_, row, 3, QString::fromStdString(record.category));
+        set_table_item(log_table_, row, 4, QString::fromStdString(record.level));
+        set_table_item(log_table_, row, 5, QString::fromStdString(record.message));
+    }
+    log_table_->resizeColumnsToContents();
+
+    const bool connected = snapshot.connection.state == ipc::ClientConnectionState::connected;
+    diagnostics_export_->setEnabled(connected && !snapshot.operation_pending);
+    if (snapshot.operation_pending)
+        operations_status_->setText(
+            QStringLiteral("正在执行 %1").arg(QString::fromStdString(snapshot.operation)));
+    else if (snapshot.error)
+        operations_status_->setText(
+            QStringLiteral("失败：%1（%2）")
+                .arg(QString::fromStdString(snapshot.error->message),
+                     QString::fromStdString(snapshot.error->business_code)));
+    else if (snapshot.exported_path)
+        operations_status_->setText(
+            QStringLiteral("导出完成：%1")
+                .arg(QString::fromStdWString(snapshot.exported_path->wstring())));
+    else if (!connected)
+        operations_status_->setText(QStringLiteral("后台服务连接中断，运维数据已标记过期"));
+    else
+        operations_status_->setText(QStringLiteral("运维数据已同步；诊断导出内容将强制脱敏"));
+}
+
 void MainWindow::apply_snapshot(const ClientStateSnapshot& snapshot)
 {
     connection_banner_->setText(connection_text(snapshot));
@@ -1150,6 +1520,13 @@ bool MainWindow::select_theme_mode(const ThemeMode mode) noexcept
         return false;
     theme_selector_->setCurrentIndex(index);
     return static_cast<ThemeMode>(theme_selector_->currentData().toInt()) == mode;
+}
+
+bool MainWindow::operations_pages_ready() const noexcept
+{
+    return metrics_table_ && alarm_scope_ && alarm_severity_ && alarm_source_ && alarm_table_ &&
+           alarm_details_ && alarm_acknowledge_ && alarm_export_ && log_category_ && log_level_ &&
+           log_table_ && operations_status_ && diagnostics_export_;
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

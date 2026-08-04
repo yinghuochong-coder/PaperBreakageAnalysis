@@ -2,6 +2,7 @@
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/navigation_model.hpp"
+#include "paperbreak/console/operations_client.hpp"
 #include "paperbreak/console/preview_client.hpp"
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/service/windows/scm.hpp"
@@ -81,6 +82,7 @@ int main(int argc, char* argv[])
 
     std::unique_ptr<paperbreak::console::PreviewClient> preview_client;
     std::unique_ptr<paperbreak::console::CameraClient> camera_client;
+    std::unique_ptr<paperbreak::console::OperationsClient> operations_client;
     paperbreak::console::MainWindow main_window(
         [&preview_client](const bool paused) {
             if (preview_client)
@@ -123,9 +125,55 @@ int main(int argc, char* argv[])
                      "console", "console.camera.updateConfig", true));
              }},
         {.initial_mode = theme_controller.mode(),
-         .set_mode = [&theme_controller](const paperbreak::console::ThemeMode mode) {
-             theme_controller.set_mode(mode);
-         }});
+         .set_mode =
+             [&theme_controller](const paperbreak::console::ThemeMode mode) {
+                 theme_controller.set_mode(mode);
+             }},
+        {.refresh =
+             [&operations_client] {
+                 if (operations_client)
+                     operations_client->refresh();
+             },
+         .query_alarms =
+             [&operations_client](paperbreak::console::AlarmFilter filter) {
+                 if (operations_client)
+                     return operations_client->query_alarms(std::move(filter));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "运维客户端尚未初始化",
+                     "console", "console.operations.alarms", true));
+             },
+         .query_logs =
+             [&operations_client](paperbreak::console::LogFilter filter) {
+                 if (operations_client)
+                     return operations_client->query_logs(std::move(filter));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "运维客户端尚未初始化",
+                     "console", "console.operations.logs", true));
+             },
+         .acknowledge =
+             [&operations_client](const std::uint64_t alarm_id) {
+                 if (operations_client)
+                     return operations_client->acknowledge(alarm_id);
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "运维客户端尚未初始化",
+                     "console", "console.operations.acknowledge", true));
+             },
+         .export_diagnostics =
+             [&operations_client](std::filesystem::path destination) {
+                 if (operations_client)
+                     return operations_client->export_diagnostics(std::move(destination));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "运维客户端尚未初始化",
+                     "console", "console.operations.export", true));
+             },
+         .export_alarm_csv =
+             [&operations_client](std::filesystem::path destination) {
+                 if (operations_client)
+                     return operations_client->export_alarm_csv(std::move(destination));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "运维客户端尚未初始化",
+                     "console", "console.operations.alarmExport", true));
+             }});
     preview_client = std::make_unique<paperbreak::console::PreviewClient>(
         [&main_window](const paperbreak::console::PreviewSnapshot& snapshot) {
             main_window.apply_preview_snapshot(snapshot);
@@ -140,6 +188,11 @@ int main(int argc, char* argv[])
             if (preview_client && !camera_ids.empty())
                 preview_client->set_camera_ids(std::move(camera_ids));
         });
+    if (!smoke_test)
+        operations_client = std::make_unique<paperbreak::console::OperationsClient>(
+            [&main_window](const paperbreak::console::OperationsSnapshot& snapshot) {
+                main_window.apply_operations_snapshot(snapshot);
+            });
     paperbreak::console::ClientStateSnapshot latest_snapshot;
     std::atomic_bool restart_running{};
     std::jthread restart_task;
@@ -218,6 +271,7 @@ int main(int argc, char* argv[])
                     QMessageBox::warning(&main_window, QStringLiteral("打开事件目录"),
                                          QStringLiteral("Windows 无法打开事件目录：%1").arg(path));
             },
+        .export_diagnostics = [&main_window] { main_window.request_diagnostics_export(); },
         .show_about =
             [&main_window] {
                 QMessageBox::about(
@@ -257,6 +311,8 @@ int main(int argc, char* argv[])
     }
     if (!smoke_test)
         static_cast<void>(camera_client->start());
+    if (!smoke_test)
+        static_cast<void>(operations_client->start());
 
     bool smoke_ok = true;
     if (smoke_test)
@@ -291,11 +347,22 @@ int main(int argc, char* argv[])
             QStringLiteral("dark");
         const bool selected_system =
             main_window.select_theme_mode(paperbreak::console::ThemeMode::system);
+        paperbreak::console::OperationsSnapshot operations_smoke;
+        main_window.apply_operations_snapshot(operations_smoke);
+        paperbreak::console::ClientStateSnapshot connected_tray_smoke;
+        connected_tray_smoke.connection.state = paperbreak::ipc::ClientConnectionState::connected;
+        tray.apply_snapshot(connected_tray_smoke);
+        const bool diagnostic_enabled_when_connected = tray.diagnostics_action_enabled();
+        paperbreak::console::ClientStateSnapshot disconnected_tray_smoke;
+        disconnected_tray_smoke.connection.state = paperbreak::ipc::ClientConnectionState::stopped;
+        tray.apply_snapshot(disconnected_tray_smoke);
+        const bool diagnostic_disabled_when_disconnected = !tray.diagnostics_action_enabled();
         smoke_ok = tray.is_visible() && main_window.isVisible() && tray.action_count() == 8U &&
                    !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && empty_configuration_kept_discovery &&
-                   restart_state_disabled_controls &&
+                   restart_state_disabled_controls && main_window.operations_pages_ready() &&
+                   diagnostic_enabled_when_connected && diagnostic_disabled_when_disconnected &&
                    theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
                    selected_light && selected_dark && dark_theme_persisted && selected_system &&
                    main_window.select_page(11U) && main_window.select_page(0U);
@@ -326,6 +393,10 @@ int main(int argc, char* argv[])
     refresh_timer.start(1000);
     QObject::connect(&refresh_timer, &QTimer::timeout,
                      [&camera_client] { camera_client->refresh(); });
+    QObject::connect(&refresh_timer, &QTimer::timeout, [&operations_client] {
+        if (operations_client)
+            operations_client->refresh();
+    });
     QTimer clock_timer;
     QObject::connect(&clock_timer, &QTimer::timeout, &main_window,
                      [&main_window] { main_window.update_clock(); });
@@ -345,6 +416,11 @@ int main(int argc, char* argv[])
     preview_client.reset();
     camera_client->stop();
     camera_client.reset();
+    if (operations_client)
+    {
+        operations_client->stop();
+        operations_client.reset();
+    }
     if (restart_task.joinable())
     {
         restart_task.request_stop();

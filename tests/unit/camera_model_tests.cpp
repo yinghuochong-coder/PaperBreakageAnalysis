@@ -502,6 +502,11 @@ TEST(CameraControlRuntime, ForwardsBoundedFramesWhileAcquiringAndStopsDeterminis
             condition.wait_for(lock, std::chrono::seconds{2}, [&] { return delivered >= 2U; }));
         EXPECT_TRUE(frames_valid);
     }
+    auto acquisition = runtime.get("CAM01", "MOCK-PREVIEW-01");
+    ASSERT_TRUE(acquisition);
+    ASSERT_TRUE(acquisition.value().acquisition.has_value());
+    EXPECT_GE(acquisition.value().acquisition->frames_received, 2U);
+    EXPECT_TRUE(acquisition.value().acquisition->last_frame_wall_clock_time.has_value());
     std::uint64_t before_update{};
     {
         std::scoped_lock lock{mutex};

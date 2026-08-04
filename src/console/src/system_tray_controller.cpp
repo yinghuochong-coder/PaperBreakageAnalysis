@@ -52,7 +52,7 @@ SystemTrayController::SystemTrayController(TrayCallbacks callbacks)
     preview_action_ = menu_.addAction(QStringLiteral("暂停/恢复预览（待 M4-03）"));
     restart_action_ = menu_.addAction(QStringLiteral("重启后台服务"));
     event_directory_action_ = menu_.addAction(QStringLiteral("打开事件目录"));
-    diagnostics_action_ = menu_.addAction(QStringLiteral("导出诊断包（待 M4-06）"));
+    diagnostics_action_ = menu_.addAction(QStringLiteral("导出脱敏诊断包"));
     auto* about_action = menu_.addAction(QStringLiteral("关于"));
     auto* quit_action = menu_.addAction(QStringLiteral("退出界面"));
 
@@ -65,6 +65,8 @@ SystemTrayController::SystemTrayController(TrayCallbacks callbacks)
     QObject::connect(restart_action_, &QAction::triggered, std::move(callbacks.restart_service));
     QObject::connect(event_directory_action_, &QAction::triggered,
                      std::move(callbacks.open_event_directory));
+    QObject::connect(diagnostics_action_, &QAction::triggered,
+                     std::move(callbacks.export_diagnostics));
     QObject::connect(about_action, &QAction::triggered, std::move(callbacks.show_about));
     QObject::connect(quit_action, &QAction::triggered, std::move(callbacks.quit_interface));
     QObject::connect(
@@ -100,6 +102,8 @@ void SystemTrayController::apply_snapshot(const ClientStateSnapshot& snapshot)
     event_directory_action_->setEnabled(
         snapshot.connection.state == ipc::ClientConnectionState::connected &&
         !snapshot.locations_stale && snapshot.locations.has_value());
+    diagnostics_action_->setEnabled(snapshot.connection.state ==
+                                    ipc::ClientConnectionState::connected);
 
     if (status_initialized_ && status.color != last_color_ &&
         (status.color == TrayStatusColor::yellow || status.color == TrayStatusColor::red))

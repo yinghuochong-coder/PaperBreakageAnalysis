@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -718,4 +719,87 @@ TEST(SystemCommand, QueriesMetricsAlarmsLogsAndRequiresAdministratorToAcknowledg
     EXPECT_EQ(page_json.at("alarms").size(), 2U);
     EXPECT_TRUE(page_json.at("truncated").get<bool>());
     EXPECT_TRUE(page_json.at("nextBeforeAlarmId").is_number_integer());
+}
+
+TEST(SystemCommand, ExportsBoundedZipWithRedactedConfigurationAndRecentDiagnostics)
+{
+    CommandFixture fixture;
+    auto current = fixture.repository.snapshot();
+    ASSERT_TRUE(current);
+    Json document = Json::parse(paperbreak::config::serialize_config(*current.value().stored));
+    document["uplink"]["credentialReference"] = "production-credential-reference";
+    document["uplink"]["certificateReference"] = "production-certificate-reference";
+    ASSERT_TRUE(
+        fixture.repository.update(document.dump(), 1U,
+                                  {.source = paperbreak::config::ConfigChangeSource::local_ipc,
+                                   .actor = "test",
+                                   .correlation_id = "diagnostic-setup"}));
+
+    auto metrics = std::make_shared<paperbreak::monitoring::MetricRegistry>();
+    ASSERT_TRUE(metrics->replace_source(
+        "system",
+        {{.name = "process.cpu.percent", .value = 17.5, .unit = "percent"},
+         {.name = "algorithm.state", .value = std::string{"not-initialized"}, .unit = "state"}}));
+    auto alarms = std::make_shared<paperbreak::monitoring::AlarmRegistry>();
+    ASSERT_TRUE(alarms->raise_alarm({.code = "SYS_CPU_USAGE_HIGH",
+                                     .severity = paperbreak::Severity::warning,
+                                     .source = "process",
+                                     .message = "diagnostic alarm"}));
+    paperbreak::logging::LoggingConfig log_config;
+    log_config.directory = fixture.temp.path / "diagnostic-logs";
+    auto created = paperbreak::logging::LoggingRuntime::create(log_config);
+    ASSERT_TRUE(created);
+    std::shared_ptr<paperbreak::logging::LoggingRuntime> logging{std::move(created).value()};
+    ASSERT_TRUE(logging->log(paperbreak::logging::Category::service,
+                             paperbreak::logging::Level::warning,
+                             "diagnostic marker token=super-secret-value"));
+    ASSERT_TRUE(logging->shutdown());
+
+    paperbreak::service::SystemCommandService commands{fixture.repository, fixture.status, metrics,
+                                                       alarms, logging};
+    auto exported = commands.handle(fixture.request("system.exportDiagnostics"), reader, {});
+    ASSERT_TRUE(exported);
+    ASSERT_GE(exported.value().binary.size(), 4U);
+    EXPECT_EQ(exported.value().binary[0], std::byte{0x50});
+    EXPECT_EQ(exported.value().binary[1], std::byte{0x4b});
+    const Json response = Json::parse(exported.value().payload_json);
+    EXPECT_EQ(response.at("contentType"), "application/zip");
+    EXPECT_TRUE(response.at("redacted").get<bool>());
+    EXPECT_EQ(response.at("size"), exported.value().binary.size());
+    EXPECT_LT(exported.value().binary.size(), 8U * 1024U * 1024U);
+
+    std::string bytes;
+    bytes.reserve(exported.value().binary.size());
+    for (const auto value : exported.value().binary)
+        bytes.push_back(static_cast<char>(std::to_integer<unsigned char>(value)));
+    const auto signature_count = [&bytes](const std::string_view signature) {
+        std::size_t count = 0U;
+        for (std::size_t offset = 0U; (offset = bytes.find(signature, offset)) != std::string::npos;
+             offset += signature.size())
+            ++count;
+        return count;
+    };
+    EXPECT_EQ(signature_count(std::string_view{"PK\x03\x04", 4U}), 9U);
+    EXPECT_EQ(signature_count(std::string_view{"PK\x01\x02", 4U}), 9U);
+    EXPECT_EQ(signature_count(std::string_view{"PK\x05\x06", 4U}), 1U);
+    for (const std::string_view entry :
+         {"manifest.json", "config-redacted.json", "system.json", "metrics.json", "cameras.json",
+          "network.json", "alarms.json", "recent-logs.json", "version.json"})
+        EXPECT_NE(bytes.find(entry), std::string::npos) << entry;
+    EXPECT_NE(bytes.find("<redacted>"), std::string::npos);
+    EXPECT_NE(bytes.find("diagnostic alarm"), std::string::npos);
+    EXPECT_NE(bytes.find("diagnostic marker token=***"), std::string::npos);
+    EXPECT_EQ(bytes.find("production-credential-reference"), std::string::npos);
+    EXPECT_EQ(bytes.find("production-certificate-reference"), std::string::npos);
+    EXPECT_EQ(bytes.find("super-secret-value"), std::string::npos);
+
+    auto invalid = commands.handle(
+        fixture.request("system.exportDiagnostics", R"({"unexpected":true})"), reader, {});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
+    const paperbreak::ipc::PeerIdentity unauthenticated{
+        .actor_sid = "", .local = true, .authenticated = false, .administrator = false};
+    auto denied = commands.handle(fixture.request("system.exportDiagnostics"), unauthenticated, {});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
 }

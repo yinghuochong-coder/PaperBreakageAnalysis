@@ -1,5 +1,6 @@
 #pragma once
 
+#include "paperbreak/camera/acquisition.hpp"
 #include "paperbreak/camera/camera.hpp"
 
 #include <functional>
@@ -28,6 +29,7 @@ struct CameraControlSnapshot final
     std::optional<CameraDeviceDescriptor> device;
     std::optional<CameraCapabilities> capabilities;
     std::optional<CameraParameterSnapshot> actual;
+    std::optional<AcquisitionWorkerSnapshot> acquisition;
     std::optional<Error> last_error;
 };
 class CameraControlRuntime final

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
@@ -25,8 +26,172 @@ namespace
 
 using Json = nlohmann::json;
 
+constexpr std::size_t maximum_diagnostic_bytes = 8U * 1024U * 1024U;
+
+Error command_error(std::string code, Severity severity, std::string message, std::string operation,
+                    bool retryable = false);
+
+struct ZipEntry final
+{
+    std::string name;
+    std::string content;
+};
+
+void append_u16(std::vector<std::byte>& output, const std::uint16_t value)
+{
+    output.push_back(static_cast<std::byte>(value & 0xffU));
+    output.push_back(static_cast<std::byte>((value >> 8U) & 0xffU));
+}
+
+void append_u32(std::vector<std::byte>& output, const std::uint32_t value)
+{
+    append_u16(output, static_cast<std::uint16_t>(value & 0xffffU));
+    append_u16(output, static_cast<std::uint16_t>((value >> 16U) & 0xffffU));
+}
+
+void append_text(std::vector<std::byte>& output, const std::string_view value)
+{
+    output.reserve(output.size() + value.size());
+    for (const unsigned char character : value)
+        output.push_back(static_cast<std::byte>(character));
+}
+
+std::uint32_t crc32(const std::string_view value) noexcept
+{
+    std::uint32_t crc = 0xffffffffU;
+    for (const unsigned char character : value)
+    {
+        crc ^= character;
+        for (unsigned bit = 0U; bit < 8U; ++bit)
+            crc = (crc >> 1U) ^ (0xedb88320U & (0U - (crc & 1U)));
+    }
+    return ~crc;
+}
+
+Result<std::vector<std::byte>> make_zip(const std::vector<ZipEntry>& entries)
+{
+    struct CentralEntry final
+    {
+        const ZipEntry* entry{};
+        std::uint32_t crc{};
+        std::uint32_t offset{};
+    };
+    std::vector<std::byte> output;
+    std::vector<CentralEntry> central;
+    central.reserve(entries.size());
+    for (const auto& entry : entries)
+    {
+        if (entry.name.empty() || entry.name.size() > (std::numeric_limits<std::uint16_t>::max)() ||
+            entry.content.size() > (std::numeric_limits<std::uint32_t>::max)() ||
+            output.size() > (std::numeric_limits<std::uint32_t>::max)())
+            return Result<std::vector<std::byte>>::failure(
+                command_error("SYS_DIAGNOSTIC_TOO_LARGE", Severity::error, "诊断包条目超过允许范围",
+                              "ipc.system.exportDiagnostics"));
+        const auto size = static_cast<std::uint32_t>(entry.content.size());
+        const auto checksum = crc32(entry.content);
+        central.push_back({.entry = &entry,
+                           .crc = checksum,
+                           .offset = static_cast<std::uint32_t>(output.size())});
+        append_u32(output, 0x04034b50U);
+        append_u16(output, 20U);
+        append_u16(output, 0x0800U);
+        append_u16(output, 0U);
+        append_u16(output, 0U);
+        append_u16(output, 0U);
+        append_u32(output, checksum);
+        append_u32(output, size);
+        append_u32(output, size);
+        append_u16(output, static_cast<std::uint16_t>(entry.name.size()));
+        append_u16(output, 0U);
+        append_text(output, entry.name);
+        append_text(output, entry.content);
+        if (output.size() > maximum_diagnostic_bytes)
+            return Result<std::vector<std::byte>>::failure(
+                command_error("SYS_DIAGNOSTIC_TOO_LARGE", Severity::error,
+                              "诊断包超过 8 MiB 内部上限", "ipc.system.exportDiagnostics"));
+    }
+
+    const auto central_offset = static_cast<std::uint32_t>(output.size());
+    for (const auto& item : central)
+    {
+        const auto size = static_cast<std::uint32_t>(item.entry->content.size());
+        append_u32(output, 0x02014b50U);
+        append_u16(output, 20U);
+        append_u16(output, 20U);
+        append_u16(output, 0x0800U);
+        append_u16(output, 0U);
+        append_u16(output, 0U);
+        append_u16(output, 0U);
+        append_u32(output, item.crc);
+        append_u32(output, size);
+        append_u32(output, size);
+        append_u16(output, static_cast<std::uint16_t>(item.entry->name.size()));
+        append_u16(output, 0U);
+        append_u16(output, 0U);
+        append_u16(output, 0U);
+        append_u16(output, 0U);
+        append_u32(output, 0U);
+        append_u32(output, item.offset);
+        append_text(output, item.entry->name);
+    }
+    const auto central_size = static_cast<std::uint32_t>(output.size() - central_offset);
+    if (central.size() > (std::numeric_limits<std::uint16_t>::max)())
+        return Result<std::vector<std::byte>>::failure(
+            command_error("SYS_DIAGNOSTIC_TOO_LARGE", Severity::error, "诊断包条目数量超过允许范围",
+                          "ipc.system.exportDiagnostics"));
+    append_u32(output, 0x06054b50U);
+    append_u16(output, 0U);
+    append_u16(output, 0U);
+    append_u16(output, static_cast<std::uint16_t>(central.size()));
+    append_u16(output, static_cast<std::uint16_t>(central.size()));
+    append_u32(output, central_size);
+    append_u32(output, central_offset);
+    append_u16(output, 0U);
+    if (output.size() > maximum_diagnostic_bytes)
+        return Result<std::vector<std::byte>>::failure(
+            command_error("SYS_DIAGNOSTIC_TOO_LARGE", Severity::error, "诊断包超过 8 MiB 内部上限",
+                          "ipc.system.exportDiagnostics"));
+    return Result<std::vector<std::byte>>::success(std::move(output));
+}
+
+bool sensitive_key(std::string key)
+{
+    std::ranges::transform(key, key.begin(), [](const unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    const auto has = [&key](const std::string_view fragment) {
+        return key.find(fragment) != std::string::npos;
+    };
+    return has("password") || has("token") || has("secret") || has("privatekey") ||
+           has("private-key") || has("private_key") || has("credentialreference") ||
+           has("certificatereference");
+}
+
+void redact_json(Json& value)
+{
+    if (value.is_object())
+    {
+        for (auto& [key, child] : value.items())
+        {
+            if (sensitive_key(key))
+                child = child.is_string() && child.get_ref<const std::string&>().empty()
+                            ? ""
+                            : "<redacted>";
+            else
+                redact_json(child);
+        }
+    }
+    else if (value.is_array())
+    {
+        for (auto& child : value)
+            redact_json(child);
+    }
+    else if (value.is_string())
+        value = logging::redact_sensitive(value.get_ref<const std::string&>());
+}
+
 Error command_error(std::string code, const Severity severity, std::string message,
-                    std::string operation, const bool retryable = false)
+                    std::string operation, const bool retryable)
 {
     return make_error(std::move(code), severity, std::move(message), "ipc", std::move(operation),
                       retryable);
@@ -84,21 +249,26 @@ Result<ipc::CommandResponse> status_response(config::ConfigRepository& repositor
     return Result<ipc::CommandResponse>::success({.payload_json = payload.dump(), .binary = {}});
 }
 
-Result<ipc::CommandResponse> version_response()
+Json version_json()
 {
     const auto& version = version_info();
-    Json payload{{"applicationVersion", version.application_version},
-                 {"gitCommit", version.git_commit},
-                 {"gitDirty", version.git_dirty},
-                 {"buildTimeUtc", version.build_time_utc},
-                 {"compiler", version.compiler},
-                 {"dependencies",
-                  {{"qt", version.qt_version},
-                   {"opencv", version.opencv_version},
-                   {"spdlog", version.spdlog_version},
-                   {"nlohmannJson", version.json_version},
-                   {"sqlite", version.sqlite_version}}}};
-    return Result<ipc::CommandResponse>::success({.payload_json = payload.dump(), .binary = {}});
+    return {{"applicationVersion", version.application_version},
+            {"gitCommit", version.git_commit},
+            {"gitDirty", version.git_dirty},
+            {"buildTimeUtc", version.build_time_utc},
+            {"compiler", version.compiler},
+            {"dependencies",
+             {{"qt", version.qt_version},
+              {"opencv", version.opencv_version},
+              {"spdlog", version.spdlog_version},
+              {"nlohmannJson", version.json_version},
+              {"sqlite", version.sqlite_version}}}};
+}
+
+Result<ipc::CommandResponse> version_response()
+{
+    return Result<ipc::CommandResponse>::success(
+        {.payload_json = version_json().dump(), .binary = {}});
 }
 
 std::filesystem::path path_from_utf8(const std::string_view value)
@@ -663,6 +833,138 @@ Result<Json> bound_camera_json(const std::string& id, const std::string& serial,
                                   {"interPacketDelayNs", *actual.inter_packet_delay_ns}});
 }
 
+Result<ipc::CommandResponse> diagnostics_response(
+    const Json& payload, config::ConfigRepository& repository,
+    const ServiceStatusStore& status_store,
+    const std::shared_ptr<monitoring::MetricRegistry>& metrics,
+    const std::shared_ptr<monitoring::AlarmRegistry>& alarms,
+    const std::shared_ptr<logging::LoggingRuntime>& logging,
+    const std::shared_ptr<camera::CameraControlRuntime>& cameras, const std::string_view actor)
+{
+    if (!payload.empty())
+        return Result<ipc::CommandResponse>::failure(command_error(
+            "IPC_REQUEST_INVALID", Severity::error, "system.exportDiagnostics payload 必须为空",
+            "ipc.system.exportDiagnostics"));
+    if (!metrics || !alarms || !logging)
+        return Result<ipc::CommandResponse>::failure(
+            command_error("SYS_INTERNAL_ERROR", Severity::error, "诊断数据源未完整装配",
+                          "ipc.system.exportDiagnostics"));
+
+    auto configuration = repository.snapshot();
+    if (!configuration)
+        return Result<ipc::CommandResponse>::failure(configuration.error());
+
+    Json redacted_config =
+        Json::parse(config::serialize_config(*configuration.value().stored), nullptr, false);
+    if (redacted_config.is_discarded())
+        return Result<ipc::CommandResponse>::failure(
+            command_error("SYS_INTERNAL_ERROR", Severity::error, "无法序列化诊断配置快照",
+                          "ipc.system.exportDiagnostics"));
+    redact_json(redacted_config);
+
+    const auto metric_result = metrics->query({.limit = 256U});
+    Json metric_items = Json::array();
+    for (const auto& metric : metric_result.snapshot.metrics)
+        metric_items.push_back(metric_json(metric));
+    Json metric_document{{"snapshotVersion", metric_result.snapshot.version},
+                         {"sampledAt", metric_result.snapshot.sampled_at},
+                         {"metrics", std::move(metric_items)},
+                         {"truncated", metric_result.truncated}};
+
+    const auto alarm_result = alarms->query({.limit = 200U});
+    Json alarm_items = Json::array();
+    for (const auto& alarm : alarm_result.alarms)
+        alarm_items.push_back(alarm_json(alarm));
+    Json alarm_document{{"registryRevision", alarm_result.registry_revision},
+                        {"alarms", std::move(alarm_items)},
+                        {"truncated", alarm_result.truncated}};
+
+    const auto log_result = logging->tail({.limit = 200U});
+    Json log_items = Json::array();
+    for (const auto& record : log_result.records)
+        log_items.push_back(log_json(record));
+    Json log_document{{"firstAvailableSequence", log_result.first_available_sequence},
+                      {"latestSequence", log_result.latest_sequence},
+                      {"records", std::move(log_items)},
+                      {"truncated", log_result.truncated}};
+
+    Json camera_items = Json::array();
+    for (const auto& configured : configuration.value().stored->cameras)
+    {
+        Json item{{"cameraId", configured.id},
+                  {"serialNumber", configured.serial_number},
+                  {"location", configured.location},
+                  {"enabled", configured.enabled}};
+        if (cameras)
+        {
+            auto current = cameras->get(configured.id, configured.serial_number);
+            if (current)
+                item["runtime"] = camera_snapshot_json(current.value());
+            else
+                item["runtimeError"] = {{"code", current.error().business_code},
+                                        {"message", current.error().message}};
+        }
+        else
+            item["runtime"] = {{"available", false}, {"state", "not-initialized"}};
+        camera_items.push_back(std::move(item));
+    }
+
+    const auto status = status_store.snapshot();
+    Json system_document{
+        {"generatedAt", current_utc_timestamp()},
+        {"serviceState", service_state_name(status.state)},
+        {"acceptingWrites", status.accepting_writes},
+        {"startedAt", status.started_at},
+        {"machineId", configuration.value().effective->system.machine_id},
+        {"configSchemaVersion", configuration.value().stored->config_schema_version},
+        {"storedConfigRevision", configuration.value().stored_config_revision},
+        {"effectiveConfigRevision", configuration.value().effective_config_revision}};
+    Json network_document{
+        {"localIpc", "enabled"},
+        {"uplink", configuration.value().effective->uplink.enabled ? "configured" : "disabled"},
+        {"plantIo", configuration.value().effective->plant_io.enabled ? "configured" : "disabled"}};
+
+    std::vector<ZipEntry> entries{
+        {"config-redacted.json", redacted_config.dump(2)},
+        {"system.json", system_document.dump(2)},
+        {"metrics.json", metric_document.dump(2)},
+        {"cameras.json", Json{{"cameras", std::move(camera_items)}}.dump(2)},
+        {"network.json", network_document.dump(2)},
+        {"alarms.json", alarm_document.dump(2)},
+        {"recent-logs.json", log_document.dump(2)},
+        {"version.json", version_json().dump(2)}};
+    Json entry_names = Json::array();
+    for (const auto& entry : entries)
+        entry_names.push_back(entry.name);
+    entry_names.push_back("manifest.json");
+    entries.push_back({"manifest.json", Json{{"formatVersion", 1},
+                                             {"generatedAt", current_utc_timestamp()},
+                                             {"redacted", true},
+                                             {"alarmHistoryScope", "process-memory"},
+                                             {"entries", std::move(entry_names)}}
+                                            .dump(2)});
+    auto archive = make_zip(entries);
+    if (!archive)
+        return Result<ipc::CommandResponse>::failure(archive.error());
+
+    static_cast<void>(logging->log(logging::Category::audit, logging::Level::info,
+                                   "Local diagnostic package exported by actor=" +
+                                       logging::redact_sensitive(actor)));
+    const std::string generated = current_utc_timestamp();
+    std::string compact;
+    compact.reserve(generated.size());
+    for (const char value : generated)
+        if ((value >= '0' && value <= '9') || value == 'T' || value == 'Z')
+            compact.push_back(value);
+    return Result<ipc::CommandResponse>::success(
+        {.payload_json = Json{{"fileName", "PaperBreakEdge-diagnostics-" + compact + ".zip"},
+                              {"contentType", "application/zip"},
+                              {"size", archive.value().size()},
+                              {"redacted", true}}
+                             .dump(),
+         .binary = std::move(archive).value()});
+}
+
 } // namespace
 
 void ServiceStatusStore::set_state(const ServiceState state)
@@ -1125,6 +1427,15 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
                 command_error("IPC_REQUEST_INVALID", Severity::error,
                               "system.getLocations payload 必须为空", "ipc.system.getLocations"));
         return locations_response(repository_, config_directory_);
+    }
+    if (request.command == "system.exportDiagnostics")
+    {
+        if (!peer.local || !peer.authenticated)
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_UNAUTHORIZED", Severity::error,
+                "system.exportDiagnostics 只允许已认证本机用户", "ipc.system.exportDiagnostics"));
+        return diagnostics_response(payload.value(), repository_, *status_, metrics_, alarms_,
+                                    logging_, cameras_, peer.actor_sid);
     }
     if (request.command == "system.getMetrics")
     {

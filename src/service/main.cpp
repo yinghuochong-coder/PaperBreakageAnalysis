@@ -709,6 +709,198 @@ class DatabasePlaceholderMetricSource final : public paperbreak::monitoring::IMe
     }
 };
 
+class OperationalPlaceholderMetricSource final : public paperbreak::monitoring::IMetricSource
+{
+  public:
+    [[nodiscard]] std::string_view source_name() const noexcept override
+    {
+        return "operations";
+    }
+    [[nodiscard]] paperbreak::Result<std::vector<paperbreak::monitoring::MetricPoint>> collect(
+        std::stop_token) noexcept override
+    {
+        using Point = paperbreak::monitoring::MetricPoint;
+        return paperbreak::Result<std::vector<Point>>::success(
+            {{.name = "system.nvme_write_bytes_per_second",
+              .value = 0.0,
+              .unit = "bytes/second",
+              .available = false},
+             {.name = "uplink.state",
+              .value = std::string{"not-initialized"},
+              .unit = "state",
+              .available = false},
+             {.name = "uplink.last_heartbeat_epoch_ms",
+              .value = std::uint64_t{0U},
+              .unit = "unix_milliseconds",
+              .available = false},
+             {.name = "event.current_count",
+              .value = std::uint64_t{0U},
+              .unit = "count",
+              .available = false},
+             {.name = "uplink.pending_upload_tasks",
+              .value = std::uint64_t{0U},
+              .unit = "count",
+              .available = false}});
+    }
+};
+
+class CameraMetricSource final : public paperbreak::monitoring::IMetricSource
+{
+  public:
+    CameraMetricSource(std::weak_ptr<ConfigurationResources> configuration,
+                       std::weak_ptr<paperbreak::camera::CameraControlRuntime> cameras)
+        : configuration_(std::move(configuration)), cameras_(std::move(cameras))
+    {
+    }
+
+    [[nodiscard]] std::string_view source_name() const noexcept override
+    {
+        return "cameras";
+    }
+
+    [[nodiscard]] paperbreak::Result<std::vector<paperbreak::monitoring::MetricPoint>> collect(
+        std::stop_token stop_token) noexcept override
+    {
+        using Point = paperbreak::monitoring::MetricPoint;
+        auto configuration = configuration_.lock();
+        auto cameras = cameras_.lock();
+        if (!configuration || !cameras)
+            return paperbreak::Result<std::vector<Point>>::failure(paperbreak::make_error(
+                "SYS_MONITORING_SAMPLE_FAILED", paperbreak::Severity::warning, "相机指标源已失效",
+                "monitoring", "monitoring.camera.collect", true));
+        auto snapshot = configuration->repository.snapshot();
+        if (!snapshot)
+            return paperbreak::Result<std::vector<Point>>::failure(snapshot.error());
+        std::vector<Point> points;
+        points.reserve(snapshot.value().effective->cameras.size() * 13U);
+        for (const auto& configured : snapshot.value().effective->cameras)
+        {
+            if (stop_token.stop_requested())
+                break;
+            const std::string prefix = "camera." + configured.id + '.';
+            auto current = cameras->get(configured.id, configured.serial_number);
+            if (!current)
+            {
+                points.push_back({.name = prefix + "state",
+                                  .value = std::string{"unavailable"},
+                                  .unit = "state",
+                                  .available = false});
+                continue;
+            }
+            points.push_back({.name = prefix + "state",
+                              .value = std::string{paperbreak::camera::camera_control_state_name(
+                                  current.value().state)},
+                              .unit = "state"});
+            const auto actual = current.value().actual;
+            const auto add_optional = [&](const std::string& name,
+                                          const std::optional<double> value,
+                                          const std::string& unit) {
+                points.push_back({.name = prefix + name,
+                                  .value = value.value_or(0.0),
+                                  .unit = unit,
+                                  .available = value.has_value()});
+            };
+            add_optional("exposure_us", actual ? actual->exposure_us : std::optional<double>{},
+                         "microseconds");
+            add_optional("gain_db", actual ? actual->gain_db : std::optional<double>{}, "dB");
+            add_optional("configured_fps", actual ? actual->frame_rate : std::optional<double>{},
+                         "fps");
+            const auto unavailable = [&](const std::string& name, const std::string& unit) {
+                points.push_back(
+                    {.name = prefix + name, .value = 0.0, .unit = unit, .available = false});
+            };
+            const auto acquisition = current.value().acquisition;
+            points.push_back({.name = prefix + "actual_fps",
+                              .value = acquisition ? acquisition->actual_fps : 0.0,
+                              .unit = "fps",
+                              .available = acquisition.has_value()});
+            points.push_back(
+                {.name = prefix + "dropped_frames_total",
+                 .value = acquisition ? acquisition->camera_frame_gaps : std::uint64_t{0U},
+                 .unit = "count",
+                 .available = acquisition.has_value()});
+            points.push_back(
+                {.name = prefix + "receive_timeouts_total",
+                 .value = acquisition ? acquisition->capture_timeouts : std::uint64_t{0U},
+                 .unit = "count",
+                 .available = acquisition.has_value()});
+            const auto last_frame = acquisition
+                                        ? acquisition->last_frame_wall_clock_time
+                                        : std::optional<paperbreak::camera::WallClockTime>{};
+            points.push_back(
+                {.name = prefix + "last_frame_epoch_ms",
+                 .value = last_frame ? static_cast<std::uint64_t>(
+                                           std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               last_frame->time_since_epoch())
+                                               .count())
+                                     : std::uint64_t{0U},
+                 .unit = "unix_milliseconds",
+                 .available = last_frame.has_value()});
+            unavailable("brightness", "level");
+            unavailable("temperature_celsius", "celsius");
+            unavailable("reconnects_total", "count");
+            points.push_back({.name = prefix + "bandwidth_bytes_per_second",
+                              .value = acquisition ? acquisition->bandwidth_bytes_per_second : 0.0,
+                              .unit = "bytes/second",
+                              .available = acquisition.has_value()});
+        }
+        return paperbreak::Result<std::vector<Point>>::success(std::move(points));
+    }
+
+  private:
+    std::weak_ptr<ConfigurationResources> configuration_;
+    std::weak_ptr<paperbreak::camera::CameraControlRuntime> cameras_;
+};
+
+class AlgorithmPlaceholderMetricSource final : public paperbreak::monitoring::IMetricSource
+{
+  public:
+    [[nodiscard]] std::string_view source_name() const noexcept override
+    {
+        return "algorithm";
+    }
+
+    [[nodiscard]] paperbreak::Result<std::vector<paperbreak::monitoring::MetricPoint>> collect(
+        std::stop_token) noexcept override
+    {
+        using Point = paperbreak::monitoring::MetricPoint;
+        return paperbreak::Result<std::vector<Point>>::success(
+            {{.name = "algorithm.state", .value = std::string{"not-initialized"}, .unit = "state"},
+             {.name = "algorithm.frame_duration.current_ms",
+              .value = 0.0,
+              .unit = "milliseconds",
+              .available = false},
+             {.name = "algorithm.frame_duration.average_ms",
+              .value = 0.0,
+              .unit = "milliseconds",
+              .available = false},
+             {.name = "algorithm.frame_duration.maximum_ms",
+              .value = 0.0,
+              .unit = "milliseconds",
+              .available = false},
+             {.name = "algorithm.queue.depth",
+              .value = std::uint64_t{0U},
+              .unit = "count",
+              .available = false},
+             {.name = "algorithm.skipped_frames_total",
+              .value = std::uint64_t{0U},
+              .unit = "count",
+              .available = false},
+             {.name = "algorithm.candidates_total",
+              .value = std::uint64_t{0U},
+              .unit = "count",
+              .available = false},
+             {.name = "algorithm.confirmed_total",
+              .value = std::uint64_t{0U},
+              .unit = "count",
+              .available = false},
+             {.name = "algorithm.false_positives_total",
+              .value = std::uint64_t{0U},
+              .unit = "count",
+              .available = false}});
+    }
+};
+
 nlohmann::json alarm_push_json(const paperbreak::monitoring::AlarmChange& change)
 {
     nlohmann::json details = nlohmann::json::object();
@@ -916,10 +1108,13 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         {.label = "cache",
          .path = resolve_config_path(config_path, loaded.value().effective->storage.cache_root)},
         {.label = "log", .path = log_config.directory}};
-    const std::array<std::shared_ptr<paperbreak::monitoring::IMetricSource>, 3U> sources{
+    const std::array<std::shared_ptr<paperbreak::monitoring::IMetricSource>, 6U> sources{
         paperbreak::platform::make_windows_system_metric_source(std::move(disk_paths)),
         std::make_shared<IpcMetricSource>(ipc_server),
-        std::make_shared<DatabasePlaceholderMetricSource>()};
+        std::make_shared<DatabasePlaceholderMetricSource>(),
+        std::make_shared<OperationalPlaceholderMetricSource>(),
+        std::make_shared<CameraMetricSource>(configuration, cameras),
+        std::make_shared<AlgorithmPlaceholderMetricSource>()};
     for (const auto& source : sources)
     {
         auto registered = monitor->register_source(source);

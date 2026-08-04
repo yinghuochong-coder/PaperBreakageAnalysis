@@ -784,6 +784,18 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M4-06 状态、报警、日志和诊断
 
+状态：completed
+
+负责人：Codex
+
+开始日期：2026-08-04
+
+完成日期：2026-08-04
+
+执行记录：`.agent/plans/m4-06-status-alarm-log-diagnostics.md`
+
+完成证据（2026-08-04）：服务新增系统、IPC、数据库、相机、算法及未初始化业务来源的统一指标快照；相机采集统计从既有有界采集工作线程只读暴露，实际帧率、帧缺口、超时、最近帧时间和带宽不再被误标为不可用，尚未接入的 M5/M6/M8 或设备可选数据明确返回 `available=false`。控制台以第四条隔离 IPC 连接每秒同步完整指标、当前/进程内历史报警和最近日志，支持活动范围、最低等级、来源/分类筛选、管理员确认、详情、报警 CSV 及断线过期标识。维护页和托盘均可请求 `system.exportDiagnostics`；服务构建固定 9 条目的 8 MiB 有界 ZIP，递归脱敏 credential/certificate reference、password、token、secret/private-key 字段并记录审计，客户端用容量 1 的单工作线程和 `QSaveFile` 原子落盘。Debug/Release 构建通过，两个配置的通用 unit 各 173 项及离屏 Qt smoke 均通过；完整 CTest 在 Release 为 22/23、Debug 为 21/23，唯一共同失败 `service_console_smoke` 因机器上已有不可读取详情的 `PaperBreakEdgeService` 进程占用固定 IPC（Win32 5），Debug 的安装树测试另因该进程占用 MVS DLL 目标而失败，未擅自终止现有服务。格式检查确认本任务文件通过后，被未修改的 `src/console/src/preview_client.cpp` 既有格式问题阻断。未执行实体相机、已安装生产服务或人工点击导出验证，不宣称通过。
+
 实施系统/相机/算法指标、当前/历史报警、确认、筛选、最近日志和诊断包导出；导出配置必须脱敏。
 
 退出门禁 M4：

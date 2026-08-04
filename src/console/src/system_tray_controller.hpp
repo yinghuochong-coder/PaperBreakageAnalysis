@@ -18,6 +18,7 @@ struct TrayCallbacks final
     std::function<void()> show_status;
     std::function<void()> restart_service;
     std::function<void()> open_event_directory;
+    std::function<void()> export_diagnostics;
     std::function<void()> show_about;
     std::function<void()> quit_interface;
 };

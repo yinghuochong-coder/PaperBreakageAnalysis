@@ -1,6 +1,7 @@
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/navigation_model.hpp"
+#include "paperbreak/console/operations_client.hpp"
 #include "paperbreak/console/preview_client.hpp"
 #include "paperbreak/console/tray_status_model.hpp"
 #include "paperbreak/ipc/server.hpp"
@@ -14,7 +15,10 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -151,6 +155,54 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
     std::atomic_uint64_t list_requests{};
     std::atomic_uint64_t operation_requests{};
     std::string last_command;
+};
+
+class OperationsHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage& request, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        if (request.command == "system.getMetrics")
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     R"({"snapshotVersion":4,"sampledAt":"2026-08-04T00:00:00.000Z","metrics":[{"name":"service.uptime.seconds","value":12.5,"unit":"seconds","available":true},{"name":"algorithm.state","value":"not-initialized","unit":"state","available":true},{"name":"camera.CAM01.actual_fps","value":0.0,"unit":"fps","available":false}],"truncated":false})",
+                 .binary = {}});
+        if (request.command == "alarm.list")
+        {
+            std::scoped_lock lock{mutex};
+            last_alarm_payload = request.payload_json;
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     R"({"registryRevision":2,"alarms":[{"alarmId":9,"revision":2,"code":"CAMERA_OFFLINE","severity":"Error","source":"CAM01","firstOccurredAt":"2026-08-04T00:00:00.000Z","lastOccurredAt":"2026-08-04T00:00:01.000Z","active":true,"occurrenceCount":2,"message":"相机离线","details":{"reason":"timeout"},"acknowledged":false}],"truncated":false,"nextBeforeAlarmId":null})",
+                 .binary = {}});
+        }
+        if (request.command == "log.tail")
+        {
+            std::scoped_lock lock{mutex};
+            last_log_payload = request.payload_json;
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     R"({"firstAvailableSequence":1,"latestSequence":2,"records":[{"sequence":2,"timestamp":"2026-08-04T00:00:02.000Z","threadId":7,"category":"camera","level":"warning","message":"camera timeout"}],"truncated":false})",
+                 .binary = {}});
+        }
+        if (request.command == "alarm.acknowledge")
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = R"({"alarmId":9,"acknowledged":true})", .binary = {}});
+        if (request.command == "system.exportDiagnostics")
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     R"({"fileName":"diagnostics.zip","contentType":"application/zip","size":4,"redacted":true})",
+                 .binary = {std::byte{0x50}, std::byte{0x4b}, std::byte{0x03}, std::byte{0x04}}});
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+            paperbreak::make_error("IPC_REQUEST_INVALID", paperbreak::Severity::error, "unexpected",
+                                   "test", "operations.handle"));
+    }
+
+    std::mutex mutex;
+    std::string last_alarm_payload;
+    std::string last_log_payload;
 };
 
 class PreviewSubscriptionHandler final : public paperbreak::ipc::IRequestHandler
@@ -515,6 +567,93 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     client.stop();
     EXPECT_TRUE(latest.stale);
     stop_server(server);
+}
+
+TEST(OperationsClient, QueriesFiltersAcknowledgesAndExportsThroughBoundedWorker)
+{
+    const std::string name = state_name();
+    auto handler = std::make_shared<OperationsHandler>();
+    paperbreak::ipc::IpcServer server(handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name));
+    ASSERT_TRUE(server.start());
+
+    paperbreak::console::OperationsSnapshot latest;
+    paperbreak::console::OperationsClient client([&](const auto& snapshot) { latest = snapshot; },
+                                                 client_options(name));
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until(
+        [&] { return !latest.metrics_stale && !latest.alarms_stale && !latest.logs_stale; }));
+    ASSERT_EQ(latest.metrics.size(), 3U);
+    EXPECT_EQ(latest.metrics[1].value, "not-initialized");
+    EXPECT_FALSE(latest.metrics[2].available);
+    ASSERT_EQ(latest.alarms.size(), 1U);
+    EXPECT_EQ(latest.alarms.front().details.front().second, "timeout");
+    ASSERT_EQ(latest.logs.size(), 1U);
+    EXPECT_EQ(latest.logs.front().category, "camera");
+
+    ASSERT_TRUE(client.query_alarms({.active = false,
+                                     .minimum_severity = std::string{"Warning"},
+                                     .source = std::string{"CAM01"}}));
+    ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{handler->mutex};
+        const auto payload = nlohmann::json::parse(handler->last_alarm_payload);
+        return payload.value("active", true) == false &&
+               payload.value("minimumSeverity", "") == "Warning" &&
+               payload.value("source", "") == "CAM01";
+    }));
+    ASSERT_TRUE(client.query_logs(
+        {.category = std::string{"camera"}, .minimum_level = std::string{"warning"}}));
+    ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{handler->mutex};
+        const auto payload = nlohmann::json::parse(handler->last_log_payload);
+        return payload.value("minimumLevel", "") == "warning" &&
+               payload.at("categories").front() == "camera";
+    }));
+
+    ASSERT_TRUE(client.acknowledge(9U));
+    auto busy = client.export_diagnostics("ignored-while-busy.zip");
+    ASSERT_FALSE(busy);
+    EXPECT_EQ(busy.error().business_code, "IPC_BUSY");
+    ASSERT_TRUE(wait_until([&] { return !latest.operation_pending; }));
+
+    static std::atomic_uint64_t file_sequence{};
+    const auto base = std::filesystem::temp_directory_path() /
+                      ("paperbreak-operations-" + std::to_string(++file_sequence));
+    std::filesystem::create_directories(base);
+    const auto diagnostic = base / "diagnostics.zip";
+    ASSERT_TRUE(client.export_diagnostics(diagnostic));
+    ASSERT_TRUE(wait_until(
+        [&] { return !latest.operation_pending && latest.exported_path == diagnostic; }));
+    std::ifstream zip{diagnostic, std::ios::binary};
+    const std::vector<unsigned char> signature{std::istreambuf_iterator<char>{zip},
+                                               std::istreambuf_iterator<char>{}};
+    ASSERT_EQ(signature.size(), 4U);
+    EXPECT_EQ(signature[0], 0x50U);
+    EXPECT_EQ(signature[1], 0x4bU);
+    zip.close();
+
+    const auto csv = base / "alarms.csv";
+    ASSERT_TRUE(client.export_alarm_csv(csv));
+    ASSERT_TRUE(
+        wait_until([&] { return !latest.operation_pending && latest.exported_path == csv; }));
+    std::ifstream csv_input{csv, std::ios::binary};
+    const std::string csv_text{std::istreambuf_iterator<char>{csv_input},
+                               std::istreambuf_iterator<char>{}};
+    EXPECT_NE(csv_text.find("CAMERA_OFFLINE"), std::string::npos);
+    EXPECT_NE(csv_text.find("相机离线"), std::string::npos);
+    csv_input.close();
+
+    client.stop();
+    auto disconnected_query = client.query_logs({});
+    ASSERT_FALSE(disconnected_query);
+    EXPECT_EQ(disconnected_query.error().business_code, "IPC_NOT_CONNECTED");
+    auto stale_export = client.export_alarm_csv(base / "stale.csv");
+    ASSERT_FALSE(stale_export);
+    EXPECT_EQ(stale_export.error().business_code, "IPC_NOT_CONNECTED");
+    stop_server(server);
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(base, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
 }
 
 TEST(ConsoleNavigationModel, DefinesStableUniquePageOrder)

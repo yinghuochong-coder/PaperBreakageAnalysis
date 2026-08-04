@@ -2,12 +2,14 @@
 
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
+#include "paperbreak/console/operations_client.hpp"
 #include "paperbreak/console/preview_client.hpp"
 #include "theme_controller.hpp"
 
 #include <QMainWindow>
 
 #include <cstddef>
+#include <filesystem>
 
 class QLabel;
 class QListWidget;
@@ -17,6 +19,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QSpinBox;
 class QLineEdit;
+class QTableWidget;
 class QWidget;
 
 namespace paperbreak::console
@@ -36,17 +39,29 @@ struct ThemeUiActions final
     std::function<void(ThemeMode)> set_mode;
 };
 
+struct OperationsUiActions final
+{
+    std::function<void()> refresh;
+    std::function<Result<void>(AlarmFilter)> query_alarms;
+    std::function<Result<void>(LogFilter)> query_logs;
+    std::function<Result<void>(std::uint64_t)> acknowledge;
+    std::function<Result<void>(std::filesystem::path)> export_diagnostics;
+    std::function<Result<void>(std::filesystem::path)> export_alarm_csv;
+};
+
 class MainWindow final : public QMainWindow
 {
   public:
     explicit MainWindow(std::function<void(bool)> preview_pause_changed = {},
                         CameraUiActions camera_actions = {}, ThemeUiActions theme_actions = {},
-                        QWidget* parent = nullptr);
+                        OperationsUiActions operations_actions = {}, QWidget* parent = nullptr);
 
     void apply_snapshot(const ClientStateSnapshot& snapshot);
     void update_clock();
     void apply_preview_snapshot(const PreviewSnapshot& snapshot);
     void apply_camera_snapshot(const CameraClientSnapshot& snapshot);
+    void apply_operations_snapshot(const OperationsSnapshot& snapshot);
+    void request_diagnostics_export();
 
     [[nodiscard]] std::size_t page_count() const noexcept;
     [[nodiscard]] int current_page_index() const noexcept;
@@ -55,6 +70,7 @@ class MainWindow final : public QMainWindow
     [[nodiscard]] std::size_t discovered_camera_count() const noexcept;
     [[nodiscard]] bool camera_device_controls_disabled() const noexcept;
     [[nodiscard]] bool select_theme_mode(ThemeMode mode) noexcept;
+    [[nodiscard]] bool operations_pages_ready() const noexcept;
 
   private:
     void closeEvent(QCloseEvent* event) override;
@@ -63,6 +79,8 @@ class MainWindow final : public QMainWindow
     void update_camera_controls();
     void run_camera_control(const std::string& command, bool confirmation_required);
     void show_camera_result(const Result<void>& result);
+    void show_operations_result(const Result<void>& result);
+    void update_alarm_details();
 
     QLabel* connection_banner_{};
     QLabel* service_value_{};
@@ -106,6 +124,7 @@ class MainWindow final : public QMainWindow
     QSpinBox* camera_packet_delay_{};
     CameraUiActions camera_actions_;
     ThemeUiActions theme_actions_;
+    OperationsUiActions operations_actions_;
     CameraClientSnapshot camera_snapshot_;
     std::string camera_editor_id_;
     std::uint64_t camera_editor_revision_{};
@@ -113,6 +132,20 @@ class MainWindow final : public QMainWindow
     QPushButton* preview_pause_button_{};
     std::function<void(bool)> preview_pause_changed_;
     bool preview_paused_{};
+    QTableWidget* metrics_table_{};
+    QComboBox* alarm_scope_{};
+    QComboBox* alarm_severity_{};
+    QLineEdit* alarm_source_{};
+    QTableWidget* alarm_table_{};
+    QLabel* alarm_details_{};
+    QPushButton* alarm_acknowledge_{};
+    QPushButton* alarm_export_{};
+    QComboBox* log_category_{};
+    QComboBox* log_level_{};
+    QTableWidget* log_table_{};
+    QLabel* operations_status_{};
+    QPushButton* diagnostics_export_{};
+    OperationsSnapshot operations_snapshot_;
     QListWidget* navigation_{};
     QStackedWidget* pages_{};
     QComboBox* theme_selector_{};

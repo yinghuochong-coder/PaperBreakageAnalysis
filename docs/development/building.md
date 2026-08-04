@@ -112,6 +112,10 @@ cmake --build --preset local-windows-vs2026-debug --target format-check
 cmake --preset local-windows-vs2026-static-analysis
 cmake --build --preset local-windows-vs2026-static-analysis
 ctest --preset local-windows-vs2026-debug --output-junit out/test-results/debug-ctest.xml
+
+
+cmake --install out\build\local-windows-vs2026-debug --config Debug --prefix out\build\local-windows-vs2026-debug\test-install
+
 ```
 
 格式检查使用 clang-format 的 `--dry-run --Werror`。静态分析预设对生产源码目标启用 MSVC `/analyze` 并跳过 GoogleTest/OpenCV smoke 目标，第三方头由 `/analyze:external-` 排除；普通 Debug/Release 不承担其额外构建成本。所有项目目标默认 `/utf-8 /W4 /WX /permissive-`。
@@ -119,9 +123,8 @@ ctest --preset local-windows-vs2026-debug --output-junit out/test-results/debug-
 ## 6. 安装布局
 
 ```powershell
-cmake --install out\build\local-windows-vs2026-release `
-  --config Release `
-  --prefix out\install\local-windows-vs2026-release
+cmake --install out\build\local-windows-vs2026-debug --config Debug --prefix out\install\local-windows-vs2026-debug
+cmake --install out\build\local-windows-vs2026-release --config Release --prefix out\install\local-windows-vs2026-release
 ```
 
 当前安装布局包含 `bin`、`lib` 和 `include`，并通过 CMake/Qt 部署脚本复制服务所需的 vcpkg 动态库、Qt 动态库和 Qt 平台插件。`bin` 固定包含同为 4.8.0.3 的 `MvCameraControl.dll` 和 GigE 动态传输组件 `MVGigEVisionSDK.dll`；不复制未使用的 USB、采集卡、GUI Runtime 或模拟相机库。它不制作安装器，也不替代 M9 的驱动、签名、完整许可证/SBOM 和企业部署物料。CTest 会检查必需运行时文件，从安装树启动两个程序的 `--version` smoke，并扫描产物，拒绝泄漏注入的 Qt、OpenCV、MVS 或 vcpkg 根路径。

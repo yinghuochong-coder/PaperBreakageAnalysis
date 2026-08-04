@@ -2,6 +2,7 @@ add_library(paperbreak_console_model STATIC
     src/camera_client.cpp
     src/client_state_store.cpp
     src/navigation_model.cpp
+    src/operations_client.cpp
     src/preview_client.cpp
     src/tray_status_model.cpp)
 target_link_libraries(paperbreak_console_model
@@ -10,6 +11,7 @@ target_link_libraries(paperbreak_console_model
         paperbreak_ipc
         paperbreak_compiler_options
     PRIVATE
+        Qt6::Core
         Qt6::Gui
         nlohmann_json::nlohmann_json)
 target_include_directories(paperbreak_console_model

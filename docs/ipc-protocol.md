@@ -36,6 +36,7 @@ binaryLength bytes optional binary payload
 | 指标注册表/指标源 | 1024 项/64 个 |
 | 活动报警/已清除历史 | 1024 条/4096 条 |
 | 近期日志内存环 | 默认 2048 条 |
+| 诊断 ZIP 内部上限 | 8 MiB |
 | 不完整帧总截止时间 | 5 秒 |
 
 长度在分配对应负载前校验。v1 不包含 CRC；完整性由长度边界、UTF-8 JSON 解析和 DTO 校验保证。
@@ -150,6 +151,36 @@ requestId 作为 correlationId、`ConfigChangeSource::local_ipc`（审计序列�
 
 指标快照按来源原子替换。数据库模块在 M5 前以 `database.state=not-initialized` 和
 `database.available=false` 明确表示尚未初始化，不等价于数据库故障。
+生产服务每秒采集 Windows 系统/进程/磁盘、IPC 和相机指标；相机采集运行时提供实际帧率、
+帧缺口、接收超时、最近帧 Unix 毫秒时间、当前曝光/增益和采集带宽。算法、上位机、事件、
+NVMe 写入率以及设备不支持的亮度/温度/重连数据，在对应里程碑或设备能力接入前保留稳定指标名，
+并以 `available=false` 明确表示不可用，客户端不得把零值解释为实际测量结果。
+
+### `system.exportDiagnostics`
+
+权限：已认证本机用户。请求 payload 必须为空；请求不接受二进制负载。服务记录脱敏后的
+audit 日志，不接受客户端提供的路径，也不在服务端创建诊断临时文件。
+
+成功响应 JSON 包含 `fileName`、`contentType="application/zip"`、`size` 和
+`redacted=true`，二进制负载为 ZIP store 格式。包的内部上限为 8 MiB，且仍受 IPC 16 MiB
+通用二进制上限保护。固定条目为：
+
+```text
+manifest.json
+config-redacted.json
+system.json
+metrics.json
+cameras.json
+network.json
+alarms.json
+recent-logs.json
+version.json
+```
+
+配置中的 credential/certificate reference、password、token、secret 和 private key 类字段
+递归替换为 `<redacted>`；日志和报警沿用服务端既有脱敏结果。包不包含滚动日志文件、原始图像、
+密钥或客户端任意路径。报警和日志各取最近最多 200 条并在 JSON 中保留 `truncated`；M5-07 前报警
+历史仍为当前服务进程内历史。
 
 ### `alarm.list`
 

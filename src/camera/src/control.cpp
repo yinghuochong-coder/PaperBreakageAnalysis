@@ -207,6 +207,8 @@ Result<CameraControlSnapshot> CameraControlRuntime::read(Session& s)
 {
     CameraControlSnapshot r{
         .camera_id = s.id, .serial_number = s.serial, .state = s.state, .last_error = s.error};
+    if (s.acquisition)
+        r.acquisition = s.acquisition->snapshot();
     if (!s.device)
         return Result<CameraControlSnapshot>::success(std::move(r));
     r.device = s.device->descriptor();

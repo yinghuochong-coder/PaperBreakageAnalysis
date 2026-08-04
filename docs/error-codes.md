@@ -95,6 +95,8 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
 | --- | --- | ---: | --- |
 | `SYS_INTERNAL_ERROR` | Error | 否 | 未分类的内部不变量或顶层异常；必须保留模块/操作并限频，不能掩盖为成功 |
+| `SYS_DIAGNOSTIC_TOO_LARGE` | Error | 否 | 脱敏诊断 ZIP 的条目、条目数或总大小超过 8 MiB 内部上限；拒绝返回部分包 |
+| `SYS_DIAGNOSTIC_EXPORT_FAILED` | Error | 视 I/O | Qt 客户端无法创建、写入或原子提交用户选择的诊断/报警导出文件；现有目标不被部分覆盖 |
 | `SYS_SERVICE_START_FAILED` | Critical | 视阶段 | 必需启动阶段失败；按逆序回滚已启动组件 |
 | `SYS_SERVICE_INSTALL_FAILED` | Error | 否 | SCM 注册或配置收敛失败；保留 Win32 原始码，新建服务的扩展配置失败时尝试删除回滚 |
 | `SYS_SERVICE_UNINSTALL_FAILED` | Error | 视服务状态 | 服务停止、等待或删除失败；停止超时保留服务注册，不谎报卸载成功 |
