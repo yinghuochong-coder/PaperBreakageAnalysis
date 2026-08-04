@@ -836,6 +836,18 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M5-02 模拟检测器和人工触发
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-04
+
+完成日期：2026-08-04
+
+执行记录：`.agent/plans/m5-02-mock-detector-manual-trigger.md`
+
+完成证据（2026-08-04）：`paperbreak_algorithm` 新增 M5 最小 `ITriggerDetector`、`TriggerResult`、检测区域和稳定触发来源契约，人工来源精确序列化为 `ManualTest`；独立 `paperbreak_algorithm_mock` 只链接算法接口，提供人工、固定单调时间周期、相邻帧平均灰度变化和 Mono8 ROI 纸幅占比四种确定性触发。人工请求使用容量 1 的原子槽，重复请求合并且错误帧不消费请求；每实例绑定逻辑相机，校验不完整帧、序号、单调时间、像素格式、stride 和 ROI。8 项定向测试覆盖四种模式、精确阈值/周期边界、stride 填充、有界人工请求、非法配置及错误后恢复；Debug/Release `/W4 /WX` 全量构建和两套非硬件 CTest 均为 23/23。任务文件 clang-format 与 `git diff --check` 通过，全仓格式目标仍被未修改的 `src/console/src/preview_client.cpp` 既有格式问题阻断。未接入 M5-03 状态机、服务配置、IPC/UI，也未执行实体相机测试。
+
 实现手动、固定周期、灰度变化和 ROI 占比触发；人工事件写入 `triggerSource=ManualTest`。检测器只依赖算法接口，不依赖相机实现。
 
 ### M5-03 候选事件状态机

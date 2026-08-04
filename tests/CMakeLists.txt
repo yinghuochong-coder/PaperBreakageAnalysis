@@ -1,5 +1,6 @@
 add_executable(PaperBreakTests
     test_main.cpp
+    unit/algorithm_mock_trigger_tests.cpp
     unit/camera_acquisition_tests.cpp
     unit/camera_model_tests.cpp
     unit/camera_state_tests.cpp
@@ -23,6 +24,7 @@ add_executable(PaperBreakTests
 target_link_libraries(PaperBreakTests
     PRIVATE
         paperbreak_common
+        paperbreak_algorithm_mock
         paperbreak_camera
         paperbreak_camera_mock
         paperbreak_console_model
@@ -62,7 +64,7 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Camera*:Pipeline*:Event*:Common*:Result*:Version*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
+    COMMAND PaperBreakTests --gtest_filter=Algorithm*:Camera*:Pipeline*:Event*:Common*:Result*:Version*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
 set_tests_properties(unit PROPERTIES
     LABELS "unit"
     ENVIRONMENT "PATH=$<TARGET_FILE_DIR:Qt6::Core>\\;$<TARGET_FILE_DIR:opencv_core>\\;$ENV{PATH}")
