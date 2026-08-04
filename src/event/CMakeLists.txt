@@ -1,5 +1,6 @@
 add_library(paperbreak_event STATIC
     src/candidate_event.cpp
+    src/event_window.cpp
     src/memory_ring.cpp
     src/module.cpp)
 target_link_libraries(paperbreak_event
