@@ -1,5 +1,6 @@
 #include "paperbreak/service/event_runtime.hpp"
 
+#include "paperbreak/algorithm/classical_vision_detector.hpp"
 #include "paperbreak/algorithm/mock_trigger_detector.hpp"
 #include "paperbreak/event/candidate_event.hpp"
 #include "paperbreak/event/event_window.hpp"
@@ -57,27 +58,46 @@ struct Lane final
 {
     std::string camera_id;
     std::unique_ptr<event::MemoryRing> ring;
-    std::unique_ptr<algorithm::mock::MockTriggerDetector> detector;
+    std::unique_ptr<algorithm::DetectorHost> detector;
     std::uint64_t latest_submitted_sequence{};
     std::uint64_t manual_after_sequence{};
+    std::optional<std::uint64_t> manual_target_sequence;
     bool manual_pending{};
 };
 
 struct EventPipelineState final
 {
     config::EdgeConfig configuration;
+    std::unique_ptr<algorithm::DetectorPluginRegistry> registry;
     std::vector<Lane> lanes;
     std::unique_ptr<event::CandidateEventManager> candidates;
     std::unique_ptr<event::EventWindowManager> windows;
     std::map<std::string, std::string> source_to_canonical;
     camera::MonotonicTime last_monotonic_time{};
+    std::atomic_bool degraded{};
 };
 
-Result<std::unique_ptr<EventPipelineState>> build_pipeline(const config::EdgeConfig& configuration,
-                                                           const std::size_t frame_queue_capacity)
+Result<std::unique_ptr<EventPipelineState>> build_pipeline(
+    const config::EdgeConfig& configuration, const std::size_t frame_queue_capacity,
+    const std::function<Result<void>(algorithm::DetectorPluginRegistry&)>& registry_configurer)
 {
     auto state = std::make_unique<EventPipelineState>();
     state->configuration = configuration;
+    state->registry = std::make_unique<algorithm::DetectorPluginRegistry>();
+    if (auto registered = algorithm::mock::register_mock_trigger_detector(*state->registry);
+        !registered)
+        return Result<std::unique_ptr<EventPipelineState>>::failure(std::move(registered).error());
+    if (auto registered =
+            algorithm::classical::register_classical_vision_detector(*state->registry);
+        !registered)
+        return Result<std::unique_ptr<EventPipelineState>>::failure(std::move(registered).error());
+    if (registry_configurer)
+    {
+        auto configured = registry_configurer(*state->registry);
+        if (!configured)
+            return Result<std::unique_ptr<EventPipelineState>>::failure(
+                std::move(configured).error());
+    }
     state->lanes.reserve(configuration.cameras.size());
     for (const auto& camera : configuration.cameras)
     {
@@ -100,22 +120,51 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(const config::EdgeCon
              .memory_budget_bytes = configuration.acquisition.frame_pool_capacity});
         if (!plan)
             return Result<std::unique_ptr<EventPipelineState>>::failure(std::move(plan).error());
-        auto detector = algorithm::mock::MockTriggerDetector::create(
-            {.camera_id = camera.id, .mode = algorithm::mock::MockTriggerMode::manual_only});
-        if (!detector)
-            return Result<std::unique_ptr<EventPipelineState>>::failure(
-                std::move(detector).error());
+        std::unique_ptr<algorithm::DetectorHost> detector;
+        if (configuration.algorithm.enabled)
+        {
+            detector = std::make_unique<algorithm::DetectorHost>(*state->registry);
+            const std::string plugin_id = configuration.algorithm.type == "mock"
+                                              ? std::string{algorithm::mock::mock_trigger_plugin_id}
+                                              : configuration.algorithm.type;
+            algorithm::DetectorConfig detector_config{
+                .plugin_id = plugin_id,
+                .camera_id = camera.id,
+                .revision = configuration.config_revision,
+                .processing_timeout = 100ms,
+            };
+            if (plugin_id == algorithm::classical::classical_vision_plugin_id)
+            {
+                detector_config.parameters = {
+                    {.name = "roi_offset_x",
+                     .value = static_cast<std::int64_t>(configuration.algorithm.roi.offset_x)},
+                    {.name = "roi_offset_y",
+                     .value = static_cast<std::int64_t>(configuration.algorithm.roi.offset_y)},
+                    {.name = "roi_width",
+                     .value = static_cast<std::int64_t>(configuration.algorithm.roi.width)},
+                    {.name = "roi_height",
+                     .value = static_cast<std::int64_t>(configuration.algorithm.roi.height)},
+                };
+            }
+            auto loaded = detector->load(detector_config);
+            if (!loaded)
+                return Result<std::unique_ptr<EventPipelineState>>::failure(
+                    std::move(loaded).error());
+        }
+        // Keep the configured history available even when detection is delayed by a full
+        // algorithm queue. The pool plan already budgets these queue-held frame buffers.
+        const auto ring_capacity = plan.value().ring_capacity_frames + frame_queue_capacity;
         const auto maximum_references = plan.value().ring_capacity_frames * 8U;
         state->lanes.push_back(
             {.camera_id = camera.id,
              .ring = std::make_unique<event::MemoryRing>(event::MemoryRingOptions{
                  .camera_id = camera.id,
-                 .capacity_frames = plan.value().ring_capacity_frames,
+                 .capacity_frames = ring_capacity,
                  .required_history_seconds =
                      static_cast<double>(configuration.event.pre_event_seconds),
                  .maximum_active_leases = 8U,
                  .maximum_leased_frame_references = maximum_references}),
-             .detector = std::move(detector).value()});
+             .detector = std::move(detector)});
     }
     if (state->lanes.empty())
         return Result<std::unique_ptr<EventPipelineState>>::success(std::move(state));
@@ -130,9 +179,15 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(const config::EdgeCon
     auto candidates = event::CandidateEventManager::create(
         {.cameras = std::move(candidate_bindings),
          .candidate_consecutive_frames = 1U,
-         .confirmation_consecutive_frames = 2U,
+         .confirmation_consecutive_frames = configuration.algorithm.consecutive_frames,
+         .candidate_confidence_threshold = configuration.algorithm.candidate_threshold,
+         .confirmation_confidence_threshold = configuration.algorithm.confirmation_threshold,
+         .external_confirmation = configuration.plant_io.enabled
+                                      ? event::ExternalConfirmationPolicy::required_active
+                                      : event::ExternalConfirmationPolicy::not_used,
          .candidate_timeout = std::chrono::seconds{configuration.event.max_event_seconds},
-         .pre_event_duration = std::chrono::seconds{configuration.event.pre_event_seconds}});
+         .pre_event_duration = std::chrono::seconds{configuration.event.pre_event_seconds},
+         .cooldown_duration = std::chrono::milliseconds{configuration.algorithm.cooldown_ms}});
     if (!candidates)
         return Result<std::unique_ptr<EventPipelineState>>::failure(std::move(candidates).error());
     auto windows = event::EventWindowManager::create(
@@ -180,7 +235,40 @@ camera::WallClockTime latest_wall_time(const event::FrozenEventWindow& window)
     return latest;
 }
 
+algorithm::DetectionResult manual_detection(const camera::FrameView& frame)
+{
+    return {
+        .triggered = true,
+        .trigger_source = algorithm::TriggerSource::manual_test,
+        .camera_id = frame.camera_id(),
+        .sequence_number = frame.sequence_number(),
+        .camera_frame_number = frame.camera_frame_number(),
+        .monotonic_time = frame.received_monotonic_time(),
+        .wall_clock_time = frame.received_wall_clock_time(),
+        .evaluated_region = {.width = frame.geometry().width, .height = frame.geometry().height},
+        .reason = "manual-test-requested",
+        .anomalous = true,
+        .candidate_type = algorithm::DetectionCandidateType::indeterminate,
+        .confidence = 1.0,
+        .detector_version = "manual-trigger/1.0",
+        .model_version = "none"};
+}
+
 } // namespace
+
+std::string_view to_string(const AlgorithmRuntimeState state) noexcept
+{
+    switch (state)
+    {
+    case AlgorithmRuntimeState::disabled:
+        return "disabled";
+    case AlgorithmRuntimeState::active:
+        return "active";
+    case AlgorithmRuntimeState::manual_trigger_only:
+        return "manual-trigger-only";
+    }
+    return "disabled";
+}
 
 struct EventRuntimeImpl final
 {
@@ -209,7 +297,14 @@ struct EventRuntimeImpl final
     std::atomic_uint64_t submitted_frames{};
     std::atomic_uint64_t processed_frames{};
     std::atomic_uint64_t rejected_frames{};
+    std::atomic_uint64_t skipped_frames{};
     std::atomic_uint64_t detector_failures{};
+    std::atomic_uint64_t consecutive_detector_failures{};
+    std::atomic_uint64_t consecutive_backlog_events{};
+    std::atomic_uint64_t detector_process_calls{};
+    std::atomic_int64_t last_algorithm_processing_us{};
+    std::atomic_int64_t total_algorithm_processing_us{};
+    std::atomic_int64_t maximum_algorithm_processing_us{};
     std::atomic_uint64_t events_started{};
     std::atomic_uint64_t events_frozen{};
     std::atomic_uint64_t events_committed{};
@@ -223,6 +318,37 @@ struct EventRuntimeImpl final
                 options.error_observer(error);
         }
         catch (...)
+        {
+        }
+    }
+
+    [[nodiscard]] std::optional<Error> enter_degraded(const std::string_view reason,
+                                                      const std::string_view source_id) noexcept
+    {
+        bool expected = false;
+        if (!pipeline->degraded.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+            return std::nullopt;
+        auto error = runtime_error("ALGORITHM_DEGRADED", Severity::error,
+                                   "自动视觉检测已降级为仅人工触发", "algorithm.runtime.degrade");
+        error.module = "algorithm";
+        error.source_id = std::string{source_id};
+        error.details.push_back({"reason", std::string{reason}});
+        error.details.push_back(
+            {"failureLimit", std::to_string(options.consecutive_failure_limit)});
+        error.details.push_back(
+            {"backlogLimit", std::to_string(options.consecutive_backlog_limit)});
+        return error;
+    }
+
+    void record_processing_time(const std::chrono::microseconds elapsed) noexcept
+    {
+        ++detector_process_calls;
+        last_algorithm_processing_us.store(elapsed.count(), std::memory_order_relaxed);
+        total_algorithm_processing_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+        auto maximum = maximum_algorithm_processing_us.load(std::memory_order_relaxed);
+        while (maximum < elapsed.count() &&
+               !maximum_algorithm_processing_us.compare_exchange_weak(maximum, elapsed.count(),
+                                                                      std::memory_order_relaxed))
         {
         }
     }
@@ -369,13 +495,18 @@ struct EventRuntimeImpl final
                          .trigger_camera_id = trigger.camera_id,
                          .trigger_frame_number = trigger.camera_frame_number,
                          .trigger_reason = trigger_reason(trigger),
-                         .confidence = trigger.triggered ? 1.0 : 0.0,
+                         .confidence = trigger.confidence,
                          .pre_event_duration =
                              std::chrono::seconds{pipeline->configuration.event.pre_event_seconds},
                          .post_event_duration =
                              std::chrono::seconds{pipeline->configuration.event.post_event_seconds},
-                         .algorithm_name = "mock-detector",
-                         .algorithm_version = "m5",
+                         .algorithm_name =
+                             trigger.trigger_source == algorithm::TriggerSource::manual_test
+                                 ? "manual-trigger"
+                                 : pipeline->configuration.algorithm.type,
+                         .algorithm_version = trigger.detector_version.empty()
+                                                  ? "not-reported"
+                                                  : trigger.detector_version,
                          .config_version = std::to_string(pipeline->configuration.config_revision),
                          .machine_id = pipeline->configuration.system.machine_id,
                          .production_line_id = pipeline->configuration.system.production_line_id,
@@ -444,41 +575,58 @@ struct EventRuntimeImpl final
         if (lane == nullptr || !pipeline->windows || !pipeline->candidates)
             return;
         pipeline->last_monotonic_time = frame.received_monotonic_time();
+        bool manual_pending = false;
         {
             std::scoped_lock lock{mutex};
-            if (lane->manual_pending && frame.sequence_number() > lane->manual_after_sequence)
+            if (lane->manual_pending && lane->manual_target_sequence &&
+                frame.sequence_number() == *lane->manual_target_sequence)
             {
-                static_cast<void>(lane->detector->request_manual_trigger());
                 lane->manual_pending = false;
+                lane->manual_target_sequence.reset();
+                manual_pending = true;
             }
         }
-        auto pushed = lane->ring->push(frame);
-        if (!pushed)
+        std::optional<Result<algorithm::DetectionResult>> detection;
+        if (manual_pending)
         {
-            report(pushed.error());
-            return;
+            detection.emplace(Result<algorithm::DetectionResult>::success(manual_detection(frame)));
         }
-        auto detection = lane->detector->process(frame);
-        if (!detection)
+        else if (pipeline->configuration.algorithm.enabled && lane->detector &&
+                 !pipeline->degraded.load(std::memory_order_acquire))
+        {
+            const auto processing_started = std::chrono::steady_clock::now();
+            detection.emplace(lane->detector->process(frame));
+            record_processing_time(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - processing_started));
+        }
+        if (detection && !*detection)
         {
             ++detector_failures;
-            report(detection.error());
+            const auto failures = consecutive_detector_failures.fetch_add(1U) + 1U;
+            report(detection->error());
+            if (failures >= options.consecutive_failure_limit)
+            {
+                if (auto degraded =
+                        enter_degraded("consecutive-detector-failures", frame.camera_id()))
+                    report(*degraded);
+            }
         }
-        else
+        else if (detection)
         {
-            auto candidate = pipeline->candidates->process(detection.value());
+            consecutive_detector_failures.store(0U);
+            auto candidate = pipeline->candidates->process(detection->value());
             if (!candidate)
             {
                 ++event_failures;
                 report(candidate.error());
             }
-            else if (candidate.value().camera.event && detection.value().triggered)
+            else if (candidate.value().camera.event && detection->value().triggered)
             {
                 const auto& source = candidate.value().camera.event->event_id;
                 if (!pipeline->source_to_canonical.contains(source))
                 {
                     auto window_started =
-                        pipeline->windows->start_or_merge(source, detection.value());
+                        pipeline->windows->start_or_merge(source, detection->value());
                     if (!window_started)
                     {
                         ++event_failures;
@@ -532,10 +680,13 @@ Result<std::shared_ptr<EventRuntime>> EventRuntime::create(EventRuntimeOptions o
 {
     if (!options.database || options.frame_queue_capacity == 0U ||
         options.frame_queue_capacity > 256U || options.persistence_capacity == 0U ||
-        options.persistence_capacity > 64U)
+        options.persistence_capacity > 64U || options.consecutive_failure_limit == 0U ||
+        options.consecutive_failure_limit > 1000U || options.consecutive_backlog_limit == 0U ||
+        options.consecutive_backlog_limit > 1000U)
         return Result<std::shared_ptr<EventRuntime>>::failure(runtime_error(
             "SYS_CONFIG_INVALID", Severity::error, "事件运行时配置无效", "event.runtime.create"));
-    auto pipeline = build_pipeline(options.configuration, options.frame_queue_capacity);
+    auto pipeline = build_pipeline(options.configuration, options.frame_queue_capacity,
+                                   options.detector_registry_configurer);
     if (!pipeline)
         return Result<std::shared_ptr<EventRuntime>>::failure(std::move(pipeline).error());
     const auto event_root = options.event_root.empty()
@@ -623,7 +774,11 @@ Result<void> EventRuntime::start()
 
 Result<void> EventRuntime::submit_frame(camera::FrameView frame)
 {
-    std::scoped_lock lock{impl_->mutex};
+    bool backlog_started = false;
+    bool degrade = false;
+    std::string source_id = frame.camera_id();
+    std::optional<Error> degraded_error;
+    std::unique_lock lock{impl_->mutex};
     if (!impl_->accepting)
     {
         ++impl_->rejected_frames;
@@ -631,19 +786,78 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
                                                    "事件运行时未接收新帧", "event.runtime.submit",
                                                    true));
     }
-    if (impl_->frames.size() >= impl_->options.frame_queue_capacity)
+    auto* lane = find_lane(*impl_->pipeline, source_id);
+    if (lane == nullptr)
     {
         ++impl_->rejected_frames;
-        return Result<void>::failure(runtime_error("ALGORITHM_QUEUE_FULL", Severity::error,
-                                                   "事件帧队列已满", "event.runtime.submit", true));
+        auto error = runtime_error("CAMERA_NOT_FOUND", Severity::error,
+                                   "算法队列拒绝了未配置相机帧", "algorithm.runtime.submit");
+        error.module = "algorithm";
+        error.source_id = source_id;
+        return Result<void>::failure(std::move(error));
     }
-    if (auto* lane = find_lane(*impl_->pipeline, frame.camera_id()))
-        lane->latest_submitted_sequence =
-            std::max(lane->latest_submitted_sequence, frame.sequence_number());
-    impl_->frames.push_back(std::move(frame));
+    auto cached = lane->ring->push(frame);
+    if (!cached)
+    {
+        ++impl_->rejected_frames;
+        return Result<void>::failure(std::move(cached).error());
+    }
+    if (lane->manual_pending && !lane->manual_target_sequence &&
+        frame.sequence_number() > lane->manual_after_sequence)
+        lane->manual_target_sequence = frame.sequence_number();
+    const auto camera_depth = static_cast<std::size_t>(
+        std::ranges::count_if(impl_->frames, [&](const camera::FrameView& pending) {
+            return pending.camera_id() == source_id;
+        }));
+    bool enqueue = true;
+    if (camera_depth >= impl_->options.frame_queue_capacity)
+    {
+        const auto oldest =
+            std::ranges::find_if(impl_->frames, [&](const camera::FrameView& pending) {
+                return pending.camera_id() == source_id &&
+                       (!lane->manual_target_sequence ||
+                        pending.sequence_number() != *lane->manual_target_sequence);
+            });
+        if (oldest != impl_->frames.end())
+            impl_->frames.erase(oldest);
+        else
+            enqueue = false;
+        ++impl_->skipped_frames;
+        const auto backlog = impl_->consecutive_backlog_events.fetch_add(1U) + 1U;
+        backlog_started = backlog == 1U;
+        degrade = backlog >= impl_->options.consecutive_backlog_limit;
+    }
+    else
+        impl_->consecutive_backlog_events.store(0U);
+    lane->latest_submitted_sequence =
+        std::max(lane->latest_submitted_sequence, frame.sequence_number());
     ++impl_->submitted_frames;
-    impl_->frame_high_watermark = std::max(impl_->frame_high_watermark, impl_->frames.size());
-    impl_->condition.notify_one();
+    if (enqueue)
+    {
+        impl_->frames.push_back(std::move(frame));
+        impl_->frame_high_watermark = std::max(impl_->frame_high_watermark, impl_->frames.size());
+        impl_->condition.notify_one();
+    }
+    std::optional<Error> backlog_error;
+    if (backlog_started)
+    {
+        auto error =
+            runtime_error("ALGORITHM_QUEUE_BACKLOG", Severity::warning,
+                          "算法队列积压，已跳过最旧待检测帧", "algorithm.runtime.submit", true);
+        error.module = "algorithm";
+        error.source_id = source_id;
+        error.details.push_back({"queue", "algorithm.frames[" + source_id + "]"});
+        error.details.push_back({"capacity", std::to_string(impl_->options.frame_queue_capacity)});
+        error.details.push_back({"overflowAction", "drop-oldest"});
+        backlog_error = std::move(error);
+    }
+    if (degrade)
+        degraded_error = impl_->enter_degraded("sustained-queue-backlog", source_id);
+    lock.unlock();
+    if (backlog_error)
+        impl_->report(*backlog_error);
+    if (degraded_error)
+        impl_->report(*degraded_error);
     return Result<void>::success();
 }
 
@@ -665,13 +879,32 @@ Result<bool> EventRuntime::request_manual_trigger(const std::string_view camera_
     if (lane->manual_pending)
         return Result<bool>::success(false);
     lane->manual_after_sequence = lane->latest_submitted_sequence;
+    lane->manual_target_sequence.reset();
     lane->manual_pending = true;
     return Result<bool>::success(true);
 }
 
+Result<void> EventRuntime::update_external_confirmation(const std::string_view camera_id,
+                                                        const bool active,
+                                                        const camera::MonotonicTime monotonic_time,
+                                                        const camera::WallClockTime wall_clock_time)
+{
+    std::scoped_lock lock{impl_->mutex};
+    if (!impl_->accepting || !impl_->pipeline->candidates)
+        return Result<void>::failure(runtime_error("SYS_SERVICE_STOPPING", Severity::warning,
+                                                   "事件运行时未接收外部确认信号",
+                                                   "event.runtime.externalConfirmation", true));
+    auto updated = impl_->pipeline->candidates->update_external_signal(
+        camera_id, active, monotonic_time, wall_clock_time);
+    if (!updated)
+        return Result<void>::failure(std::move(updated).error());
+    return Result<void>::success();
+}
+
 Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
 {
-    auto candidate = build_pipeline(configuration, impl_->options.frame_queue_capacity);
+    auto candidate = build_pipeline(configuration, impl_->options.frame_queue_capacity,
+                                    impl_->options.detector_registry_configurer);
     if (!candidate)
         return Result<void>::failure(std::move(candidate).error());
     bool restart_worker = false;
@@ -691,6 +924,8 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
         std::scoped_lock lock{impl_->mutex};
         impl_->pipeline = std::move(candidate).value();
         impl_->options.configuration = configuration;
+        impl_->consecutive_detector_failures.store(0U);
+        impl_->consecutive_backlog_events.store(0U);
         impl_->stop_requested = false;
         if (restart_worker)
         {
@@ -744,20 +979,47 @@ Result<void> EventRuntime::join(const std::chrono::steady_clock::time_point dead
 EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
 {
     std::scoped_lock lock{impl_->mutex};
-    return {.started = impl_->started,
-            .accepting = impl_->accepting,
-            .frame_queue_depth = impl_->frames.size(),
-            .frame_queue_capacity = impl_->options.frame_queue_capacity,
-            .frame_queue_high_watermark = impl_->frame_high_watermark,
-            .pending_events = impl_->pending.size(),
-            .submitted_frames = impl_->submitted_frames.load(),
-            .processed_frames = impl_->processed_frames.load(),
-            .rejected_frames = impl_->rejected_frames.load(),
-            .detector_failures = impl_->detector_failures.load(),
-            .events_started = impl_->events_started.load(),
-            .events_frozen = impl_->events_frozen.load(),
-            .events_committed = impl_->events_committed.load(),
-            .event_failures = impl_->event_failures.load()};
+    event::CandidateEventManagerSnapshot candidates;
+    if (impl_->pipeline->candidates)
+        candidates = impl_->pipeline->candidates->snapshot();
+    const auto process_calls = impl_->detector_process_calls.load();
+    const auto total_processing = impl_->total_algorithm_processing_us.load();
+    AlgorithmRuntimeState state = AlgorithmRuntimeState::disabled;
+    if (impl_->pipeline->configuration.algorithm.enabled)
+        state = impl_->pipeline->degraded.load(std::memory_order_acquire)
+                    ? AlgorithmRuntimeState::manual_trigger_only
+                    : AlgorithmRuntimeState::active;
+    return {
+        .started = impl_->started,
+        .accepting = impl_->accepting,
+        .frame_queue_depth = impl_->frames.size(),
+        .frame_queue_capacity = impl_->options.frame_queue_capacity * impl_->pipeline->lanes.size(),
+        .frame_queue_high_watermark = impl_->frame_high_watermark,
+        .pending_events = impl_->pending.size(),
+        .submitted_frames = impl_->submitted_frames.load(),
+        .processed_frames = impl_->processed_frames.load(),
+        .rejected_frames = impl_->rejected_frames.load(),
+        .skipped_frames = impl_->skipped_frames.load(),
+        .detector_failures = impl_->detector_failures.load(),
+        .consecutive_detector_failures = impl_->consecutive_detector_failures.load(),
+        .consecutive_backlog_events = impl_->consecutive_backlog_events.load(),
+        .detector_process_calls = process_calls,
+        .last_algorithm_processing_time =
+            std::chrono::microseconds{impl_->last_algorithm_processing_us.load()},
+        .average_algorithm_processing_time =
+            std::chrono::microseconds{
+                process_calls == 0U ? 0
+                                    : total_processing / static_cast<std::int64_t>(process_calls)},
+        .maximum_algorithm_processing_time =
+            std::chrono::microseconds{impl_->maximum_algorithm_processing_us.load()},
+        .algorithm_state = state,
+        .events_started = impl_->events_started.load(),
+        .candidates_created = candidates.events_created,
+        .confirmed_events = candidates.confirmed_events,
+        .rejected_candidates = candidates.rejected_events,
+        .events_frozen = impl_->events_frozen.load(),
+        .events_committed = impl_->events_committed.load(),
+        .event_failures = impl_->event_failures.load()};
 }
 
 } // namespace paperbreak::service

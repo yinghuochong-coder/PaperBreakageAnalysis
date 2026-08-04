@@ -227,6 +227,18 @@ Result<std::unique_ptr<MockTriggerDetector>> MockTriggerDetector::create(
     return Result<std::unique_ptr<MockTriggerDetector>>::success(std::move(detector));
 }
 
+Result<std::unique_ptr<IBreakDetector>> make_mock_trigger_detector()
+{
+    return Result<std::unique_ptr<IBreakDetector>>::success(std::make_unique<MockTriggerDetector>(
+        MockTriggerDetector::ConstructionKey{}, MockTriggerDetectorConfig{.camera_id = "unbound"}));
+}
+
+Result<void> register_mock_trigger_detector(DetectorPluginRegistry& registry)
+{
+    return registry.register_plugin(std::string{mock_trigger_plugin_id},
+                                    [] { return make_mock_trigger_detector(); });
+}
+
 MockTriggerDetector::MockTriggerDetector(ConstructionKey, MockTriggerDetectorConfig config)
     : impl_(std::make_unique<Impl>(std::move(config)))
 {
@@ -241,6 +253,8 @@ Result<void> MockTriggerDetector::initialize(const DetectorConfig& config)
         return Result<void>::failure(
             lifecycle_error(impl_->config.camera_id, "plugin-id-mismatch"));
     }
+    if (impl_->config.camera_id == "unbound")
+        impl_->config.camera_id = config.camera_id;
     if (config.camera_id != impl_->config.camera_id)
     {
         return Result<void>::failure(

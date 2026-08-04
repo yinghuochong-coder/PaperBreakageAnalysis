@@ -10,6 +10,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -47,6 +48,96 @@ class TemporaryDirectory final
     std::filesystem::path path_;
 };
 
+struct DetectorBehavior final
+{
+    DetectorBehavior(std::string id, const std::chrono::milliseconds processing_delay,
+                     const std::uint64_t failures)
+        : plugin_id(std::move(id)), delay(processing_delay), remaining_failures(failures)
+    {
+    }
+
+    std::string plugin_id;
+    std::chrono::milliseconds delay{};
+    std::atomic_uint64_t remaining_failures{};
+};
+
+class RuntimeTestDetector final : public algorithm::IBreakDetector
+{
+  public:
+    explicit RuntimeTestDetector(std::shared_ptr<DetectorBehavior> behavior)
+        : behavior_(std::move(behavior))
+    {
+    }
+
+    Result<void> initialize(const algorithm::DetectorConfig& config) override
+    {
+        config_ = config;
+        return Result<void>::success();
+    }
+
+    Result<algorithm::DetectionResult> process(const FrameView& input) override
+    {
+        if (behavior_->delay > 0ms)
+            std::this_thread::sleep_for(behavior_->delay);
+        auto remaining = behavior_->remaining_failures.load(std::memory_order_relaxed);
+        while (remaining > 0U && !behavior_->remaining_failures.compare_exchange_weak(
+                                     remaining, remaining - 1U, std::memory_order_relaxed))
+        {
+        }
+        if (remaining > 0U)
+            return Result<algorithm::DetectionResult>::failure(
+                make_error("ALGORITHM_PROCESS_FAILED", Severity::error, "注入的检测失败",
+                           "algorithm", "algorithm.test.process"));
+        return Result<algorithm::DetectionResult>::success(
+            {.camera_id = input.camera_id(),
+             .sequence_number = input.sequence_number(),
+             .camera_frame_number = input.camera_frame_number(),
+             .monotonic_time = input.received_monotonic_time(),
+             .wall_clock_time = input.received_wall_clock_time(),
+             .evaluated_region = {.width = input.geometry().width,
+                                  .height = input.geometry().height},
+             .paper_ratio = 1.0,
+             .detector_version = "runtime-test/1.0",
+             .model_version = "none"});
+    }
+
+    Result<void> update_config(const algorithm::DetectorConfig& config) override
+    {
+        config_ = config;
+        return Result<void>::success();
+    }
+
+    Result<void> reset() override
+    {
+        return Result<void>::success();
+    }
+
+    algorithm::DetectorInfo info() const override
+    {
+        return {.plugin_id = behavior_->plugin_id,
+                .display_name = "Runtime Test Detector",
+                .implementation_version = "1.0-test",
+                .model_version = "none",
+                .supports_hot_update = true,
+                .prototype_only = true};
+    }
+
+  private:
+    std::shared_ptr<DetectorBehavior> behavior_;
+    algorithm::DetectorConfig config_;
+};
+
+std::function<Result<void>(algorithm::DetectorPluginRegistry&)> test_detector_registration(
+    std::shared_ptr<DetectorBehavior> behavior)
+{
+    return [behavior = std::move(behavior)](algorithm::DetectorPluginRegistry& registry) {
+        return registry.register_plugin(behavior->plugin_id, [behavior] {
+            return Result<std::unique_ptr<algorithm::IBreakDetector>>::success(
+                std::make_unique<RuntimeTestDetector>(behavior));
+        });
+    };
+}
+
 config::EdgeConfig runtime_config()
 {
     config::EdgeConfig value;
@@ -67,7 +158,8 @@ config::EdgeConfig runtime_config()
     return value;
 }
 
-FrameView frame(const std::uint64_t sequence, const std::chrono::milliseconds offset)
+FrameView frame(const std::uint64_t sequence, const std::chrono::milliseconds offset,
+                std::string camera_id = "CAM01")
 {
     auto buffer = std::make_shared<FrameBuffer>(16U);
     for (std::size_t index = 0U; index < 16U; ++index)
@@ -75,7 +167,7 @@ FrameView frame(const std::uint64_t sequence, const std::chrono::milliseconds of
     if (!buffer->set_size(16U))
         throw std::runtime_error{"frame size"};
     const auto wall = WallClockTime{std::chrono::sys_days{std::chrono::year{2026} / 8 / 4}};
-    auto view = make_frame_view({.camera_id = "CAM01",
+    auto view = make_frame_view({.camera_id = std::move(camera_id),
                                  .camera_frame_number = 1000U + sequence,
                                  .sequence_number = sequence,
                                  .received_monotonic_time = MonotonicTime{offset},
@@ -104,6 +196,7 @@ TEST(EventRuntimeIntegration, ManualTriggerPersistsContinuousWindowWithoutBlocki
     auto runtime = EventRuntime::create({.configuration = runtime_config(),
                                          .event_root = event_root,
                                          .database = shared_database,
+                                         .frame_queue_capacity = 64U,
                                          .error_observer = [&](const Error&) { ++errors; }});
     ASSERT_TRUE(runtime) << runtime.error().message;
     ASSERT_TRUE(runtime.value()->start());
@@ -180,6 +273,219 @@ TEST(EventRuntimeIntegration, RejectsUnsafePoolBudgetAndUnknownManualCamera)
     auto missing = runtime.value()->request_manual_trigger("CAM04");
     ASSERT_FALSE(missing);
     EXPECT_EQ(missing.error().business_code, "CAMERA_NOT_FOUND");
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeIntegration, DropsOldestOnBacklogAndKeepsSubmissionNonBlocking)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto configuration = runtime_config();
+    configuration.cameras.push_back({.id = "CAM02", .enabled = true, .frame_rate = 10.0});
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "slow-runtime-test";
+    auto behavior = std::make_shared<DetectorBehavior>(configuration.algorithm.type, 40ms, 0U);
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration,
+         .event_root = event_root,
+         .database = shared_database,
+         .frame_queue_capacity = 1U,
+         .consecutive_backlog_limit = 100U,
+         .detector_registry_configurer = test_detector_registration(behavior)});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms, "CAM02")));
+    for (std::uint64_t sequence = 1U; sequence <= 12U; ++sequence)
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(sequence, std::chrono::milliseconds{sequence * 100U})));
+
+    runtime.value()->request_stop();
+    ASSERT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+    const auto snapshot = runtime.value()->snapshot();
+    EXPECT_EQ(snapshot.submitted_frames, 13U);
+    EXPECT_EQ(snapshot.rejected_frames, 0U);
+    EXPECT_GT(snapshot.skipped_frames, 0U);
+    EXPECT_EQ(snapshot.processed_frames + snapshot.skipped_frames, snapshot.submitted_frames);
+    EXPECT_EQ(snapshot.frame_queue_capacity, 2U);
+    EXPECT_GE(snapshot.frame_queue_high_watermark, 1U);
+    EXPECT_LE(snapshot.frame_queue_high_watermark, snapshot.frame_queue_capacity);
+    EXPECT_GE(snapshot.processed_frames, 2U);
+    EXPECT_EQ(snapshot.algorithm_state, AlgorithmRuntimeState::active);
+}
+
+TEST(EventRuntimeIntegration, ConsecutiveDetectorFailuresDegradeButManualTriggerStillWorks)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "failing-runtime-test";
+    configuration.algorithm.consecutive_frames = 1U;
+    auto behavior = std::make_shared<DetectorBehavior>(configuration.algorithm.type, 0ms, 2U);
+    std::atomic_uint64_t degraded_errors{};
+    auto runtime =
+        EventRuntime::create({.configuration = configuration,
+                              .event_root = event_root,
+                              .database = shared_database,
+                              .consecutive_failure_limit = 2U,
+                              .detector_registry_configurer = test_detector_registration(behavior),
+                              .error_observer = [&](const Error& error) {
+                                  if (error.business_code == "ALGORITHM_DEGRADED")
+                                      ++degraded_errors;
+                              }});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms)));
+    for (std::size_t attempt = 0U;
+         attempt < 100U && runtime.value()->snapshot().detector_process_calls < 1U; ++attempt)
+        std::this_thread::sleep_for(2ms);
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 200ms)));
+    for (std::size_t attempt = 0U; attempt < 100U && runtime.value()->snapshot().algorithm_state !=
+                                                         AlgorithmRuntimeState::manual_trigger_only;
+         ++attempt)
+        std::this_thread::sleep_for(2ms);
+
+    auto degraded = runtime.value()->snapshot();
+    EXPECT_EQ(degraded.algorithm_state, AlgorithmRuntimeState::manual_trigger_only);
+    EXPECT_EQ(degraded.detector_failures, 2U);
+    EXPECT_EQ(degraded_errors.load(), 1U);
+
+    auto requested = runtime.value()->request_manual_trigger("CAM01");
+    ASSERT_TRUE(requested);
+    EXPECT_TRUE(requested.value());
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 300ms)));
+    for (std::size_t attempt = 0U;
+         attempt < 100U && runtime.value()->snapshot().events_started == 0U; ++attempt)
+        std::this_thread::sleep_for(2ms);
+    EXPECT_EQ(runtime.value()->snapshot().events_started, 1U);
+
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeIntegration, FailedReconfigurationKeepsActiveDetectorAndConfiguration)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "mock";
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration, .event_root = event_root, .database = shared_database});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms)));
+    for (std::size_t attempt = 0U;
+         attempt < 100U && runtime.value()->snapshot().detector_process_calls < 1U; ++attempt)
+        std::this_thread::sleep_for(2ms);
+
+    auto invalid = configuration;
+    invalid.config_revision = configuration.config_revision + 1U;
+    invalid.algorithm.type = "plugin-not-registered";
+    auto rejected = runtime.value()->reconfigure(invalid);
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().business_code, "ALGORITHM_PLUGIN_LOAD_FAILED");
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 200ms)));
+    for (std::size_t attempt = 0U;
+         attempt < 100U && runtime.value()->snapshot().detector_process_calls < 2U; ++attempt)
+        std::this_thread::sleep_for(2ms);
+    const auto snapshot = runtime.value()->snapshot();
+    EXPECT_EQ(snapshot.algorithm_state, AlgorithmRuntimeState::active);
+    EXPECT_EQ(snapshot.detector_process_calls, 2U);
+
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeIntegration, SingleDetectorFailureIsIsolatedAndNextFrameRecovers)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "recovering-runtime-test";
+    auto behavior = std::make_shared<DetectorBehavior>(configuration.algorithm.type, 0ms, 1U);
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration,
+         .event_root = event_root,
+         .database = shared_database,
+         .consecutive_failure_limit = 2U,
+         .detector_registry_configurer = test_detector_registration(behavior)});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms)));
+    for (std::size_t attempt = 0U;
+         attempt < 100U && runtime.value()->snapshot().detector_process_calls < 1U; ++attempt)
+        std::this_thread::sleep_for(2ms);
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 200ms)));
+    for (std::size_t attempt = 0U;
+         attempt < 100U && runtime.value()->snapshot().detector_process_calls < 2U; ++attempt)
+        std::this_thread::sleep_for(2ms);
+
+    const auto snapshot = runtime.value()->snapshot();
+    EXPECT_EQ(snapshot.detector_failures, 1U);
+    EXPECT_EQ(snapshot.consecutive_detector_failures, 0U);
+    EXPECT_EQ(snapshot.algorithm_state, AlgorithmRuntimeState::active);
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeIntegration, LoadsClassicalDetectorThroughSameRuntimeBoundary)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "classical-vision";
+    configuration.algorithm.roi = {.width = 4U, .height = 4U};
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration, .event_root = event_root, .database = shared_database});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms)));
+    for (std::size_t attempt = 0U;
+         attempt < 100U && runtime.value()->snapshot().detector_process_calls < 1U; ++attempt)
+        std::this_thread::sleep_for(2ms);
+    const auto snapshot = runtime.value()->snapshot();
+    EXPECT_EQ(snapshot.detector_process_calls, 1U);
+    EXPECT_EQ(snapshot.detector_failures, 0U);
+    EXPECT_GT(snapshot.last_algorithm_processing_time.count(), 0);
+    EXPECT_EQ(snapshot.algorithm_state, AlgorithmRuntimeState::active);
     runtime.value()->request_stop();
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }

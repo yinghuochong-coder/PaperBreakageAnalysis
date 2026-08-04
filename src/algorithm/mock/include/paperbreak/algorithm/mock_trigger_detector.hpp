@@ -1,6 +1,6 @@
 #pragma once
 
-#include "paperbreak/algorithm/detector.hpp"
+#include "paperbreak/algorithm/detector_host.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -12,6 +12,10 @@ namespace paperbreak::algorithm::mock
 {
 
 inline constexpr std::string_view mock_trigger_plugin_id = "mock-trigger";
+
+/// Creates an uninitialized detector for the compile-time plugin registry.
+[[nodiscard]] Result<std::unique_ptr<IBreakDetector>> make_mock_trigger_detector();
+[[nodiscard]] Result<void> register_mock_trigger_detector(DetectorPluginRegistry& registry);
 
 enum class MockTriggerMode
 {
@@ -49,6 +53,7 @@ class MockTriggerDetector final : public ITriggerDetector
 
       private:
         friend class MockTriggerDetector;
+        friend Result<std::unique_ptr<IBreakDetector>> make_mock_trigger_detector();
         ConstructionKey() = default;
     };
 

@@ -61,7 +61,17 @@ struct CandidateCameraSnapshot final
     std::string camera_id;
     CandidateEventState observation_state{CandidateEventState::idle};
     std::size_t consecutive_triggered_frames{};
+    std::size_t consecutive_confirmation_frames{};
+    bool external_signal_active{};
+    bool cooling_down{};
+    std::optional<camera::MonotonicTime> cooldown_until;
     std::optional<CandidateEventSnapshot> event;
+};
+
+enum class ExternalConfirmationPolicy
+{
+    not_used,
+    required_active,
 };
 
 enum class CandidateNotificationKind
@@ -91,8 +101,12 @@ struct CandidateEventManagerConfig final
     std::vector<CandidateCameraBinding> cameras;
     std::size_t candidate_consecutive_frames{2U};
     std::size_t confirmation_consecutive_frames{3U};
+    double candidate_confidence_threshold{};
+    double confirmation_confidence_threshold{};
+    ExternalConfirmationPolicy external_confirmation{ExternalConfirmationPolicy::not_used};
     std::chrono::milliseconds candidate_timeout{5000};
     std::chrono::milliseconds pre_event_duration{1000};
+    std::chrono::milliseconds cooldown_duration{};
     CandidateEventNotificationCallback notification_callback;
 };
 
@@ -155,6 +169,9 @@ class CandidateEventManager final
                                                          std::uint64_t expected_version,
                                                          camera::MonotonicTime monotonic_time,
                                                          camera::WallClockTime wall_clock_time);
+    [[nodiscard]] Result<CandidateCameraSnapshot> update_external_signal(
+        std::string_view camera_id, bool active, camera::MonotonicTime monotonic_time,
+        camera::WallClockTime wall_clock_time);
 
     /// Applies exact-deadline timeout transitions using only the monotonic time argument.
     [[nodiscard]] std::vector<CandidateEventSnapshot> advance_time(

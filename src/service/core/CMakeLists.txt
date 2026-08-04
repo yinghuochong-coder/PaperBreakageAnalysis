@@ -8,6 +8,7 @@ target_link_libraries(paperbreak_service_core
         paperbreak_common
         paperbreak_config
         paperbreak_camera
+        paperbreak_algorithm_classical
         paperbreak_algorithm_mock
         paperbreak_event_codec
         paperbreak_ipc

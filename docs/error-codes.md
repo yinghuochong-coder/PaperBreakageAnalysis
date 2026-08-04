@@ -156,8 +156,12 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `PIPELINE_PREVIEW_INVALID_STATE` | Warning | 否 | 预览运行时重复启动或处于不允许的生命周期状态 |
 | `PIPELINE_PREVIEW_START_FAILED` | Error | 是 | 无法创建预览编码工作线程；服务保持无预览降级，不启动无界替代线程 |
 | `ALGORITHM_INIT_FAILED` | Error | 视原因 | 新算法实例初始化/验证失败；保持旧实例或禁用检测并报警 |
+| `ALGORITHM_PLUGIN_LOAD_FAILED` | Error | 否 | 编译期插件未注册、工厂失败或插件身份无效；候选配置不提交，旧实例和旧配置继续生效 |
+| `ALGORITHM_NOT_READY` | Error | 视状态 | 检测器尚未装载或已停止接收；不调用空实例，不影响采集与人工触发 |
 | `ALGORITHM_PROCESS_FAILED` | Error | 否 | 单帧处理异常；跳过该帧，持续失败时降级算法 |
-| `ALGORITHM_DEADLINE_EXCEEDED` | Warning | 否 | 单帧或队列处理超过预算；按策略跳帧/降级，不反压采集 |
+| `ALGORITHM_PROCESS_TIMEOUT` | Error | 否 | 同步检测调用返回后确认超过软件预算；丢弃迟到结果并计数，不声称已安全抢占调用 |
+| `ALGORITHM_QUEUE_BACKLOG` | Warning | 是 | 每相机容量 8 的待检测队列已满；丢弃最旧待检测帧、接收最新帧并计数，持续积压时降级 |
+| `ALGORITHM_DEGRADED` | Error | 否 | 连续处理失败或持续队列积压达到有界门限；自动视觉检测切换到 `manual-trigger-only`，采集、缓存和人工触发继续 |
 
 ### 4.5 事件与存储
 
@@ -177,7 +181,6 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `EVENT_QUEUE_FULL` | Critical | 是 | 待编码/持久化事件达到固定上限；拒绝新事件，不扩容或反压采集 |
 | `EVENT_EXPORT_TOO_LARGE` | Error | 否 | 已校验事件 ZIP64 超过显式 64 GiB、单文件或文件数上限；不返回截断包或成功标志 |
 | `EVENT_EXPORT_FAILED` | Error | 视 I/O | Qt 客户端无法原子写入事件 ZIP；`QSaveFile` 放弃临时文件且不覆盖既有目标 |
-| `ALGORITHM_QUEUE_FULL` | Error | 是 | 相机转发到事件处理的固定帧队列已满；当前帧显式跳过并计数，采集线程不等待 |
 | `STORAGE_LOW_SPACE` | Warning | 是 | 达到预警水位；清理已上传且允许删除的旧事件 |
 | `STORAGE_CRITICAL_SPACE` | Critical | 是 | 达到严重水位；停止普通滚动缓存，优先正式事件 |
 | `STORAGE_STOP_SAVE` | Critical | 否 | 达到停止保存水位；禁止新大文件并明确事件未保存 |
