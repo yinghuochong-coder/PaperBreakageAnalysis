@@ -191,6 +191,7 @@ Qt 桌面客户端只承担：
 | `paperbreak_algorithm_mock` | 手动/周期/灰度等模拟检测器 | algorithm | 相机或存储实现 |
 | `paperbreak_algorithm_classical` | 批准的传统视觉算法 | algorithm、OpenCV | MVS、UI、SQLite |
 | `paperbreak_event` | 候选状态机、窗口冻结、合并、关键帧策略、事件模型 | common、camera 帧视图、algorithm 接口 | MVS、具体数据库/网络 |
+| `paperbreak_event_codec` | 关键帧 JPEG 图像编解码适配 | event、批准的 OpenCV core/imgproc/imgcodecs | MVS、UI、SQLite、网络；公开接口不得暴露 OpenCV 类型 |
 | `paperbreak_storage` | 事件事务、SQLite、迁移、NVMe 块、保留策略 | common、event、SQLite、可选 zstd | UI、MVS、上传协议 |
 | `paperbreak_uplink` | `IUplinkTransport`、上传调度领域接口 | common、event 接口 | Qt Widgets、MVS |
 | `paperbreak_uplink_mock` | 离线/慢速/失败脚本化传输 | uplink | 生产凭据 |

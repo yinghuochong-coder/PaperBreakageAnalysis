@@ -8,6 +8,7 @@ add_executable(PaperBreakTests
     unit/basic_config_tests.cpp
     unit/client_state_store_tests.cpp
     unit/event_candidate_state_tests.cpp
+    unit/event_key_frame_tests.cpp
     unit/event_memory_ring_tests.cpp
     unit/event_window_tests.cpp
     unit/ipc_client_tests.cpp
@@ -32,6 +33,7 @@ target_link_libraries(PaperBreakTests
         paperbreak_console_model
         paperbreak_config
         paperbreak_event
+        paperbreak_event_codec
         paperbreak_platform_windows
         paperbreak_logging
         paperbreak_monitoring
@@ -44,7 +46,9 @@ target_link_libraries(PaperBreakTests
         Qt6::Gui
         Qt6::Network
         nlohmann_json::nlohmann_json
-        GTest::gtest)
+        GTest::gtest
+        opencv_core
+        opencv_imgcodecs)
 target_compile_definitions(PaperBreakTests PRIVATE
     PAPERBREAK_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 set_target_properties(PaperBreakTests PROPERTIES FOLDER "PaperBreak/Tests")

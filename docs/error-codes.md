@@ -167,6 +167,9 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `EVENT_VERSION_CONFLICT` | Warning | 否 | 事件命令的期望版本过期；返回当前版本，不覆盖新状态 |
 | `EVENT_INVALID_TRANSITION` | Error | 否 | 命令不符合事件状态机且不是可识别的幂等重复 |
 | `EVENT_BUFFER_INCOMPLETE` | Critical | 否 | 前后窗口缺帧或租约不足；保留可用证据并明确标为不完整 |
+| `EVENT_KEYFRAME_SELECTION_FAILED` | Error | 否 | 冻结窗口、逐帧证据、确认帧引用或分数非法；拒绝本次选择并保留完整原始事件序列 |
+| `EVENT_KEYFRAME_QUEUE_FULL` | Error | 否 | 固定关键帧任务队列容量不足、内存预算不足或已经停止接收；事件内任务整批拒绝并标记关键帧不完整，原始事件仍优先 |
+| `EVENT_KEYFRAME_ENCODE_FAILED` | Error | 是 | 关键帧像素布局、输入/输出上限或 OpenCV JPEG 编码失败；当前关键帧标损，工作线程继续处理后续已接受任务 |
 | `EVENT_WRITE_FAILED` | Critical | 是 | 事件文件、清单或最终提交写入失败；保留临时目录供恢复 |
 | `EVENT_CHECKSUM_FAILED` | Critical | 视来源 | 本地写后校验不一致；隔离文件，不提交完整事件 |
 | `EVENT_RECOVERY_FAILED` | Critical | 视原因 | 启动时无法恢复/隔离未完成事件；不得伪报已提交 |
