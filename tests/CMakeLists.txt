@@ -18,6 +18,7 @@ add_executable(PaperBreakTests
     unit/monitoring_tests.cpp
     unit/mock_camera_tests.cpp
     unit/pipeline_tests.cpp
+    unit/storage_metadata_database_tests.cpp
     unit/storage_event_store_tests.cpp
     unit/service_runtime_tests.cpp
     unit/system_command_tests.cpp
@@ -48,6 +49,7 @@ target_link_libraries(PaperBreakTests
         Qt6::Gui
         Qt6::Network
         nlohmann_json::nlohmann_json
+        SQLite3::SQLite3
         GTest::gtest
         opencv_core
         opencv_imgcodecs)

@@ -932,6 +932,12 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M5-07 SQLite 元数据和迁移
 
+状态：`completed`
+
+负责人：Codex
+
+执行记录：`.agent/plans/m5-07-sqlite-metadata-migrations.md`
+
 实施：
 
 - 建立 events、event_cameras、key_frames、event_files、upload_jobs、device_status_history、config_history、alarm_history、audit_logs；
@@ -941,6 +947,8 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 - 支持分页和按时间、状态、相机筛选。
 
 测试：新建、迁移、重复迁移、损坏检测、备份恢复、目录/数据库不一致对账。
+
+完成证据（2026-08-04）：`paperbreak_storage` 新增不暴露 SQLite 类型的 schema v1 元数据数据库，使用单连接互斥协调迁移和关键事务，建立 events、event_cameras、key_frames、event_files、upload_jobs、device_status_history、config_history、alarm_history、audit_logs 九张 STRICT 表及外键/查询索引，图像仍只保存在 M5-06 事件目录。新库和 user_version=0 旧库通过单事务迁移，既有旧库迁移前生成不可覆盖的一致备份；重复打开幂等，高版本、quick_check 损坏和迁移失败分别稳定拒绝，显式恢复经同卷临时库校验后原子替换且保留备份。已提交目录先执行 manifest、长度和 SHA-256 校验，再原子 upsert 事件及相机/关键帧/文件子索引；分页固定上限 200，支持时间、状态、相机筛选。固定最多 10000 个事件的启动对账以目录为事实源补建/刷新索引，并把数据库孤儿标为 Missing，不删除目录或记录。7 项定向测试覆盖九表新建、0→1/重复/失败回滚迁移、迁移前备份、高版本、损坏检测、备份恢复与拒绝覆盖、中文空格路径、稳定分页筛选、双向不一致幂等对账、校验损坏及已验证但字段畸形 manifest 不产生半索引。Debug/Release `/W4 /WX` 全量构建、两套非硬件 CTest 23/23、storage 默认 MSVC 静态分析、任务文件格式检查和 `git diff --check` 均通过；全仓 `format-check` 被未修改的 `src/pipeline/include/paperbreak/pipeline/preview.hpp` 既有格式问题阻断。未接入 M5-09 服务配置、IPC/UI、报警写入或上传执行器，未执行实体相机、真实进程强杀、断电和生产磁盘性能测试。
 
 ### M5-08 存储水位和保留策略
 
