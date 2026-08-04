@@ -720,6 +720,7 @@ events
 event_cameras
 key_frames
 event_files
+event_retention
 upload_jobs
 device_status_history
 config_history
@@ -1652,6 +1653,7 @@ CAMERA_FRAME_INCOMPLETE
 PIPELINE_QUEUE_FULL
 ALGORITHM_INIT_FAILED
 EVENT_WRITE_FAILED
+EVENT_DELETE_FAILED
 STORAGE_LOW_SPACE
 DATABASE_ERROR
 UPLINK_DISCONNECTED

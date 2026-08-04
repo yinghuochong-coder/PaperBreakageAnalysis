@@ -952,6 +952,16 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M5-08 存储水位和保留策略
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-04
+
+完成日期：2026-08-04
+
+执行记录：`.agent/plans/m5-08-storage-watermarks-retention.md`
+
 实施：
 
 - warning、critical、stop 水位；
@@ -960,6 +970,8 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 - 先更新删除状态，再执行可恢复删除/对账；
 - 清理临时文件，支持天数和容量上限；
 - stop 水位禁止新增大文件但服务仍持续监测报警。
+
+完成证据（2026-08-04）：`paperbreak_storage` 新增同步、有界 `StoragePolicyManager`，采样事件卷总量/可用量并按精确边界输出 Normal、Warning、Critical、StopSave 快照；Critical 关闭普通滚动写准入，StopSave 以 Critical `STORAGE_LOW_SPACE` 拒绝新增大文件，检测与报警调用契约保持可用。SQLite 升级到 schema v2，迁移前不可覆盖备份，新增独立 `event_retention` 保存人工锁定、明确允许删除、manifest 字节和 Active/DeletePending/DeleteFailed/Deleted 状态，不改写不可变 manifest。Warning、保留天数和事件容量上限只按最旧顺序选择 `Uploaded + deletionAllowed + !locked` 的 Present 事件；每轮最多 200 个事件，显式临时根最多 16 个且扫描/删除最多 10000 项。删除先 CAS 落库，再同卷移动到 `.deletions`、递归删除并事务式完成状态；移动失败、删除失败、移动后中断、物理删除后未落库，以及期间先执行目录对账均可在后续维护轮次恢复。5 项策略测试与 8 项数据库测试共 13/13，Debug/Release `/W4 /WX` 全量构建、两套非硬件 CTest 23/23、Debug 通用单元入口 230/230、storage 默认 MSVC 静态分析、任务文件格式检查和 `git diff --check` 均通过。全仓 `format-check` 仍被未修改的 `src/pipeline/include/paperbreak/pipeline/preview.hpp` 既有格式问题阻断。M5-09 服务周期调度、配置、报警、IPC/UI 尚未接入，未执行实体相机、真实进程强杀/断电或生产 NVMe 水位与性能测试。
 
 ### M5-09 事件配置、查询、复核与导出
 

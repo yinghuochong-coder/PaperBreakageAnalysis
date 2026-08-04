@@ -20,6 +20,7 @@ add_executable(PaperBreakTests
     unit/pipeline_tests.cpp
     unit/storage_metadata_database_tests.cpp
     unit/storage_event_store_tests.cpp
+    unit/storage_policy_tests.cpp
     unit/service_runtime_tests.cpp
     unit/system_command_tests.cpp
     unit/windows_control_tests.cpp

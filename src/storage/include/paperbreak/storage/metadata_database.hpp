@@ -9,12 +9,13 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace paperbreak::storage
 {
 
-inline constexpr std::uint32_t database_schema_version = 1U;
+inline constexpr std::uint32_t database_schema_version = 2U;
 inline constexpr std::size_t database_default_page_size = 50U;
 inline constexpr std::size_t database_maximum_page_size = 200U;
 
@@ -58,6 +59,9 @@ struct EventMetadataRecord final
     double confidence{};
     std::string upload_state;
     std::string storage_state;
+    bool retention_locked{};
+    bool deletion_allowed{};
+    std::string deletion_state;
     std::filesystem::path relative_directory;
 };
 
@@ -85,6 +89,21 @@ struct EventReconcileReport final
     std::size_t indexed{};
     std::size_t refreshed{};
     std::size_t marked_missing{};
+};
+
+struct EventRetentionRecord final
+{
+    std::string event_id;
+    std::int64_t candidate_time_utc_ms{};
+    std::string upload_state;
+    std::string storage_state;
+    std::filesystem::path relative_directory;
+    std::uint64_t indexed_file_bytes{};
+    bool locked{};
+    bool deletion_allowed{};
+    std::string deletion_state;
+    std::filesystem::path deletion_relative_path;
+    std::string last_error;
 };
 
 /// SQLite metadata index. The event directory remains the immutable file source of truth.
@@ -127,6 +146,31 @@ class EventMetadataDatabase final
         const std::filesystem::path& committed_directory);
 
     [[nodiscard]] Result<EventQueryPage> query_events(const EventQuery& query) const;
+
+    /// Updates operator-controlled retention flags. Upload state is managed separately by M8.
+    [[nodiscard]] Result<void> set_retention_policy(std::string_view event_id, bool locked,
+                                                    bool deletion_allowed,
+                                                    std::int64_t updated_at_utc_ms);
+
+    /// Returns oldest eligible events. Only Uploaded, Present, explicitly deletable and unlocked
+    /// rows are returned. A cutoff, when present, is inclusive.
+    [[nodiscard]] Result<std::vector<EventRetentionRecord>> retention_candidates(
+        std::optional<std::int64_t> candidate_time_cutoff_utc_ms, std::size_t limit) const;
+
+    /// Returns interrupted or failed deletion work in oldest-first order.
+    [[nodiscard]] Result<std::vector<EventRetentionRecord>> deletion_work(std::size_t limit) const;
+
+    /// Atomically claims an eligible event before any file operation.
+    [[nodiscard]] Result<bool> begin_deletion(std::string_view event_id,
+                                              const std::filesystem::path& deletion_relative_path,
+                                              std::int64_t updated_at_utc_ms);
+    [[nodiscard]] Result<void> complete_deletion(std::string_view event_id,
+                                                 std::int64_t deleted_at_utc_ms);
+    [[nodiscard]] Result<void> fail_deletion(std::string_view event_id, std::string_view reason,
+                                             std::int64_t updated_at_utc_ms);
+
+    /// Sum of indexed immutable event files for rows that have not completed deletion.
+    [[nodiscard]] Result<std::uint64_t> retained_event_bytes() const;
 
     /// Bounded reconciliation. Directory-only events are indexed; database-only rows are marked
     /// Missing. No event directory or database row is deleted.

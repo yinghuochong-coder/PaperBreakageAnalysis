@@ -233,9 +233,9 @@ TEST(StorageMetadataDatabase, CreatesAllMetadataTablesAndRepeatedOpenIsIdempoten
     opened.value().reset();
 
     const std::set<std::string> expected{
-        "alarm_history", "audit_logs",  "config_history", "device_status_history",
-        "event_cameras", "event_files", "events",         "key_frames",
-        "upload_jobs"};
+        "alarm_history", "audit_logs",  "config_history",  "device_status_history",
+        "event_cameras", "event_files", "event_retention", "events",
+        "key_frames",    "upload_jobs"};
     RawDatabase raw{options.database_path};
     EXPECT_EQ(raw.scalar_int64("PRAGMA user_version"), database_schema_version);
     EXPECT_EQ(raw.table_names(), expected);
@@ -289,6 +289,35 @@ TEST(StorageMetadataDatabase, MigratesVersionZeroWithBackupAndRollsBackFailedMig
               1);
 }
 
+TEST(StorageMetadataDatabase, MigratesVersionOneRetentionStateWithBackup)
+{
+    TemporaryDirectory temporary{"migration-v1"};
+    const auto options = database_options(temporary);
+    std::filesystem::create_directories(options.database_path.parent_path());
+    {
+        RawDatabase version_one{options.database_path};
+        version_one.execute("CREATE TABLE events(event_id TEXT PRIMARY KEY NOT NULL);"
+                            "INSERT INTO events VALUES('019fcb80-ffff-7000-8000-000000000001');"
+                            "PRAGMA user_version=1;");
+    }
+    auto opened = EventMetadataDatabase::open(options);
+    ASSERT_TRUE(opened) << opened.error().business_code;
+    EXPECT_TRUE(opened.value()->open_report().migrated);
+    ASSERT_TRUE(opened.value()->open_report().migration_backup.has_value());
+    const auto backup_path = *opened.value()->open_report().migration_backup;
+    EXPECT_TRUE(std::filesystem::is_regular_file(backup_path));
+    opened.value().reset();
+
+    RawDatabase migrated{options.database_path};
+    EXPECT_EQ(migrated.scalar_int64("PRAGMA user_version"), database_schema_version);
+    EXPECT_EQ(migrated.scalar_int64("SELECT COUNT(*) FROM event_retention"), 1);
+    EXPECT_EQ(migrated.scalar_int64("SELECT deletion_allowed FROM event_retention WHERE event_id="
+                                    "'019fcb80-ffff-7000-8000-000000000001'"),
+              0);
+    RawDatabase backup{backup_path};
+    EXPECT_EQ(backup.scalar_int64("PRAGMA user_version"), 1);
+}
+
 TEST(StorageMetadataDatabase, RejectsUnsupportedAndCorruptDatabasesAndRestoresBackup)
 {
     TemporaryDirectory unsupported_temporary{"unsupported"};
@@ -296,7 +325,7 @@ TEST(StorageMetadataDatabase, RejectsUnsupportedAndCorruptDatabasesAndRestoresBa
     std::filesystem::create_directories(unsupported_options.database_path.parent_path());
     {
         RawDatabase raw{unsupported_options.database_path};
-        raw.execute("PRAGMA user_version=2;");
+        raw.execute("PRAGMA user_version=3;");
     }
     auto unsupported = EventMetadataDatabase::open(unsupported_options);
     ASSERT_FALSE(unsupported);

@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -420,6 +421,25 @@ CREATE INDEX IF NOT EXISTS idx_alarm_history_time ON alarm_history(raised_at_utc
 CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON audit_logs(occurred_at_utc_ms DESC);
 )sql";
 
+constexpr std::string_view schema_v2 = R"sql(
+CREATE TABLE IF NOT EXISTS event_retention(
+  event_id TEXT PRIMARY KEY NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+  locked INTEGER NOT NULL DEFAULT 0 CHECK(locked IN (0,1)),
+  deletion_allowed INTEGER NOT NULL DEFAULT 0 CHECK(deletion_allowed IN (0,1)),
+  deletion_state TEXT NOT NULL DEFAULT 'Active'
+    CHECK(deletion_state IN ('Active','DeletePending','DeleteFailed','Deleted')),
+  deletion_relative_path TEXT NOT NULL DEFAULT '',
+  manifest_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK(manifest_size_bytes >= 0),
+  last_error TEXT NOT NULL DEFAULT '',
+  updated_at_utc_ms INTEGER NOT NULL DEFAULT 0,
+  deleted_at_utc_ms INTEGER,
+  CHECK(deletion_state <> 'Deleted' OR deleted_at_utc_ms IS NOT NULL)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_event_retention_cleanup
+  ON event_retention(deletion_state,locked,deletion_allowed,event_id);
+INSERT OR IGNORE INTO event_retention(event_id) SELECT event_id FROM events;
+)sql";
+
 Result<void> migrate_to_v1(sqlite3* database)
 {
     auto begun = execute(database, "BEGIN IMMEDIATE", "database.migrate.begin", true);
@@ -428,6 +448,24 @@ Result<void> migrate_to_v1(sqlite3* database)
     auto schema = execute(database, schema_v1, "database.migrate.schema-v1", true);
     if (schema)
         schema = execute(database, "PRAGMA user_version=1", "database.migrate.version", true);
+    if (schema)
+        schema = execute(database, "COMMIT", "database.migrate.commit", true);
+    if (!schema)
+    {
+        static_cast<void>(execute(database, "ROLLBACK", "database.migrate.rollback", true));
+        return schema;
+    }
+    return Result<void>::success();
+}
+
+Result<void> migrate_to_v2(sqlite3* database)
+{
+    auto begun = execute(database, "BEGIN IMMEDIATE", "database.migrate.begin", true);
+    if (!begun)
+        return begun;
+    auto schema = execute(database, schema_v2, "database.migrate.schema-v2", true);
+    if (schema)
+        schema = execute(database, "PRAGMA user_version=2", "database.migrate.version", true);
     if (schema)
         schema = execute(database, "COMMIT", "database.migrate.commit", true);
     if (!schema)
@@ -575,6 +613,7 @@ std::optional<std::int64_t> json_time(const Json& value, const std::string_view 
 struct IndexedManifest final
 {
     Json value;
+    std::size_t manifest_size_bytes{};
     EventMetadataRecord event;
     std::int64_t pre_event_ms{};
     std::int64_t post_event_ms{};
@@ -614,6 +653,7 @@ Result<IndexedManifest> parse_index_manifest(const std::string& manifest_text)
                 reconcile_error("事件 manifest 时间或数值字段无法索引", "database.index.parse"));
 
         IndexedManifest indexed;
+        indexed.manifest_size_bytes = manifest_text.size();
         indexed.event = {.event_id = value.at("eventId").get<std::string>(),
                          .event_schema_version = value.at("schemaVersion").get<std::uint32_t>(),
                          .event_state = value.at("eventState").get<std::string>(),
@@ -730,6 +770,24 @@ ON CONFLICT(event_id) DO UPDATE SET
     auto stepped = step_done(database, statement.get(), "database.index.event", true);
     if (!stepped)
         return stepped;
+
+    auto retention = prepare(database, R"sql(
+INSERT INTO event_retention(event_id,manifest_size_bytes) VALUES(?,?)
+ ON CONFLICT(event_id) DO UPDATE SET manifest_size_bytes=excluded.manifest_size_bytes
+)sql",
+                             "database.index.retention", true);
+    if (!retention)
+        return Result<void>::failure(std::move(retention).error());
+    auto retention_statement = std::move(retention).value();
+    int retention_index = 1;
+    if (!bind_text(retention_statement.get(), retention_index, event.event_id) ||
+        !bind_int64(retention_statement.get(), retention_index,
+                    static_cast<std::int64_t>(indexed.manifest_size_bytes)))
+        return bind_failure(database, "database.index.retention.bind");
+    auto retention_inserted =
+        step_done(database, retention_statement.get(), "database.index.retention", true);
+    if (!retention_inserted)
+        return retention_inserted;
 
     for (const auto table : {"event_cameras", "key_frames", "event_files"})
     {
@@ -1008,7 +1066,11 @@ Result<std::unique_ptr<EventMetadataDatabase>> EventMetadataDatabase::open(
                     std::move(backup).error());
             report.migration_backup = backup_path;
         }
-        auto migrated = migrate_to_v1(connection.get());
+        auto migrated = Result<void>::success();
+        if (version.value() == 0U)
+            migrated = migrate_to_v1(connection.get());
+        if (migrated && version.value() <= 1U)
+            migrated = migrate_to_v2(connection.get());
         if (!migrated)
             return Result<std::unique_ptr<EventMetadataDatabase>>::failure(
                 std::move(migrated).error());
@@ -1254,7 +1316,8 @@ Result<EventQueryPage> EventMetadataDatabase::query_events(const EventQuery& que
 SELECT e.event_id,e.event_schema_version,e.event_state,e.candidate_time_utc_ms,
  e.confirmed_time_utc_ms,e.start_time_utc_ms,e.end_time_utc_ms,e.trigger_camera_id,
  e.trigger_frame_number,e.trigger_reason,e.confidence,e.upload_state,e.storage_state,
- e.relative_directory FROM events e)sql" +
+ r.locked,r.deletion_allowed,r.deletion_state,e.relative_directory
+ FROM events e JOIN event_retention r ON r.event_id=e.event_id)sql" +
         where + " ORDER BY e.candidate_time_utc_ms DESC,e.event_id DESC LIMIT ? OFFSET ?";
     auto rows = prepare(impl_->database.get(), select, "database.query.rows");
     if (!rows)
@@ -1291,7 +1354,10 @@ SELECT e.event_id,e.event_schema_version,e.event_state,e.candidate_time_utc_ms,
             .confidence = sqlite3_column_double(row_statement.get(), 10),
             .upload_state = column_text(row_statement.get(), 11),
             .storage_state = column_text(row_statement.get(), 12),
-            .relative_directory = column_text(row_statement.get(), 13)};
+            .retention_locked = sqlite3_column_int64(row_statement.get(), 13) != 0,
+            .deletion_allowed = sqlite3_column_int64(row_statement.get(), 14) != 0,
+            .deletion_state = column_text(row_statement.get(), 15),
+            .relative_directory = column_text(row_statement.get(), 16)};
         if (sqlite3_column_type(row_statement.get(), 4) != SQLITE_NULL)
             event.confirmed_time_utc_ms = sqlite3_column_int64(row_statement.get(), 4);
         page.events.push_back(std::move(event));
@@ -1324,6 +1390,284 @@ SELECT e.event_id,e.event_schema_version,e.event_state,e.candidate_time_utc_ms,
                                                                   "事件相机筛选结果读取失败"));
     }
     return Result<EventQueryPage>::success(std::move(page));
+}
+
+Result<void> EventMetadataDatabase::set_retention_policy(const std::string_view event_id,
+                                                         const bool locked,
+                                                         const bool deletion_allowed,
+                                                         const std::int64_t updated_at_utc_ms)
+{
+    if (!valid_text(event_id) || updated_at_utc_ms < 0)
+        return Result<void>::failure(
+            config_error("事件保留策略参数无效", "database.retention.set.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    auto prepared = prepare(impl_->database.get(), R"sql(
+UPDATE event_retention SET locked=?,deletion_allowed=?,updated_at_utc_ms=?
+ WHERE event_id=? AND deletion_state='Active'
+)sql",
+                            "database.retention.set");
+    if (!prepared)
+        return Result<void>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind_int64(statement.get(), index, locked ? 1 : 0) ||
+        !bind_int64(statement.get(), index, deletion_allowed ? 1 : 0) ||
+        !bind_int64(statement.get(), index, updated_at_utc_ms) ||
+        !bind_text(statement.get(), index, event_id))
+        return bind_failure(impl_->database.get(), "database.retention.set.bind");
+    auto updated = step_done(impl_->database.get(), statement.get(), "database.retention.set");
+    if (!updated)
+        return updated;
+    if (sqlite3_changes(impl_->database.get()) != 1)
+        return Result<void>::failure(
+            reconcile_error("事件不存在或已完成删除", "database.retention.set"));
+    return Result<void>::success();
+}
+
+namespace
+{
+Result<std::vector<EventRetentionRecord>> read_retention_rows(
+    sqlite3* database, const std::string_view sql,
+    const std::function<bool(sqlite3_stmt*, int&)>& bind, const std::string_view operation)
+{
+    auto prepared = prepare(database, sql, operation);
+    if (!prepared)
+        return Result<std::vector<EventRetentionRecord>>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind(statement.get(), index))
+        return Result<std::vector<EventRetentionRecord>>::failure(
+            std::move(bind_failure(database, std::string{operation} + ".bind")).error());
+    std::vector<EventRetentionRecord> rows;
+    int result = SQLITE_ROW;
+    while ((result = sqlite3_step(statement.get())) == SQLITE_ROW)
+    {
+        const auto bytes = sqlite3_column_int64(statement.get(), 5);
+        if (bytes < 0)
+            return Result<std::vector<EventRetentionRecord>>::failure(
+                database_error(database, SQLITE_CORRUPT, operation, "事件文件占用统计为负数"));
+        rows.push_back({.event_id = column_text(statement.get(), 0),
+                        .candidate_time_utc_ms = sqlite3_column_int64(statement.get(), 1),
+                        .upload_state = column_text(statement.get(), 2),
+                        .storage_state = column_text(statement.get(), 3),
+                        .relative_directory = column_text(statement.get(), 4),
+                        .indexed_file_bytes = static_cast<std::uint64_t>(bytes),
+                        .locked = sqlite3_column_int64(statement.get(), 6) != 0,
+                        .deletion_allowed = sqlite3_column_int64(statement.get(), 7) != 0,
+                        .deletion_state = column_text(statement.get(), 8),
+                        .deletion_relative_path = column_text(statement.get(), 9),
+                        .last_error = column_text(statement.get(), 10)});
+    }
+    if (result != SQLITE_DONE)
+        return Result<std::vector<EventRetentionRecord>>::failure(
+            database_error(database, result, operation, "事件保留记录查询失败"));
+    return Result<std::vector<EventRetentionRecord>>::success(std::move(rows));
+}
+
+constexpr std::string_view retention_select = R"sql(
+SELECT e.event_id,e.candidate_time_utc_ms,e.upload_state,e.storage_state,e.relative_directory,
+ COALESCE((SELECT SUM(f.size_bytes) FROM event_files f WHERE f.event_id=e.event_id),0)
+   + r.manifest_size_bytes,
+ r.locked,r.deletion_allowed,r.deletion_state,r.deletion_relative_path,r.last_error
+ FROM events e JOIN event_retention r ON r.event_id=e.event_id
+)sql";
+} // namespace
+
+Result<std::vector<EventRetentionRecord>> EventMetadataDatabase::retention_candidates(
+    const std::optional<std::int64_t> candidate_time_cutoff_utc_ms, const std::size_t limit) const
+{
+    if (limit == 0U || limit > database_maximum_page_size ||
+        (candidate_time_cutoff_utc_ms && *candidate_time_cutoff_utc_ms < 0))
+        return Result<std::vector<EventRetentionRecord>>::failure(
+            config_error("保留清理查询参数无效", "database.retention.candidates.validate"));
+    std::string sql{retention_select};
+    sql += R"sql( WHERE e.upload_state='Uploaded' AND e.storage_state='Present'
+ AND r.locked=0 AND r.deletion_allowed=1 AND r.deletion_state='Active')sql";
+    if (candidate_time_cutoff_utc_ms)
+        sql += " AND e.candidate_time_utc_ms<=?";
+    sql += " ORDER BY e.candidate_time_utc_ms ASC,e.event_id ASC LIMIT ?";
+    const std::scoped_lock lock{impl_->mutex};
+    return read_retention_rows(
+        impl_->database.get(), sql,
+        [&](sqlite3_stmt* statement, int& index) {
+            bool bound = true;
+            if (candidate_time_cutoff_utc_ms)
+                bound = bind_int64(statement, index, *candidate_time_cutoff_utc_ms);
+            return bound && bind_int64(statement, index, static_cast<std::int64_t>(limit));
+        },
+        "database.retention.candidates");
+}
+
+Result<std::vector<EventRetentionRecord>> EventMetadataDatabase::deletion_work(
+    const std::size_t limit) const
+{
+    if (limit == 0U || limit > database_maximum_page_size)
+        return Result<std::vector<EventRetentionRecord>>::failure(
+            config_error("删除恢复查询参数无效", "database.retention.work.validate"));
+    std::string sql{retention_select};
+    sql += R"sql( WHERE r.deletion_state IN ('DeletePending','DeleteFailed')
+ ORDER BY e.candidate_time_utc_ms ASC,e.event_id ASC LIMIT ?)sql";
+    const std::scoped_lock lock{impl_->mutex};
+    return read_retention_rows(
+        impl_->database.get(), sql,
+        [&](sqlite3_stmt* statement, int& index) {
+            return bind_int64(statement, index, static_cast<std::int64_t>(limit));
+        },
+        "database.retention.work");
+}
+
+Result<bool> EventMetadataDatabase::begin_deletion(
+    const std::string_view event_id, const std::filesystem::path& deletion_relative_path,
+    const std::int64_t updated_at_utc_ms)
+{
+    const auto relative = deletion_relative_path.generic_string();
+    std::vector<std::filesystem::path> components;
+    for (const auto& component : deletion_relative_path)
+        components.push_back(component);
+    if (!valid_text(event_id) || !valid_text(relative) || deletion_relative_path.is_absolute() ||
+        components.size() != 2U || components.front() != ".deletions" ||
+        components.back().generic_string() != std::string{event_id} + ".deleting" ||
+        updated_at_utc_ms < 0)
+        return Result<bool>::failure(
+            config_error("事件删除声明参数无效", "database.retention.begin.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    auto prepared = prepare(impl_->database.get(), R"sql(
+UPDATE event_retention SET deletion_state='DeletePending',deletion_relative_path=?,last_error='',
+ updated_at_utc_ms=? WHERE event_id=? AND
+ (deletion_state='DeleteFailed' OR
+  (deletion_state='Active' AND locked=0 AND deletion_allowed=1
+   AND EXISTS(SELECT 1 FROM events e WHERE e.event_id=event_retention.event_id
+              AND e.upload_state='Uploaded' AND e.storage_state='Present')))
+)sql",
+                            "database.retention.begin");
+    if (!prepared)
+        return Result<bool>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind_text(statement.get(), index, relative) ||
+        !bind_int64(statement.get(), index, updated_at_utc_ms) ||
+        !bind_text(statement.get(), index, event_id))
+        return Result<bool>::failure(
+            std::move(bind_failure(impl_->database.get(), "database.retention.begin.bind"))
+                .error());
+    auto updated = step_done(impl_->database.get(), statement.get(), "database.retention.begin");
+    if (!updated)
+        return Result<bool>::failure(std::move(updated).error());
+    return Result<bool>::success(sqlite3_changes(impl_->database.get()) == 1);
+}
+
+Result<void> EventMetadataDatabase::complete_deletion(const std::string_view event_id,
+                                                      const std::int64_t deleted_at_utc_ms)
+{
+    if (!valid_text(event_id) || deleted_at_utc_ms < 0)
+        return Result<void>::failure(
+            config_error("事件删除完成参数无效", "database.retention.complete.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    auto begun = execute(impl_->database.get(), "BEGIN IMMEDIATE", "database.retention.complete");
+    if (!begun)
+        return begun;
+    auto retention = prepare(impl_->database.get(), R"sql(
+UPDATE event_retention SET deletion_state='Deleted',last_error='',updated_at_utc_ms=?,
+ deleted_at_utc_ms=? WHERE event_id=? AND deletion_state IN ('DeletePending','DeleteFailed')
+)sql",
+                             "database.retention.complete");
+    if (!retention)
+    {
+        static_cast<void>(execute(impl_->database.get(), "ROLLBACK", "database.rollback"));
+        return Result<void>::failure(std::move(retention).error());
+    }
+    auto statement = std::move(retention).value();
+    int index = 1;
+    if (!bind_int64(statement.get(), index, deleted_at_utc_ms) ||
+        !bind_int64(statement.get(), index, deleted_at_utc_ms) ||
+        !bind_text(statement.get(), index, event_id))
+    {
+        static_cast<void>(execute(impl_->database.get(), "ROLLBACK", "database.rollback"));
+        return bind_failure(impl_->database.get(), "database.retention.complete.bind");
+    }
+    auto updated = step_done(impl_->database.get(), statement.get(), "database.retention.complete");
+    if (!updated || sqlite3_changes(impl_->database.get()) != 1)
+    {
+        static_cast<void>(execute(impl_->database.get(), "ROLLBACK", "database.rollback"));
+        return updated ? Result<void>::failure(reconcile_error("事件不处于可完成删除状态",
+                                                               "database.retention.complete"))
+                       : updated;
+    }
+    auto event =
+        prepare(impl_->database.get(), "UPDATE events SET storage_state='Missing' WHERE event_id=?",
+                "database.retention.complete.event");
+    if (!event)
+    {
+        static_cast<void>(execute(impl_->database.get(), "ROLLBACK", "database.rollback"));
+        return Result<void>::failure(std::move(event).error());
+    }
+    auto event_statement = std::move(event).value();
+    index = 1;
+    if (!bind_text(event_statement.get(), index, event_id))
+    {
+        static_cast<void>(execute(impl_->database.get(), "ROLLBACK", "database.rollback"));
+        return bind_failure(impl_->database.get(), "database.retention.complete.event.bind");
+    }
+    updated = step_done(impl_->database.get(), event_statement.get(),
+                        "database.retention.complete.event");
+    if (!updated)
+    {
+        static_cast<void>(execute(impl_->database.get(), "ROLLBACK", "database.rollback"));
+        return updated;
+    }
+    return execute(impl_->database.get(), "COMMIT", "database.retention.complete.commit");
+}
+
+Result<void> EventMetadataDatabase::fail_deletion(const std::string_view event_id,
+                                                  const std::string_view reason,
+                                                  const std::int64_t updated_at_utc_ms)
+{
+    if (!valid_text(event_id) || !valid_text(reason) || updated_at_utc_ms < 0)
+        return Result<void>::failure(
+            config_error("事件删除失败参数无效", "database.retention.fail.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    auto prepared = prepare(impl_->database.get(), R"sql(
+UPDATE event_retention SET deletion_state='DeleteFailed',last_error=?,updated_at_utc_ms=?
+ WHERE event_id=? AND deletion_state IN ('DeletePending','DeleteFailed')
+)sql",
+                            "database.retention.fail");
+    if (!prepared)
+        return Result<void>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind_text(statement.get(), index, reason) ||
+        !bind_int64(statement.get(), index, updated_at_utc_ms) ||
+        !bind_text(statement.get(), index, event_id))
+        return bind_failure(impl_->database.get(), "database.retention.fail.bind");
+    auto updated = step_done(impl_->database.get(), statement.get(), "database.retention.fail");
+    if (!updated)
+        return updated;
+    if (sqlite3_changes(impl_->database.get()) != 1)
+        return Result<void>::failure(
+            reconcile_error("事件不处于删除工作状态", "database.retention.fail"));
+    return Result<void>::success();
+}
+
+Result<std::uint64_t> EventMetadataDatabase::retained_event_bytes() const
+{
+    const std::scoped_lock lock{impl_->mutex};
+    auto prepared = prepare(impl_->database.get(), R"sql(
+SELECT COALESCE(SUM(f.size_bytes),0)
+ + COALESCE((SELECT SUM(manifest_size_bytes) FROM event_retention
+             WHERE deletion_state<>'Deleted'),0)
+ FROM event_files f JOIN event_retention r ON r.event_id=f.event_id
+ WHERE r.deletion_state<>'Deleted'
+)sql",
+                            "database.retention.bytes");
+    if (!prepared)
+        return Result<std::uint64_t>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    const auto result = sqlite3_step(statement.get());
+    const auto bytes = result == SQLITE_ROW ? sqlite3_column_int64(statement.get(), 0) : -1;
+    if (result != SQLITE_ROW || bytes < 0)
+        return Result<std::uint64_t>::failure(database_error(
+            impl_->database.get(), result, "database.retention.bytes", "无法统计保留事件占用"));
+    return Result<std::uint64_t>::success(static_cast<std::uint64_t>(bytes));
 }
 
 Result<EventReconcileReport> EventMetadataDatabase::reconcile()
