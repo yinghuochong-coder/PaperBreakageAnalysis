@@ -91,11 +91,11 @@
   },
   "storage": {
     "cacheRoot": "data/cache",
-    "criticalFreeSpaceGiB": 100,
+    "criticalFreeSpaceGiB": 60,
     "eventRoot": "data/事件 数据",
     "maximumEventStorageGiB": 1000,
     "stopFreeSpaceGiB": 20,
-    "warningFreeSpaceGiB": 200
+    "warningFreeSpaceGiB": 100
   },
   "system": {
     "machineId": "EDGE-001",
