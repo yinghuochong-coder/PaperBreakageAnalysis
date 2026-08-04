@@ -24,6 +24,7 @@
 #include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimeZone>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -37,6 +38,43 @@ namespace paperbreak::console
 {
 namespace
 {
+
+constexpr int table_header_minimum_height = 32;
+constexpr int table_header_vertical_margin = 12;
+constexpr auto local_date_time_format = "yyyy-MM-dd HH:mm:ss.zzz ttt";
+constexpr auto local_clock_format = "yyyy-MM-dd HH:mm:ss ttt";
+
+std::optional<QDateTime> parse_external_date_time(const QString& text)
+{
+    QDateTime parsed = QDateTime::fromString(text, Qt::ISODateWithMs);
+    if (!parsed.isValid())
+        parsed = QDateTime::fromString(text, Qt::ISODate);
+    if (!parsed.isValid() || parsed.timeSpec() == Qt::LocalTime)
+        return std::nullopt;
+    return parsed;
+}
+
+QString local_date_time_text(const std::string_view timestamp)
+{
+    const QString original =
+        QString::fromUtf8(timestamp.data(), static_cast<qsizetype>(timestamp.size()));
+    const auto parsed = parse_external_date_time(original);
+    return parsed ? parsed->toLocalTime().toString(QString::fromLatin1(local_date_time_format))
+                  : original;
+}
+
+QString local_epoch_milliseconds_text(const std::string_view timestamp)
+{
+    const QString original =
+        QString::fromUtf8(timestamp.data(), static_cast<qsizetype>(timestamp.size()));
+    bool converted{};
+    const qint64 milliseconds = original.toLongLong(&converted);
+    if (!converted)
+        return original;
+    return QDateTime::fromMSecsSinceEpoch(milliseconds, QTimeZone::utc())
+        .toLocalTime()
+        .toString(QString::fromLatin1(local_date_time_format));
+}
 
 template <typename T, typename... Arguments>
 T* make_child(QWidget* parent, Arguments&&... arguments)
@@ -129,8 +167,22 @@ void configure_table(QTableWidget* table, const QStringList& headers)
     table->setSelectionMode(QAbstractItemView::SingleSelection);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setAlternatingRowColors(true);
-    table->horizontalHeader()->setStretchLastSection(true);
+    QHeaderView* horizontal_header = table->horizontalHeader();
+    horizontal_header->setMinimumHeight(
+        std::max(table_header_minimum_height,
+                 horizontal_header->fontMetrics().height() + table_header_vertical_margin));
+    horizontal_header->setStretchLastSection(true);
     table->verticalHeader()->setVisible(false);
+}
+
+bool has_readable_table_header(const QTableWidget* table)
+{
+    if (!table || !table->horizontalHeader())
+        return false;
+    const QHeaderView* header = table->horizontalHeader();
+    const int required_height = std::max(
+        table_header_minimum_height, header->fontMetrics().height() + table_header_vertical_margin);
+    return header->minimumHeight() >= required_height && header->height() >= required_height;
 }
 
 void set_table_item(QTableWidget* table, const int row, const int column, const QString& text,
@@ -314,6 +366,7 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
     status_grid->addWidget(make_status_item(header, QStringLiteral("服务"), service_value_), 0, 0);
     status_grid->addWidget(make_status_item(header, QStringLiteral("当前时间"), clock_value_), 0,
                            1);
+    clock_value_->setObjectName(QStringLiteral("current-local-time"));
     status_grid->addWidget(make_status_item(header, QStringLiteral("工控机编号"), machine_value_),
                            0, 2);
     status_grid->addWidget(make_status_item(header, QStringLiteral("上位机"), uplink_value_), 0, 3);
@@ -408,6 +461,7 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
     QGroupBox* recent_alarms = make_child<QGroupBox>(overview, QStringLiteral("最近活动报警"));
     auto* recent_layout = make_layout<QVBoxLayout>(recent_alarms);
     recent_alarms_value_ = make_value_label(recent_alarms, QStringLiteral("等待报警状态"));
+    recent_alarms_value_->setObjectName(QStringLiteral("recent-alarms"));
     recent_alarms_value_->setWordWrap(true);
     recent_layout->addWidget(recent_alarms_value_);
     overview_layout->addWidget(recent_alarms);
@@ -1267,13 +1321,13 @@ void MainWindow::update_alarm_details()
     QStringList details;
     details.push_back(QStringLiteral("%1 · 首次 %2 · 最近 %3 · 发生 %4 次")
                           .arg(QString::fromStdString(found->code),
-                               QString::fromStdString(found->first_occurred_at),
-                               QString::fromStdString(found->last_occurred_at))
+                               local_date_time_text(found->first_occurred_at),
+                               local_date_time_text(found->last_occurred_at))
                           .arg(found->occurrence_count));
     details.push_back(QString::fromStdString(found->message));
     for (const auto& [key, value] : found->details)
         details.push_back(QStringLiteral("%1 = %2").arg(QString::fromStdString(key),
-                                                        QString::fromStdString(value)));
+                                                        local_date_time_text(value)));
     alarm_details_->setText(details.join(QChar{'\n'}));
     alarm_acknowledge_->setEnabled(operations_snapshot_.connection.state ==
                                        ipc::ClientConnectionState::connected &&
@@ -1293,10 +1347,15 @@ void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
         const auto& metric = snapshot.metrics[index];
         const int row = static_cast<int>(index);
         set_table_item(metrics_table_, row, 0, QString::fromStdString(metric.name));
+        const bool is_wall_clock = metric.unit == "unix_milliseconds";
         set_table_item(metrics_table_, row, 1,
-                       metric.available ? QString::fromStdString(metric.value)
-                                        : QStringLiteral("不可用"));
-        set_table_item(metrics_table_, row, 2, QString::fromStdString(metric.unit));
+                       metric.available
+                           ? (is_wall_clock ? local_epoch_milliseconds_text(metric.value)
+                                            : QString::fromStdString(metric.value))
+                           : QStringLiteral("不可用"));
+        set_table_item(metrics_table_, row, 2,
+                       is_wall_clock ? QStringLiteral("本地时间")
+                                     : QString::fromStdString(metric.unit));
         set_table_item(metrics_table_, row, 3,
                        stale_value(metric.available ? QStringLiteral("可用")
                                                     : QStringLiteral("未初始化/不可用"),
@@ -1316,7 +1375,7 @@ void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
         const int row = static_cast<int>(index);
         set_table_item(alarm_table_, row, 0, QString::number(alarm.alarm_id),
                        QVariant::fromValue<qulonglong>(alarm.alarm_id));
-        set_table_item(alarm_table_, row, 1, QString::fromStdString(alarm.last_occurred_at));
+        set_table_item(alarm_table_, row, 1, local_date_time_text(alarm.last_occurred_at));
         set_table_item(alarm_table_, row, 2, QString::fromStdString(alarm.severity));
         set_table_item(alarm_table_, row, 3, QString::fromStdString(alarm.source));
         set_table_item(alarm_table_, row, 4, QString::fromStdString(alarm.code));
@@ -1340,7 +1399,7 @@ void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
         const auto& record = snapshot.logs[index];
         const int row = static_cast<int>(index);
         set_table_item(log_table_, row, 0, QString::number(record.sequence));
-        set_table_item(log_table_, row, 1, QString::fromStdString(record.timestamp));
+        set_table_item(log_table_, row, 1, local_date_time_text(record.timestamp));
         set_table_item(log_table_, row, 2, QString::number(record.thread_id));
         set_table_item(log_table_, row, 3, QString::fromStdString(record.category));
         set_table_item(log_table_, row, 4, QString::fromStdString(record.level));
@@ -1412,7 +1471,7 @@ void MainWindow::apply_snapshot(const ClientStateSnapshot& snapshot)
                                     .arg(QString::fromStdString(alarm.severity),
                                          QString::fromStdString(alarm.source),
                                          QString::fromStdString(alarm.message),
-                                         QString::fromStdString(alarm.last_occurred_at)));
+                                         local_date_time_text(alarm.last_occurred_at)));
             }
             recent_alarms_value_->setText(
                 stale_value(lines.join(QChar{'\n'}), snapshot.alarms_stale));
@@ -1464,7 +1523,7 @@ void MainWindow::apply_snapshot(const ClientStateSnapshot& snapshot)
 void MainWindow::update_clock()
 {
     clock_value_->setText(
-        QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")));
+        QDateTime::currentDateTime().toString(QString::fromLatin1(local_clock_format)));
 }
 
 std::size_t MainWindow::page_count() const noexcept
@@ -1526,7 +1585,9 @@ bool MainWindow::operations_pages_ready() const noexcept
 {
     return metrics_table_ && alarm_scope_ && alarm_severity_ && alarm_source_ && alarm_table_ &&
            alarm_details_ && alarm_acknowledge_ && alarm_export_ && log_category_ && log_level_ &&
-           log_table_ && operations_status_ && diagnostics_export_;
+           log_table_ && operations_status_ && diagnostics_export_ &&
+           has_readable_table_header(metrics_table_) && has_readable_table_header(alarm_table_) &&
+           has_readable_table_header(log_table_);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

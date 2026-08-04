@@ -10,12 +10,15 @@
 #include "src/system_tray_controller.hpp"
 
 #include <QApplication>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QLabel>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QSettings>
+#include <QTableWidget>
 #include <QTimer>
 #include <QUrl>
 
@@ -347,8 +350,69 @@ int main(int argc, char* argv[])
             QStringLiteral("dark");
         const bool selected_system =
             main_window.select_theme_mode(paperbreak::console::ThemeMode::system);
+        constexpr auto sample_first_time = "2026-08-04T00:00:01.000Z";
+        constexpr auto sample_last_time = "2026-08-04T00:00:02.000Z";
+        const QDateTime sample_last_date_time =
+            QDateTime::fromString(QString::fromLatin1(sample_last_time), Qt::ISODateWithMs);
+        const QString expected_first_local =
+            QDateTime::fromString(QString::fromLatin1(sample_first_time), Qt::ISODateWithMs)
+                .toLocalTime()
+                .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz ttt"));
+        const QString expected_last_local = sample_last_date_time.toLocalTime().toString(
+            QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz ttt"));
         paperbreak::console::OperationsSnapshot operations_smoke;
+        operations_smoke.metrics.push_back(
+            {.name = "camera.CAM01.last_frame_epoch_ms",
+             .value = std::to_string(sample_last_date_time.toMSecsSinceEpoch()),
+             .unit = "unix_milliseconds",
+             .available = true});
+        operations_smoke.alarms.push_back({.alarm_id = 1U,
+                                           .code = "CAMERA_OFFLINE",
+                                           .severity = "Warning",
+                                           .source = "CAM01",
+                                           .first_occurred_at = sample_first_time,
+                                           .last_occurred_at = sample_last_time,
+                                           .active = true,
+                                           .occurrence_count = 1U,
+                                           .message = "camera offline"});
+        operations_smoke.logs.push_back({.sequence = 1U,
+                                         .timestamp = sample_last_time,
+                                         .thread_id = 1U,
+                                         .category = "camera",
+                                         .level = "warning",
+                                         .message = "camera timeout"});
         main_window.apply_operations_snapshot(operations_smoke);
+        auto* const metrics_table =
+            main_window.findChild<QTableWidget*>(QStringLiteral("operations-metrics"));
+        auto* const alarm_table =
+            main_window.findChild<QTableWidget*>(QStringLiteral("operations-alarms"));
+        auto* const log_table =
+            main_window.findChild<QTableWidget*>(QStringLiteral("operations-logs"));
+        if (alarm_table)
+            alarm_table->selectRow(0);
+        auto* const alarm_details = main_window.findChild<QLabel*>(QStringLiteral("alarm-details"));
+        auto* const clock = main_window.findChild<QLabel*>(QStringLiteral("current-local-time"));
+        paperbreak::console::ClientStateSnapshot local_time_snapshot;
+        local_time_snapshot.alarms = paperbreak::console::AlarmOverviewSummary{};
+        local_time_snapshot.alarms->recent.push_back({.alarm_id = 1U,
+                                                      .severity = "Warning",
+                                                      .source = "CAM01",
+                                                      .last_occurred_at = sample_last_time,
+                                                      .message = "camera offline"});
+        local_time_snapshot.alarms_stale = false;
+        main_window.apply_snapshot(local_time_snapshot);
+        auto* const recent_alarms = main_window.findChild<QLabel*>(QStringLiteral("recent-alarms"));
+        const bool local_time_displayed =
+            metrics_table && metrics_table->item(0, 1) && metrics_table->item(0, 2) &&
+            metrics_table->item(0, 1)->text() == expected_last_local &&
+            metrics_table->item(0, 2)->text() == QStringLiteral("本地时间") && alarm_table &&
+            alarm_table->item(0, 1) && alarm_table->item(0, 1)->text() == expected_last_local &&
+            log_table && log_table->item(0, 1) &&
+            log_table->item(0, 1)->text() == expected_last_local && alarm_details &&
+            alarm_details->text().contains(expected_first_local) &&
+            alarm_details->text().contains(expected_last_local) && recent_alarms &&
+            recent_alarms->text().contains(expected_last_local) && clock &&
+            clock->text().endsWith(QDateTime::currentDateTime().toString(QStringLiteral("ttt")));
         paperbreak::console::ClientStateSnapshot connected_tray_smoke;
         connected_tray_smoke.connection.state = paperbreak::ipc::ClientConnectionState::connected;
         tray.apply_snapshot(connected_tray_smoke);
@@ -362,7 +426,8 @@ int main(int argc, char* argv[])
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && empty_configuration_kept_discovery &&
                    restart_state_disabled_controls && main_window.operations_pages_ready() &&
-                   diagnostic_enabled_when_connected && diagnostic_disabled_when_disconnected &&
+                   local_time_displayed && diagnostic_enabled_when_connected &&
+                   diagnostic_disabled_when_disconnected &&
                    theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
                    selected_light && selected_dark && dark_theme_persisted && selected_system &&
                    main_window.select_page(11U) && main_window.select_page(0U);
