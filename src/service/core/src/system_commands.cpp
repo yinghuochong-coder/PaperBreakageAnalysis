@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <optional>
@@ -321,6 +322,149 @@ bool has_only_fields(const Json& object, const std::initializer_list<std::string
         }
     }
     return true;
+}
+
+Json event_config_json(const config::EventConfig& value)
+{
+    return {{"preEventSeconds", value.pre_event_seconds},
+            {"postEventSeconds", value.post_event_seconds},
+            {"maxEventSeconds", value.max_event_seconds},
+            {"mergeGapSeconds", value.merge_gap_seconds},
+            {"keyFrameCount", value.key_frame_count},
+            {"saveRaw", value.save_raw},
+            {"generatePreviewVideo", value.generate_preview_video},
+            {"uploadPolicy", value.upload_policy},
+            {"retentionDays", value.retention_days}};
+}
+
+Json event_record_json(const storage::EventMetadataRecord& event)
+{
+    return {{"eventId", event.event_id},
+            {"eventSchemaVersion", event.event_schema_version},
+            {"eventState", event.event_state},
+            {"reviewRevision", event.review_revision},
+            {"reviewedAtUtcMs",
+             event.reviewed_at_utc_ms ? Json(*event.reviewed_at_utc_ms) : Json(nullptr)},
+            {"reviewedBy", event.reviewed_by},
+            {"candidateTimeUtcMs", event.candidate_time_utc_ms},
+            {"confirmedTimeUtcMs",
+             event.confirmed_time_utc_ms ? Json(*event.confirmed_time_utc_ms) : Json(nullptr)},
+            {"startTimeUtcMs", event.start_time_utc_ms},
+            {"endTimeUtcMs", event.end_time_utc_ms},
+            {"cameraIds", event.camera_ids},
+            {"triggerCameraId", event.trigger_camera_id},
+            {"triggerFrameNumber", event.trigger_frame_number},
+            {"triggerReason", event.trigger_reason},
+            {"confidence", event.confidence},
+            {"uploadState", event.upload_state},
+            {"storageState", event.storage_state},
+            {"retentionLocked", event.retention_locked},
+            {"deletionAllowed", event.deletion_allowed},
+            {"deletionState", event.deletion_state},
+            {"relativeDirectory", path_to_utf8(event.relative_directory)},
+            {"thumbnailAvailable", event.storage_state == "Present"}};
+}
+
+Result<std::size_t> event_size_field(const Json& payload, const std::string_view key,
+                                     const std::size_t default_value, const std::size_t maximum,
+                                     const std::string_view operation)
+{
+    const auto found = payload.find(std::string{key});
+    if (found == payload.end())
+        return Result<std::size_t>::success(default_value);
+    if (!found->is_number_unsigned())
+        return Result<std::size_t>::failure(command_error("IPC_REQUEST_INVALID", Severity::error,
+                                                          std::string{key} + " 必须是非负整数",
+                                                          std::string{operation}));
+    const auto value = found->get<std::uint64_t>();
+    if (value > maximum)
+        return Result<std::size_t>::failure(command_error("IPC_REQUEST_INVALID", Severity::error,
+                                                          std::string{key} + " 超出允许范围",
+                                                          std::string{operation}));
+    return Result<std::size_t>::success(static_cast<std::size_t>(value));
+}
+
+Result<storage::EventQuery> event_query(const Json& payload)
+{
+    if (!has_only_fields(payload, {"startTimeUtcMs", "endTimeUtcMs", "eventState", "cameraId",
+                                   "offset", "limit"}))
+        return Result<storage::EventQuery>::failure(command_error(
+            "IPC_REQUEST_INVALID", Severity::error, "event.list 包含未知字段", "ipc.event.list"));
+    storage::EventQuery query;
+    auto offset = event_size_field(payload, "offset", 0U, 10'000'000U, "ipc.event.list");
+    auto limit = event_size_field(payload, "limit", storage::database_default_page_size,
+                                  storage::database_maximum_page_size, "ipc.event.list");
+    if (!offset)
+        return Result<storage::EventQuery>::failure(std::move(offset).error());
+    if (!limit || limit.value() == 0U)
+        return Result<storage::EventQuery>::failure(
+            limit ? command_error("IPC_REQUEST_INVALID", Severity::error, "limit 不能为零",
+                                  "ipc.event.list")
+                  : std::move(limit).error());
+    query.offset = offset.value();
+    query.limit = limit.value();
+    const auto time_field = [&](const std::string_view key,
+                                std::optional<std::int64_t>& destination) -> Result<void> {
+        const auto found = payload.find(std::string{key});
+        if (found == payload.end())
+            return Result<void>::success();
+        if (!found->is_number_integer() || found->get<std::int64_t>() < 0)
+            return Result<void>::failure(command_error("IPC_REQUEST_INVALID", Severity::error,
+                                                       std::string{key} + " 必须是非负整数",
+                                                       "ipc.event.list"));
+        destination = found->get<std::int64_t>();
+        return Result<void>::success();
+    };
+    auto start = time_field("startTimeUtcMs", query.start_time_utc_ms);
+    auto end = time_field("endTimeUtcMs", query.end_time_utc_ms);
+    if (!start)
+        return Result<storage::EventQuery>::failure(std::move(start).error());
+    if (!end)
+        return Result<storage::EventQuery>::failure(std::move(end).error());
+    const auto text_field = [&](const std::string_view key,
+                                std::optional<std::string>& destination) -> Result<void> {
+        const auto found = payload.find(std::string{key});
+        if (found == payload.end())
+            return Result<void>::success();
+        if (!found->is_string() || found->get_ref<const std::string&>().empty() ||
+            found->get_ref<const std::string&>().size() > 128U)
+            return Result<void>::failure(command_error("IPC_REQUEST_INVALID", Severity::error,
+                                                       std::string{key} + " 无效",
+                                                       "ipc.event.list"));
+        destination = found->get<std::string>();
+        return Result<void>::success();
+    };
+    auto state = text_field("eventState", query.event_state);
+    auto camera = text_field("cameraId", query.camera_id);
+    if (!state)
+        return Result<storage::EventQuery>::failure(std::move(state).error());
+    if (!camera)
+        return Result<storage::EventQuery>::failure(std::move(camera).error());
+    return Result<storage::EventQuery>::success(std::move(query));
+}
+
+Result<std::string> required_event_id(const Json& payload, const std::string_view operation,
+                                      const bool allow_expected_revision)
+{
+    if (!has_only_fields(
+            payload,
+            allow_expected_revision
+                ? std::initializer_list<std::string_view>{"eventId", "expectedReviewRevision"}
+                : std::initializer_list<std::string_view>{"eventId"}) ||
+        !payload.contains("eventId") || !payload["eventId"].is_string() ||
+        payload["eventId"].get_ref<const std::string&>().empty() ||
+        payload["eventId"].get_ref<const std::string&>().size() > 128U)
+        return Result<std::string>::failure(command_error("IPC_REQUEST_INVALID", Severity::error,
+                                                          "事件命令需要有效 eventId",
+                                                          std::string{operation}));
+    return Result<std::string>::success(payload["eventId"].get<std::string>());
+}
+
+std::int64_t current_utc_milliseconds() noexcept
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
 
 Json metric_value_json(const monitoring::MetricValue& value)
@@ -1013,21 +1157,29 @@ ServiceStatusSnapshot ServiceStatusStore::snapshot() const
     return result;
 }
 
-SystemCommandService::SystemCommandService(config::ConfigRepository& repository,
-                                           std::shared_ptr<ServiceStatusStore> status,
-                                           std::shared_ptr<monitoring::MetricRegistry> metrics,
-                                           std::shared_ptr<monitoring::AlarmRegistry> alarms,
-                                           std::shared_ptr<logging::LoggingRuntime> logging,
-                                           std::filesystem::path config_directory,
-                                           std::shared_ptr<pipeline::PreviewRuntime> preview,
-                                           std::shared_ptr<camera::CameraControlRuntime> cameras)
+SystemCommandService::SystemCommandService(
+    config::ConfigRepository& repository, std::shared_ptr<ServiceStatusStore> status,
+    std::shared_ptr<monitoring::MetricRegistry> metrics,
+    std::shared_ptr<monitoring::AlarmRegistry> alarms,
+    std::shared_ptr<logging::LoggingRuntime> logging, std::filesystem::path config_directory,
+    std::shared_ptr<pipeline::PreviewRuntime> preview,
+    std::shared_ptr<camera::CameraControlRuntime> cameras,
+    std::shared_ptr<EventRuntime> event_runtime,
+    std::shared_ptr<storage::EventMetadataDatabase> event_database,
+    std::shared_ptr<storage::EventInspector> event_inspector)
     : repository_(repository), status_(std::move(status)), metrics_(std::move(metrics)),
       alarms_(std::move(alarms)), logging_(std::move(logging)),
       config_directory_(std::move(config_directory)), preview_(std::move(preview)),
-      cameras_(std::move(cameras))
+      cameras_(std::move(cameras)), event_runtime_(std::move(event_runtime)),
+      event_database_(std::move(event_database)), event_inspector_(std::move(event_inspector))
 {
 }
 
+#if defined(_MSC_VER)
+// The dispatcher holds temporaries for mutually exclusive, bounded command branches. Its
+// analyzed frame is small relative to the fixed Windows worker-thread stack.
+#pragma warning(suppress : 6262)
+#endif
 Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMessage& request,
                                                           const ipc::PeerIdentity& peer,
                                                           const std::stop_token stop_token)
@@ -1036,6 +1188,246 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
     if (!payload)
     {
         return Result<ipc::CommandResponse>::failure(payload.error());
+    }
+
+    if (request.command.starts_with("event."))
+    {
+        const bool write_command =
+            request.command == "event.manualTrigger" || request.command == "event.confirm" ||
+            request.command == "event.reject" || request.command == "event.updateConfig" ||
+            request.command == "event.export" || request.command == "event.retryUpload";
+        if (write_command && (!peer.local || !peer.authenticated || !peer.administrator))
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_UNAUTHORIZED", Severity::error,
+                              "事件写操作要求提升后的本机管理员身份", "ipc.event.dispatch"));
+        if (write_command && stop_token.stop_requested())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_SERVICE_STOPPING", Severity::warning,
+                              "服务正在停止，拒绝事件写操作", "ipc.event.dispatch", true));
+        if (request.command == "event.getConfig")
+        {
+            if (!payload.value().empty())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "event.getConfig payload 必须为空", "ipc.event.getConfig"));
+            auto snapshot = repository_.snapshot();
+            if (!snapshot)
+                return Result<ipc::CommandResponse>::failure(snapshot.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{{"event", event_config_json(snapshot.value().stored->event)},
+                          {"storedConfigRevision", snapshot.value().stored_config_revision},
+                          {"effectiveConfigRevision", snapshot.value().effective_config_revision},
+                          {"previewVideoGenerationAvailable", false},
+                          {"uploadRuntimeAvailable", false}}
+                         .dump(),
+                 .binary = {}});
+        }
+        if (request.command == "event.updateConfig")
+        {
+            if (!has_only_fields(payload.value(), {"expectedConfigRevision", "event"}) ||
+                !payload.value().contains("expectedConfigRevision") ||
+                !payload.value()["expectedConfigRevision"].is_number_unsigned() ||
+                !payload.value().contains("event") || !payload.value()["event"].is_object())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "event.updateConfig 需要 expectedConfigRevision 和 event 对象",
+                                  "ipc.event.updateConfig"));
+            auto current = repository_.snapshot();
+            if (!current)
+                return Result<ipc::CommandResponse>::failure(current.error());
+            Json document = Json::parse(config::serialize_config(*current.value().stored));
+            document["event"] = payload.value()["event"];
+            auto updated = repository_.update(
+                document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
+                {.source = config::ConfigChangeSource::local_ipc,
+                 .actor = peer.actor_sid,
+                 .correlation_id = request.request_id});
+            if (!updated)
+                return Result<ipc::CommandResponse>::failure(updated.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{{"event", event_config_json(updated.value().stored->event)},
+                          {"storedConfigRevision", updated.value().stored_config_revision},
+                          {"effectiveConfigRevision", updated.value().effective_config_revision},
+                          {"applied", updated.value().pending_restart_paths.empty()},
+                          {"pendingRestartPaths", updated.value().pending_restart_paths}}
+                         .dump(),
+                 .binary = {}});
+        }
+        if (request.command == "event.retryUpload")
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_NOT_SUPPORTED", Severity::warning,
+                              "上传队列将在 M8 接入，当前不能重试上传", "ipc.event.retryUpload"));
+        if (request.command == "event.manualTrigger")
+        {
+            if (!has_only_field(payload.value(), "cameraId") ||
+                !payload.value()["cameraId"].is_string() ||
+                payload.value()["cameraId"].get_ref<const std::string&>().empty() ||
+                payload.value()["cameraId"].get_ref<const std::string&>().size() > 32U)
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error,
+                    "event.manualTrigger 必须且只能包含 cameraId", "ipc.event.manualTrigger"));
+            if (!event_runtime_)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("SYS_NOT_SUPPORTED", Severity::warning, "事件运行时尚未装配",
+                                  "ipc.event.manualTrigger"));
+            auto triggered = event_runtime_->request_manual_trigger(
+                payload.value()["cameraId"].get_ref<const std::string&>());
+            if (!triggered)
+                return Result<ipc::CommandResponse>::failure(triggered.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{{"accepted", triggered.value()}, {"alreadyPending", !triggered.value()}}
+                         .dump(),
+                 .binary = {}});
+        }
+        if (!event_database_)
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_NOT_SUPPORTED", Severity::warning, "事件数据库尚未装配",
+                              "ipc.event.dispatch"));
+        if (request.command == "event.list")
+        {
+            auto query = event_query(payload.value());
+            if (!query)
+                return Result<ipc::CommandResponse>::failure(query.error());
+            auto page = event_database_->query_events(query.value());
+            if (!page)
+                return Result<ipc::CommandResponse>::failure(page.error());
+            Json events = Json::array();
+            for (const auto& event : page.value().events)
+                events.push_back(event_record_json(event));
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = Json{{"events", std::move(events)},
+                                      {"total", page.value().total},
+                                      {"offset", page.value().offset},
+                                      {"limit", page.value().limit}}
+                                     .dump(),
+                 .binary = {}});
+        }
+        if (request.command == "event.get")
+        {
+            auto event_id = required_event_id(payload.value(), "ipc.event.get", false);
+            if (!event_id)
+                return Result<ipc::CommandResponse>::failure(event_id.error());
+            auto record = event_database_->get_event(event_id.value());
+            if (!record)
+                return Result<ipc::CommandResponse>::failure(record.error());
+            if (!event_inspector_)
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配", "ipc.event.get"));
+            auto inspected = event_inspector_->inspect(record.value().relative_directory);
+            if (!inspected)
+                return Result<ipc::CommandResponse>::failure(inspected.error());
+            Json response{
+                {"event", event_record_json(record.value())},
+                {"committedDirectory", path_to_utf8(inspected.value().committed_directory)},
+                {"rawFrameCount", inspected.value().raw_frames.size()},
+                {"keyFrameCount", inspected.value().key_frames.size()},
+                {"observedSequenceGaps", inspected.value().observed_sequence_gaps},
+                {"keyFramesTraceable", inspected.value().key_frames_traceable},
+                {"manifestBytes", inspected.value().manifest_json.size()},
+                {"thumbnailBytes", inspected.value().thumbnail_jpeg.size()}};
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = response.dump(),
+                 .binary = std::move(inspected).value().thumbnail_jpeg});
+        }
+        if (request.command == "event.getManifest")
+        {
+            auto event_id = required_event_id(payload.value(), "ipc.event.getManifest", false);
+            if (!event_id)
+                return Result<ipc::CommandResponse>::failure(event_id.error());
+            auto record = event_database_->get_event(event_id.value());
+            if (!record)
+                return Result<ipc::CommandResponse>::failure(record.error());
+            if (!event_inspector_)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配",
+                                  "ipc.event.getManifest"));
+            auto inspected = event_inspector_->inspect(record.value().relative_directory);
+            if (!inspected)
+                return Result<ipc::CommandResponse>::failure(inspected.error());
+            std::vector<std::byte> manifest;
+            manifest.reserve(inspected.value().manifest_json.size());
+            for (const unsigned char byte : inspected.value().manifest_json)
+                manifest.push_back(static_cast<std::byte>(byte));
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = Json{{"eventId", event_id.value()},
+                                      {"contentType", "application/json; charset=utf-8"},
+                                      {"size", manifest.size()},
+                                      {"verified", true}}
+                                     .dump(),
+                 .binary = std::move(manifest)});
+        }
+        if (request.command == "event.confirm" || request.command == "event.reject")
+        {
+            auto event_id = required_event_id(payload.value(), "ipc.event.review", true);
+            if (!event_id || !payload.value().contains("expectedReviewRevision") ||
+                !payload.value()["expectedReviewRevision"].is_number_unsigned() ||
+                payload.value()["expectedReviewRevision"].get<std::uint64_t>() == 0U)
+                return Result<ipc::CommandResponse>::failure(
+                    event_id ? command_error("IPC_REQUEST_INVALID", Severity::error,
+                                             "事件复核需要正整数 expectedReviewRevision",
+                                             "ipc.event.review")
+                             : event_id.error());
+            auto reviewed = event_database_->review_event(
+                event_id.value(), payload.value()["expectedReviewRevision"].get<std::uint64_t>(),
+                request.command == "event.confirm" ? storage::EventReviewDecision::confirmed
+                                                   : storage::EventReviewDecision::rejected,
+                current_utc_milliseconds(), peer.actor_sid);
+            if (!reviewed)
+                return Result<ipc::CommandResponse>::failure(reviewed.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = Json{{"event", event_record_json(reviewed.value().event)},
+                                      {"duplicate", reviewed.value().duplicate}}
+                                     .dump(),
+                 .binary = {}});
+        }
+        if (request.command == "event.export")
+        {
+            auto event_id = required_event_id(payload.value(), "ipc.event.export", false);
+            if (!event_id)
+                return Result<ipc::CommandResponse>::failure(event_id.error());
+            auto record = event_database_->get_event(event_id.value());
+            if (!record)
+                return Result<ipc::CommandResponse>::failure(record.error());
+            if (!event_inspector_)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配",
+                                  "ipc.event.export"));
+            auto configuration = repository_.snapshot();
+            if (!configuration)
+                return Result<ipc::CommandResponse>::failure(configuration.error());
+            auto cache_root = path_from_utf8(configuration.value().effective->storage.cache_root);
+            if (cache_root.is_relative())
+                cache_root = config_directory_ / cache_root;
+            std::error_code path_error;
+            cache_root = std::filesystem::absolute(cache_root, path_error).lexically_normal();
+            if (path_error)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("SYS_INTERNAL_ERROR", Severity::error, "无法解析事件导出缓存目录",
+                                  "ipc.event.export.path"));
+            const auto destination =
+                cache_root / ".event-exports" /
+                (event_id.value() + "-" + std::to_string(current_utc_milliseconds()) + "-" +
+                 std::to_string(std::hash<std::string>{}(request.request_id)) + ".zip");
+            auto archive =
+                event_inspector_->export_zip_file(record.value().relative_directory, destination);
+            if (!archive)
+                return Result<ipc::CommandResponse>::failure(archive.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = Json{{"eventId", archive.value().event_id},
+                                      {"fileName", archive.value().file_name},
+                                      {"contentType", "application/zip"},
+                                      {"size", archive.value().size_bytes},
+                                      {"sourceFileCount", archive.value().source_file_count},
+                                      {"exportSourcePath", path_to_utf8(archive.value().path)},
+                                      {"verified", true}}
+                                     .dump(),
+                 .binary = {}});
+        }
+        return Result<ipc::CommandResponse>::failure(command_error(
+            "IPC_REQUEST_INVALID", Severity::error, "未知事件 IPC 命令", "ipc.event.dispatch"));
     }
 
     if (request.command.starts_with("camera."))

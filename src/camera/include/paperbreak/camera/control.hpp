@@ -3,6 +3,8 @@
 #include "paperbreak/camera/acquisition.hpp"
 #include "paperbreak/camera/camera.hpp"
 
+#include <chrono>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -14,6 +16,13 @@
 namespace paperbreak::camera
 {
 using CameraFrameObserver = std::function<void(FrameView)>;
+
+struct CameraFrameDeliveryOptions final
+{
+    std::size_t frame_pool_capacity{8U};
+    std::size_t queue_capacity{4U};
+    std::chrono::milliseconds receive_timeout{250};
+};
 
 enum class CameraControlState
 {
@@ -36,7 +45,8 @@ class CameraControlRuntime final
 {
   public:
     explicit CameraControlRuntime(std::shared_ptr<ICameraProvider> provider = {},
-                                  CameraFrameObserver frame_observer = {});
+                                  CameraFrameObserver frame_observer = {},
+                                  CameraFrameDeliveryOptions delivery_options = {});
     ~CameraControlRuntime();
     CameraControlRuntime(const CameraControlRuntime&) = delete;
     [[nodiscard]] Result<std::vector<CameraDeviceDescriptor>> discover();
@@ -60,6 +70,7 @@ class CameraControlRuntime final
     void forward_frames(Session& session, std::stop_token stop_token) noexcept;
     std::shared_ptr<ICameraProvider> provider_;
     CameraFrameObserver frame_observer_;
+    CameraFrameDeliveryOptions delivery_options_;
     std::mutex mutex_;
     std::vector<std::unique_ptr<Session>> sessions_;
 };

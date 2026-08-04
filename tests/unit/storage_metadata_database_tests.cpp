@@ -8,6 +8,7 @@
 
 #include <Windows.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -19,6 +20,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -325,7 +327,7 @@ TEST(StorageMetadataDatabase, RejectsUnsupportedAndCorruptDatabasesAndRestoresBa
     std::filesystem::create_directories(unsupported_options.database_path.parent_path());
     {
         RawDatabase raw{unsupported_options.database_path};
-        raw.execute("PRAGMA user_version=3;");
+        raw.execute("PRAGMA user_version=4;");
     }
     auto unsupported = EventMetadataDatabase::open(unsupported_options);
     ASSERT_FALSE(unsupported);
@@ -402,6 +404,83 @@ TEST(StorageMetadataDatabase, IndexesAndQueriesByStablePageTimeStateAndCamera)
     EXPECT_EQ(raw.scalar_int64("SELECT COUNT(*) FROM event_cameras"), 2);
     EXPECT_EQ(raw.scalar_int64("SELECT COUNT(*) FROM key_frames"), 2);
     EXPECT_EQ(raw.scalar_int64("SELECT COUNT(*) FROM event_files"), 8);
+}
+
+TEST(StorageMetadataDatabase, ReviewsWithOptimisticConcurrencyAndReconcilePreservesDecision)
+{
+    TemporaryDirectory temporary{"review"};
+    const auto options = database_options(temporary);
+    auto database = EventMetadataDatabase::open(options);
+    ASSERT_TRUE(database);
+    const auto persisted =
+        persist_event(options, event_request("019fcb3d-7777-7000-8000-000000000007", "CAM01",
+                                             "Candidate", 7100ms));
+    ASSERT_TRUE(database.value()->index_committed_event(persisted.committed_directory));
+    auto initial = database.value()->get_event(persisted.event_id);
+    ASSERT_TRUE(initial);
+    EXPECT_EQ(initial.value().review_revision, 1U);
+    EXPECT_EQ(initial.value().event_state, "Candidate");
+
+    auto confirmed = database.value()->review_event(
+        persisted.event_id, 1U, EventReviewDecision::confirmed, 1234567, "S-1-5-21-operator");
+    ASSERT_TRUE(confirmed);
+    EXPECT_FALSE(confirmed.value().duplicate);
+    EXPECT_EQ(confirmed.value().event.event_state, "Confirmed");
+    EXPECT_EQ(confirmed.value().event.review_revision, 2U);
+    EXPECT_EQ(confirmed.value().event.reviewed_by, "S-1-5-21-operator");
+
+    auto duplicate = database.value()->review_event(
+        persisted.event_id, 1U, EventReviewDecision::confirmed, 1234568, "S-1-5-21-operator");
+    ASSERT_TRUE(duplicate);
+    EXPECT_TRUE(duplicate.value().duplicate);
+    EXPECT_EQ(duplicate.value().event.review_revision, 2U);
+    auto conflict = database.value()->review_event(
+        persisted.event_id, 1U, EventReviewDecision::rejected, 1234569, "S-1-5-21-other");
+    ASSERT_FALSE(conflict);
+    EXPECT_EQ(conflict.error().business_code, "EVENT_VERSION_CONFLICT");
+
+    ASSERT_TRUE(database.value()->reconcile());
+    auto after_reconcile = database.value()->get_event(persisted.event_id);
+    ASSERT_TRUE(after_reconcile);
+    EXPECT_EQ(after_reconcile.value().event_state, "Confirmed");
+    EXPECT_EQ(after_reconcile.value().review_revision, 2U);
+}
+
+TEST(StorageMetadataDatabase, SerializesCompetingReviewUpdates)
+{
+    TemporaryDirectory temporary{"review-race"};
+    const auto options = database_options(temporary);
+    auto database = EventMetadataDatabase::open(options);
+    ASSERT_TRUE(database);
+    const auto persisted =
+        persist_event(options, event_request("019fcb3d-8888-7000-8000-000000000008", "CAM01",
+                                             "Candidate", 8100ms));
+    ASSERT_TRUE(database.value()->index_committed_event(persisted.committed_directory));
+    std::array<bool, 2U> succeeded{};
+    std::array<std::string, 2U> errors;
+    std::thread confirm_thread{[&] {
+        auto result = database.value()->review_event(
+            persisted.event_id, 1U, EventReviewDecision::confirmed, 2234567, "operator-a");
+        succeeded[0] = result.has_value();
+        if (!result)
+            errors[0] = result.error().business_code;
+    }};
+    std::thread reject_thread{[&] {
+        auto result = database.value()->review_event(
+            persisted.event_id, 1U, EventReviewDecision::rejected, 2234567, "operator-b");
+        succeeded[1] = result.has_value();
+        if (!result)
+            errors[1] = result.error().business_code;
+    }};
+    confirm_thread.join();
+    reject_thread.join();
+    EXPECT_NE(succeeded[0], succeeded[1]);
+    EXPECT_TRUE(errors[0] == "EVENT_VERSION_CONFLICT" || errors[1] == "EVENT_VERSION_CONFLICT");
+    auto final = database.value()->get_event(persisted.event_id);
+    ASSERT_TRUE(final);
+    EXPECT_EQ(final.value().review_revision, 2U);
+    EXPECT_TRUE(final.value().event_state == "Confirmed" ||
+                final.value().event_state == "Rejected");
 }
 
 TEST(StorageMetadataDatabase, ReconcilesDirectoryOnlyAndDatabaseOnlyEventsWithoutDeletingRows)

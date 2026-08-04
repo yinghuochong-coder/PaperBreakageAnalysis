@@ -8,11 +8,15 @@
 #include "paperbreak/pipeline/preview.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/platform/system_metrics.hpp"
+#include "paperbreak/service/event_runtime.hpp"
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/service/system_commands.hpp"
 #include "paperbreak/service/windows/console_control.hpp"
 #include "paperbreak/service/windows/scm.hpp"
 #include "paperbreak/service/windows/scm_host.hpp"
+#include "paperbreak/storage/event_inspector.hpp"
+#include "paperbreak/storage/metadata_database.hpp"
+#include "paperbreak/storage/storage_policy.hpp"
 
 #include <QCoreApplication>
 
@@ -29,6 +33,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -432,6 +437,134 @@ class PreviewLifecycleComponent final : public paperbreak::service::ILifecycleCo
     std::shared_ptr<paperbreak::pipeline::PreviewRuntime> runtime_;
 };
 
+class EventLifecycleComponent final : public paperbreak::service::ILifecycleComponent
+{
+  public:
+    explicit EventLifecycleComponent(std::shared_ptr<paperbreak::service::EventRuntime> runtime)
+        : runtime_(std::move(runtime))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "event";
+    }
+    [[nodiscard]] paperbreak::service::ShutdownPhase shutdown_phase() const noexcept override
+    {
+        return paperbreak::service::ShutdownPhase::event;
+    }
+    [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
+    {
+        return runtime_->start();
+    }
+    [[nodiscard]] paperbreak::Result<void> request_stop(paperbreak::service::StopReason) override
+    {
+        runtime_->request_stop();
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> join(
+        const std::chrono::steady_clock::time_point deadline) override
+    {
+        return runtime_->join(deadline);
+    }
+
+  private:
+    std::shared_ptr<paperbreak::service::EventRuntime> runtime_;
+};
+
+class StorageMaintenanceLifecycleComponent final : public paperbreak::service::ILifecycleComponent
+{
+  public:
+    StorageMaintenanceLifecycleComponent(
+        std::shared_ptr<paperbreak::storage::StoragePolicyManager> manager,
+        std::shared_ptr<paperbreak::monitoring::AlarmRegistry> alarms)
+        : manager_(std::move(manager)), alarms_(std::move(alarms))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "storage-maintenance";
+    }
+    [[nodiscard]] paperbreak::service::ShutdownPhase shutdown_phase() const noexcept override
+    {
+        return paperbreak::service::ShutdownPhase::event;
+    }
+    [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
+    {
+        worker_ = std::jthread{[this](const std::stop_token token) { run(token); }};
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> request_stop(paperbreak::service::StopReason) override
+    {
+        worker_.request_stop();
+        condition_.notify_all();
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> join(
+        const std::chrono::steady_clock::time_point deadline) override
+    {
+        if (!worker_.joinable())
+            return paperbreak::Result<void>::success();
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            return paperbreak::Result<void>::failure(paperbreak::make_error(
+                "SYS_SHUTDOWN_TIMEOUT", paperbreak::Severity::critical,
+                "存储维护线程没有剩余关闭预算", "storage", "storage.maintenance.join"));
+        }
+        worker_.join();
+        return paperbreak::Result<void>::success();
+    }
+
+  private:
+    void run(const std::stop_token token) noexcept
+    {
+        while (!token.stop_requested())
+        {
+            auto maintenance = manager_->run_maintenance(std::chrono::system_clock::now());
+            if (!maintenance)
+            {
+                static_cast<void>(alarms_->raise_alarm({.code = maintenance.error().business_code,
+                                                        .severity = maintenance.error().severity,
+                                                        .source = "storage",
+                                                        .message = maintenance.error().message,
+                                                        .details = maintenance.error().details}));
+            }
+            else if (maintenance.value().snapshot.watermark !=
+                     paperbreak::storage::StorageWatermark::normal)
+            {
+                const auto watermark = maintenance.value().snapshot.watermark;
+                const auto severity = watermark == paperbreak::storage::StorageWatermark::warning
+                                          ? paperbreak::Severity::warning
+                                          : paperbreak::Severity::critical;
+                static_cast<void>(alarms_->raise_alarm(
+                    {.code = "STORAGE_LOW_SPACE",
+                     .severity = severity,
+                     .source = "storage",
+                     .message = "事件存储空间已达到水位限制",
+                     .details = {{.key = "watermark",
+                                  .value = std::string{paperbreak::storage::to_string(watermark)}},
+                                 {.key = "availableBytes",
+                                  .value = std::to_string(
+                                      maintenance.value().snapshot.available_bytes)}}}));
+            }
+            else
+            {
+                static_cast<void>(alarms_->clear("STORAGE_LOW_SPACE", "storage"));
+            }
+
+            std::unique_lock lock{mutex_};
+            condition_.wait_for(lock, token, std::chrono::seconds{30}, [] { return false; });
+        }
+    }
+
+    std::shared_ptr<paperbreak::storage::StoragePolicyManager> manager_;
+    std::shared_ptr<paperbreak::monitoring::AlarmRegistry> alarms_;
+    std::mutex mutex_;
+    std::condition_variable_any condition_;
+    std::jthread worker_;
+};
+
 class PreviewPublisher final
 {
   public:
@@ -623,6 +756,88 @@ class MonitoringConfigApplier final : public paperbreak::config::IConfigApplier
     std::optional<paperbreak::monitoring::HealthMonitorOptions> candidate_;
 };
 
+class EventConfigApplier final : public paperbreak::config::IConfigApplier
+{
+  public:
+    EventConfigApplier(std::shared_ptr<paperbreak::service::EventRuntime> runtime,
+                       std::shared_ptr<paperbreak::storage::StoragePolicyManager> storage_policy)
+        : runtime_(std::move(runtime)), storage_policy_(std::move(storage_policy))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "event";
+    }
+    [[nodiscard]] paperbreak::Result<void> prepare(
+        const paperbreak::config::EdgeConfig& current,
+        const paperbreak::config::EdgeConfig& candidate,
+        const std::vector<std::string>& changed_paths) override
+    {
+        relevant_ = std::ranges::any_of(changed_paths, [](const std::string_view path) {
+            return path == "/event" || path.starts_with("/event/");
+        });
+        if (relevant_)
+        {
+            previous_ = current;
+            candidate_ = candidate;
+        }
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> apply_and_readback(
+        const paperbreak::config::EdgeConfig&) override
+    {
+        if (!relevant_)
+            return paperbreak::Result<void>::success();
+        if (!candidate_)
+        {
+            return paperbreak::Result<void>::failure(
+                paperbreak::make_error("SYS_CONFIG_APPLY_FAILED", paperbreak::Severity::error,
+                                       "事件配置没有完成预应用", "event", "event.config.apply"));
+        }
+        auto runtime = runtime_->reconfigure(*candidate_);
+        if (!runtime)
+            return runtime;
+        return storage_policy_->set_retention_age(
+            std::chrono::days{candidate_->event.retention_days});
+    }
+    [[nodiscard]] paperbreak::Result<void> commit(const paperbreak::config::EdgeConfig&) override
+    {
+        reset();
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> rollback(
+        const paperbreak::config::EdgeConfig& previous) noexcept override
+    {
+        const auto rollback_configuration = previous_.value_or(previous);
+        auto result = relevant_ ? runtime_->reconfigure(rollback_configuration)
+                                : paperbreak::Result<void>::success();
+        if (relevant_)
+        {
+            auto retention = storage_policy_->set_retention_age(
+                std::chrono::days{rollback_configuration.event.retention_days});
+            if (result && !retention)
+                result = std::move(retention);
+        }
+        reset();
+        return result;
+    }
+
+  private:
+    void reset() noexcept
+    {
+        relevant_ = false;
+        previous_.reset();
+        candidate_.reset();
+    }
+
+    std::shared_ptr<paperbreak::service::EventRuntime> runtime_;
+    std::shared_ptr<paperbreak::storage::StoragePolicyManager> storage_policy_;
+    bool relevant_{};
+    std::optional<paperbreak::config::EdgeConfig> previous_;
+    std::optional<paperbreak::config::EdgeConfig> candidate_;
+};
+
 class IpcMetricSource final : public paperbreak::monitoring::IMetricSource
 {
   public:
@@ -688,9 +903,15 @@ class IpcMetricSource final : public paperbreak::monitoring::IMetricSource
     std::weak_ptr<paperbreak::ipc::IpcServer> server_;
 };
 
-class DatabasePlaceholderMetricSource final : public paperbreak::monitoring::IMetricSource
+class DatabaseMetricSource final : public paperbreak::monitoring::IMetricSource
 {
   public:
+    explicit DatabaseMetricSource(
+        std::weak_ptr<paperbreak::storage::EventMetadataDatabase> database)
+        : database_(std::move(database))
+    {
+    }
+
     [[nodiscard]] std::string_view source_name() const noexcept override
     {
         return "database";
@@ -699,19 +920,31 @@ class DatabasePlaceholderMetricSource final : public paperbreak::monitoring::IMe
         std::stop_token) noexcept override
     {
         using Point = paperbreak::monitoring::MetricPoint;
+        const bool available = !database_.expired();
         return paperbreak::Result<std::vector<Point>>::success(
-            {{.name = "database.available", .value = false, .unit = "boolean"},
-             {.name = "database.state", .value = std::string{"not-initialized"}, .unit = "state"},
+            {{.name = "database.available", .value = available, .unit = "boolean"},
+             {.name = "database.state",
+              .value = std::string{available ? "ready" : "unavailable"},
+              .unit = "state"},
              {.name = "database.schema.version",
-              .value = std::uint64_t{0U},
+              .value = std::uint64_t{paperbreak::storage::database_schema_version},
               .unit = "version",
-              .available = false}});
+              .available = available}});
     }
+
+  private:
+    std::weak_ptr<paperbreak::storage::EventMetadataDatabase> database_;
 };
 
-class OperationalPlaceholderMetricSource final : public paperbreak::monitoring::IMetricSource
+class EventMetricSource final : public paperbreak::monitoring::IMetricSource
 {
   public:
+    EventMetricSource(std::weak_ptr<paperbreak::service::EventRuntime> runtime,
+                      std::weak_ptr<paperbreak::storage::StoragePolicyManager> storage)
+        : runtime_(std::move(runtime)), storage_(std::move(storage))
+    {
+    }
+
     [[nodiscard]] std::string_view source_name() const noexcept override
     {
         return "operations";
@@ -720,6 +953,12 @@ class OperationalPlaceholderMetricSource final : public paperbreak::monitoring::
         std::stop_token) noexcept override
     {
         using Point = paperbreak::monitoring::MetricPoint;
+        const auto runtime = runtime_.lock();
+        const auto storage = storage_.lock();
+        const auto events =
+            runtime ? runtime->snapshot() : paperbreak::service::EventRuntimeSnapshot{};
+        const auto policy =
+            storage ? storage->snapshot() : paperbreak::storage::StoragePolicySnapshot{};
         return paperbreak::Result<std::vector<Point>>::success(
             {{.name = "system.nvme_write_bytes_per_second",
               .value = 0.0,
@@ -734,14 +973,34 @@ class OperationalPlaceholderMetricSource final : public paperbreak::monitoring::
               .unit = "unix_milliseconds",
               .available = false},
              {.name = "event.current_count",
-              .value = std::uint64_t{0U},
+              .value = events.events_committed,
               .unit = "count",
-              .available = false},
+              .available = runtime != nullptr},
+             {.name = "event.frame_queue.depth",
+              .value = static_cast<std::uint64_t>(events.frame_queue_depth),
+              .unit = "count",
+              .available = runtime != nullptr},
+             {.name = "event.frame_queue.high_watermark",
+              .value = static_cast<std::uint64_t>(events.frame_queue_high_watermark),
+              .unit = "count",
+              .available = runtime != nullptr},
+             {.name = "event.failures_total",
+              .value = events.event_failures,
+              .unit = "count",
+              .available = runtime != nullptr},
+             {.name = "storage.watermark",
+              .value = std::string{paperbreak::storage::to_string(policy.watermark)},
+              .unit = "state",
+              .available = storage != nullptr},
              {.name = "uplink.pending_upload_tasks",
               .value = std::uint64_t{0U},
               .unit = "count",
               .available = false}});
     }
+
+  private:
+    std::weak_ptr<paperbreak::service::EventRuntime> runtime_;
+    std::weak_ptr<paperbreak::storage::StoragePolicyManager> storage_;
 };
 
 class CameraMetricSource final : public paperbreak::monitoring::IMetricSource
@@ -1050,6 +1309,85 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     auto status = std::make_shared<paperbreak::service::ServiceStatusStore>();
     auto metrics = std::make_shared<paperbreak::monitoring::MetricRegistry>();
     auto alarms = std::make_shared<paperbreak::monitoring::AlarmRegistry>();
+    const auto event_root =
+        resolve_config_path(config_path, loaded.value().effective->storage.event_root);
+    auto database_result = paperbreak::storage::EventMetadataDatabase::open(
+        {.database_path = event_root / ".metadata" / "events.db",
+         .event_root = event_root,
+         .backup_directory = event_root / ".metadata" / "backups"});
+    if (!database_result)
+    {
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(database_result.error());
+    }
+    std::shared_ptr<paperbreak::storage::EventMetadataDatabase> event_database{
+        std::move(database_result).value()};
+    auto inspector_result = paperbreak::storage::EventInspector::create({.event_root = event_root});
+    if (!inspector_result)
+    {
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(inspector_result.error());
+    }
+    std::shared_ptr<paperbreak::storage::EventInspector> event_inspector{
+        std::move(inspector_result).value()};
+    constexpr std::uint64_t gibibyte = 1024ULL * 1024ULL * 1024ULL;
+    const auto cache_root =
+        resolve_config_path(config_path, loaded.value().effective->storage.cache_root);
+    auto storage_policy_result = paperbreak::storage::StoragePolicyManager::create(
+        {.event_root = event_root,
+         .temporary_roots = {cache_root},
+         .watermarks = {.warning_available_bytes =
+                            loaded.value().effective->storage.warning_free_space_gib * gibibyte,
+                        .critical_available_bytes =
+                            loaded.value().effective->storage.critical_free_space_gib * gibibyte,
+                        .stop_save_available_bytes =
+                            loaded.value().effective->storage.stop_free_space_gib * gibibyte},
+         .retention_age = std::chrono::days{loaded.value().effective->event.retention_days},
+         .maximum_event_bytes =
+             loaded.value().effective->storage.maximum_event_storage_gib * gibibyte},
+        *event_database);
+    if (!storage_policy_result)
+    {
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(storage_policy_result.error());
+    }
+    std::shared_ptr<paperbreak::storage::StoragePolicyManager> storage_policy{
+        std::move(storage_policy_result).value()};
+    const std::weak_ptr<paperbreak::monitoring::AlarmRegistry> weak_event_alarms = alarms;
+    const std::weak_ptr<paperbreak::logging::LoggingRuntime> weak_event_logging = logging;
+    auto event_runtime_result = paperbreak::service::EventRuntime::create(
+        {.configuration = *loaded.value().effective,
+         .event_root = event_root,
+         .database = event_database,
+         .storage_policy = storage_policy,
+         .error_observer = [weak_event_alarms, weak_event_logging](const paperbreak::Error& error) {
+             if (auto alarm_registry = weak_event_alarms.lock())
+             {
+                 static_cast<void>(alarm_registry->raise_alarm({.code = error.business_code,
+                                                                .severity = error.severity,
+                                                                .source = "event",
+                                                                .message = error.message,
+                                                                .details = error.details}));
+             }
+             if (auto log_runtime = weak_event_logging.lock())
+             {
+                 static_cast<void>(log_runtime->log(paperbreak::logging::Category::storage,
+                                                    error.severity == paperbreak::Severity::critical
+                                                        ? paperbreak::logging::Level::critical
+                                                        : paperbreak::logging::Level::error,
+                                                    error.business_code + ": " + error.message));
+             }
+         }});
+    if (!event_runtime_result)
+    {
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(event_runtime_result.error());
+    }
+    auto event_runtime = std::move(event_runtime_result).value();
     std::shared_ptr<paperbreak::pipeline::PreviewRuntime> preview;
     std::shared_ptr<paperbreak::camera::ICameraProvider> camera_provider{
         paperbreak::camera::hikrobot::create_hikrobot_camera_provider()};
@@ -1080,14 +1418,24 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         }
     }
     const std::weak_ptr<paperbreak::pipeline::PreviewRuntime> weak_preview = preview;
+    const std::weak_ptr<paperbreak::service::EventRuntime> weak_event_runtime = event_runtime;
+    paperbreak::camera::CameraFrameDeliveryOptions delivery_options{
+        .frame_pool_capacity = loaded.value().effective->acquisition.frame_pool_capacity,
+        .queue_capacity = loaded.value().effective->acquisition.queue_capacity,
+        .receive_timeout =
+            std::chrono::milliseconds{loaded.value().effective->acquisition.receive_timeout_ms}};
     cameras = std::make_shared<paperbreak::camera::CameraControlRuntime>(
-        std::move(camera_provider), [weak_preview](paperbreak::camera::FrameView frame) {
+        std::move(camera_provider),
+        [weak_preview, weak_event_runtime](paperbreak::camera::FrameView frame) {
+            if (auto runtime = weak_event_runtime.lock())
+                static_cast<void>(runtime->submit_frame(frame));
             if (auto runtime = weak_preview.lock())
                 runtime->submit(std::move(frame), {.camera_status = "acquiring"});
-        });
+        },
+        delivery_options);
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
         configuration->repository, status, metrics, alarms, logging, config_path.parent_path(),
-        preview, cameras);
+        preview, cameras, event_runtime, event_database, event_inspector);
     auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(commands);
     if (preview_publisher)
         preview_publisher->set_server(ipc_server);
@@ -1103,16 +1451,14 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     }
     std::vector<paperbreak::platform::DiskMetricPath> disk_paths{
         {.label = "system", .path = system_volume.value()},
-        {.label = "event",
-         .path = resolve_config_path(config_path, loaded.value().effective->storage.event_root)},
-        {.label = "cache",
-         .path = resolve_config_path(config_path, loaded.value().effective->storage.cache_root)},
+        {.label = "event", .path = event_root},
+        {.label = "cache", .path = cache_root},
         {.label = "log", .path = log_config.directory}};
     const std::array<std::shared_ptr<paperbreak::monitoring::IMetricSource>, 6U> sources{
         paperbreak::platform::make_windows_system_metric_source(std::move(disk_paths)),
         std::make_shared<IpcMetricSource>(ipc_server),
-        std::make_shared<DatabasePlaceholderMetricSource>(),
-        std::make_shared<OperationalPlaceholderMetricSource>(),
+        std::make_shared<DatabaseMetricSource>(event_database),
+        std::make_shared<EventMetricSource>(event_runtime, storage_policy),
         std::make_shared<CameraMetricSource>(configuration, cameras),
         std::make_shared<AlgorithmPlaceholderMetricSource>()};
     for (const auto& source : sources)
@@ -1136,6 +1482,16 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
             failure(registered_applier.error());
     }
     configuration->dynamic_appliers.push_back(monitoring_applier);
+
+    auto event_applier = std::make_shared<EventConfigApplier>(event_runtime, storage_policy);
+    registered_applier = configuration->repository.register_applier(*event_applier);
+    if (!registered_applier)
+    {
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(registered_applier.error());
+    }
+    configuration->dynamic_appliers.push_back(event_applier);
 
     const std::weak_ptr<paperbreak::ipc::IpcServer> weak_server = ipc_server;
     status->set_observer([weak_server](const paperbreak::service::ServiceStatusSnapshot& snapshot) {
@@ -1170,6 +1526,9 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     components.push_back(std::make_unique<LoggingLifecycleComponent>(logging));
     if (preview)
         components.push_back(std::make_unique<PreviewLifecycleComponent>(preview));
+    components.push_back(std::make_unique<EventLifecycleComponent>(event_runtime));
+    components.push_back(
+        std::make_unique<StorageMaintenanceLifecycleComponent>(storage_policy, alarms));
     components.push_back(std::make_unique<IpcLifecycleComponent>(ipc_server));
     components.push_back(std::make_unique<MonitoringLifecycleComponent>(monitor));
     return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::

@@ -440,6 +440,13 @@ CREATE INDEX IF NOT EXISTS idx_event_retention_cleanup
 INSERT OR IGNORE INTO event_retention(event_id) SELECT event_id FROM events;
 )sql";
 
+constexpr std::string_view schema_v3 = R"sql(
+ALTER TABLE events ADD COLUMN review_revision INTEGER NOT NULL DEFAULT 1
+  CHECK(review_revision > 0);
+ALTER TABLE events ADD COLUMN reviewed_at_utc_ms INTEGER;
+ALTER TABLE events ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT '';
+)sql";
+
 Result<void> migrate_to_v1(sqlite3* database)
 {
     auto begun = execute(database, "BEGIN IMMEDIATE", "database.migrate.begin", true);
@@ -466,6 +473,24 @@ Result<void> migrate_to_v2(sqlite3* database)
     auto schema = execute(database, schema_v2, "database.migrate.schema-v2", true);
     if (schema)
         schema = execute(database, "PRAGMA user_version=2", "database.migrate.version", true);
+    if (schema)
+        schema = execute(database, "COMMIT", "database.migrate.commit", true);
+    if (!schema)
+    {
+        static_cast<void>(execute(database, "ROLLBACK", "database.migrate.rollback", true));
+        return schema;
+    }
+    return Result<void>::success();
+}
+
+Result<void> migrate_to_v3(sqlite3* database)
+{
+    auto begun = execute(database, "BEGIN IMMEDIATE", "database.migrate.begin", true);
+    if (!begun)
+        return begun;
+    auto schema = execute(database, schema_v3, "database.migrate.schema-v3", true);
+    if (schema)
+        schema = execute(database, "PRAGMA user_version=3", "database.migrate.version", true);
     if (schema)
         schema = execute(database, "COMMIT", "database.migrate.commit", true);
     if (!schema)
@@ -711,9 +736,13 @@ INSERT INTO events(event_id,event_schema_version,event_state,candidate_time_utc_
  truncated_by_maximum_duration,stopped_early,indexed_at_utc_ms)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(event_id) DO UPDATE SET
- event_schema_version=excluded.event_schema_version,event_state=excluded.event_state,
+ event_schema_version=excluded.event_schema_version,
+ event_state=CASE WHEN events.review_revision>1 THEN events.event_state
+                  ELSE excluded.event_state END,
  candidate_time_utc_ms=excluded.candidate_time_utc_ms,
- confirmed_time_utc_ms=excluded.confirmed_time_utc_ms,start_time_utc_ms=excluded.start_time_utc_ms,
+ confirmed_time_utc_ms=CASE WHEN events.review_revision>1 THEN events.confirmed_time_utc_ms
+                            ELSE excluded.confirmed_time_utc_ms END,
+ start_time_utc_ms=excluded.start_time_utc_ms,
  end_time_utc_ms=excluded.end_time_utc_ms,trigger_camera_id=excluded.trigger_camera_id,
  trigger_frame_number=excluded.trigger_frame_number,trigger_reason=excluded.trigger_reason,
  confidence=excluded.confidence,pre_event_ms=excluded.pre_event_ms,
@@ -1071,6 +1100,8 @@ Result<std::unique_ptr<EventMetadataDatabase>> EventMetadataDatabase::open(
             migrated = migrate_to_v1(connection.get());
         if (migrated && version.value() <= 1U)
             migrated = migrate_to_v2(connection.get());
+        if (migrated && version.value() <= 2U)
+            migrated = migrate_to_v3(connection.get());
         if (!migrated)
             return Result<std::unique_ptr<EventMetadataDatabase>>::failure(
                 std::move(migrated).error());
@@ -1264,12 +1295,15 @@ Result<EventQueryPage> EventMetadataDatabase::query_events(const EventQuery& que
         query.offset > maximum_query_offset ||
         (query.start_time_utc_ms && query.end_time_utc_ms &&
          *query.start_time_utc_ms > *query.end_time_utc_ms) ||
+        (query.event_id && !valid_text(*query.event_id)) ||
         (query.event_state && !valid_text(*query.event_state)) ||
         (query.camera_id && !valid_text(*query.camera_id)))
         return Result<EventQueryPage>::failure(
             config_error("事件分页或筛选参数无效", "database.query.validate"));
 
     std::string where = " WHERE 1=1";
+    if (query.event_id)
+        where += " AND e.event_id=?";
     if (query.start_time_utc_ms)
         where += " AND e.candidate_time_utc_ms>=?";
     if (query.end_time_utc_ms)
@@ -1282,6 +1316,8 @@ Result<EventQueryPage> EventMetadataDatabase::query_events(const EventQuery& que
     const auto bind_filters = [&](sqlite3_stmt* statement) {
         int index = 1;
         bool bound = true;
+        if (query.event_id)
+            bound = bound && bind_text(statement, index, *query.event_id);
         if (query.start_time_utc_ms)
             bound = bound && bind_int64(statement, index, *query.start_time_utc_ms);
         if (query.end_time_utc_ms)
@@ -1313,7 +1349,8 @@ Result<EventQueryPage> EventMetadataDatabase::query_events(const EventQuery& que
 
     const std::string select =
         R"sql(
-SELECT e.event_id,e.event_schema_version,e.event_state,e.candidate_time_utc_ms,
+SELECT e.event_id,e.event_schema_version,e.event_state,e.review_revision,
+ e.reviewed_at_utc_ms,e.reviewed_by,e.candidate_time_utc_ms,
  e.confirmed_time_utc_ms,e.start_time_utc_ms,e.end_time_utc_ms,e.trigger_camera_id,
  e.trigger_frame_number,e.trigger_reason,e.confidence,e.upload_state,e.storage_state,
  r.locked,r.deletion_allowed,r.deletion_state,e.relative_directory
@@ -1336,8 +1373,9 @@ SELECT e.event_id,e.event_schema_version,e.event_state,e.candidate_time_utc_ms,
                         .limit = query.limit};
     while ((result = sqlite3_step(row_statement.get())) == SQLITE_ROW)
     {
-        const auto frame_number = sqlite3_column_int64(row_statement.get(), 8);
-        if (frame_number < 0)
+        const auto review_revision = sqlite3_column_int64(row_statement.get(), 3);
+        const auto frame_number = sqlite3_column_int64(row_statement.get(), 11);
+        if (review_revision <= 0 || frame_number < 0)
             return Result<EventQueryPage>::failure(database_error(
                 impl_->database.get(), SQLITE_CORRUPT, "database.query.rows", "事件帧号无效"));
         EventMetadataRecord event{
@@ -1345,21 +1383,25 @@ SELECT e.event_id,e.event_schema_version,e.event_state,e.candidate_time_utc_ms,
             .event_schema_version =
                 static_cast<std::uint32_t>(sqlite3_column_int64(row_statement.get(), 1)),
             .event_state = column_text(row_statement.get(), 2),
-            .candidate_time_utc_ms = sqlite3_column_int64(row_statement.get(), 3),
-            .start_time_utc_ms = sqlite3_column_int64(row_statement.get(), 5),
-            .end_time_utc_ms = sqlite3_column_int64(row_statement.get(), 6),
-            .trigger_camera_id = column_text(row_statement.get(), 7),
+            .review_revision = static_cast<std::uint64_t>(review_revision),
+            .reviewed_by = column_text(row_statement.get(), 5),
+            .candidate_time_utc_ms = sqlite3_column_int64(row_statement.get(), 6),
+            .start_time_utc_ms = sqlite3_column_int64(row_statement.get(), 8),
+            .end_time_utc_ms = sqlite3_column_int64(row_statement.get(), 9),
+            .trigger_camera_id = column_text(row_statement.get(), 10),
             .trigger_frame_number = static_cast<std::uint64_t>(frame_number),
-            .trigger_reason = column_text(row_statement.get(), 9),
-            .confidence = sqlite3_column_double(row_statement.get(), 10),
-            .upload_state = column_text(row_statement.get(), 11),
-            .storage_state = column_text(row_statement.get(), 12),
-            .retention_locked = sqlite3_column_int64(row_statement.get(), 13) != 0,
-            .deletion_allowed = sqlite3_column_int64(row_statement.get(), 14) != 0,
-            .deletion_state = column_text(row_statement.get(), 15),
-            .relative_directory = column_text(row_statement.get(), 16)};
+            .trigger_reason = column_text(row_statement.get(), 12),
+            .confidence = sqlite3_column_double(row_statement.get(), 13),
+            .upload_state = column_text(row_statement.get(), 14),
+            .storage_state = column_text(row_statement.get(), 15),
+            .retention_locked = sqlite3_column_int64(row_statement.get(), 16) != 0,
+            .deletion_allowed = sqlite3_column_int64(row_statement.get(), 17) != 0,
+            .deletion_state = column_text(row_statement.get(), 18),
+            .relative_directory = column_text(row_statement.get(), 19)};
         if (sqlite3_column_type(row_statement.get(), 4) != SQLITE_NULL)
-            event.confirmed_time_utc_ms = sqlite3_column_int64(row_statement.get(), 4);
+            event.reviewed_at_utc_ms = sqlite3_column_int64(row_statement.get(), 4);
+        if (sqlite3_column_type(row_statement.get(), 7) != SQLITE_NULL)
+            event.confirmed_time_utc_ms = sqlite3_column_int64(row_statement.get(), 7);
         page.events.push_back(std::move(event));
     }
     if (result != SQLITE_DONE)
@@ -1390,6 +1432,126 @@ SELECT e.event_id,e.event_schema_version,e.event_state,e.candidate_time_utc_ms,
                                                                   "事件相机筛选结果读取失败"));
     }
     return Result<EventQueryPage>::success(std::move(page));
+}
+
+Result<EventMetadataRecord> EventMetadataDatabase::get_event(const std::string_view event_id) const
+{
+    if (!valid_text(event_id))
+        return Result<EventMetadataRecord>::failure(
+            config_error("事件标识无效", "database.get.validate"));
+    auto page = query_events({.event_id = std::string{event_id}, .limit = 1U});
+    if (!page)
+        return Result<EventMetadataRecord>::failure(std::move(page).error());
+    if (page.value().events.empty())
+    {
+        auto error =
+            make_error("EVENT_NOT_FOUND", Severity::error, "事件不存在", "storage", "database.get");
+        error.details.push_back({.key = "eventId", .value = std::string{event_id}});
+        return Result<EventMetadataRecord>::failure(std::move(error));
+    }
+    return Result<EventMetadataRecord>::success(std::move(page).value().events.front());
+}
+
+Result<EventReviewOutcome> EventMetadataDatabase::review_event(
+    const std::string_view event_id, const std::uint64_t expected_review_revision,
+    const EventReviewDecision decision, const std::int64_t reviewed_at_utc_ms,
+    const std::string_view reviewed_by)
+{
+    if (!valid_text(event_id) || expected_review_revision == 0U ||
+        expected_review_revision >
+            static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) ||
+        reviewed_at_utc_ms < 0 || !valid_text(reviewed_by))
+        return Result<EventReviewOutcome>::failure(
+            config_error("事件复核参数无效", "database.review.validate"));
+    const std::string desired =
+        decision == EventReviewDecision::confirmed ? "Confirmed" : "Rejected";
+    bool duplicate = false;
+    {
+        const std::scoped_lock lock{impl_->mutex};
+        auto selected = prepare(impl_->database.get(),
+                                "SELECT event_state,review_revision FROM events WHERE event_id=?",
+                                "database.review.select", true);
+        if (!selected)
+            return Result<EventReviewOutcome>::failure(std::move(selected).error());
+        auto select_statement = std::move(selected).value();
+        int select_index = 1;
+        if (!bind_text(select_statement.get(), select_index, event_id))
+            return Result<EventReviewOutcome>::failure(
+                std::move(bind_failure(impl_->database.get(), "database.review.select.bind"))
+                    .error());
+        const auto selected_result = sqlite3_step(select_statement.get());
+        if (selected_result == SQLITE_DONE)
+        {
+            auto error = make_error("EVENT_NOT_FOUND", Severity::error, "事件不存在", "storage",
+                                    "database.review");
+            error.details.push_back({.key = "eventId", .value = std::string{event_id}});
+            return Result<EventReviewOutcome>::failure(std::move(error));
+        }
+        if (selected_result != SQLITE_ROW)
+            return Result<EventReviewOutcome>::failure(
+                database_error(impl_->database.get(), selected_result, "database.review.select",
+                               "无法读取事件复核状态"));
+        const std::string current_state = column_text(select_statement.get(), 0);
+        const auto current_revision_value = sqlite3_column_int64(select_statement.get(), 1);
+        if (current_revision_value <= 0)
+            return Result<EventReviewOutcome>::failure(
+                database_error(impl_->database.get(), SQLITE_CORRUPT, "database.review.select",
+                               "事件复核版本无效"));
+        const auto current_revision = static_cast<std::uint64_t>(current_revision_value);
+        if (current_state == desired)
+        {
+            duplicate = true;
+        }
+        else if (current_revision != expected_review_revision || current_state == "Confirmed" ||
+                 current_state == "Rejected")
+        {
+            auto error = make_error("EVENT_VERSION_CONFLICT", Severity::warning,
+                                    "事件已被其他操作员复核", "storage", "database.review");
+            error.details.push_back(
+                {.key = "currentReviewRevision", .value = std::to_string(current_revision)});
+            error.details.push_back({.key = "currentState", .value = current_state});
+            return Result<EventReviewOutcome>::failure(std::move(error));
+        }
+        else
+        {
+            auto updated = prepare(impl_->database.get(), R"sql(
+UPDATE events SET event_state=?,review_revision=review_revision+1,reviewed_at_utc_ms=?,
+ reviewed_by=?,confirmed_time_utc_ms=CASE WHEN ?='Confirmed' THEN ? ELSE NULL END
+ WHERE event_id=? AND review_revision=?
+)sql",
+                                   "database.review.update", true);
+            if (!updated)
+                return Result<EventReviewOutcome>::failure(std::move(updated).error());
+            auto update_statement = std::move(updated).value();
+            int update_index = 1;
+            if (!bind_text(update_statement.get(), update_index, desired) ||
+                !bind_int64(update_statement.get(), update_index, reviewed_at_utc_ms) ||
+                !bind_text(update_statement.get(), update_index, reviewed_by) ||
+                !bind_text(update_statement.get(), update_index, desired) ||
+                !bind_int64(update_statement.get(), update_index, reviewed_at_utc_ms) ||
+                !bind_text(update_statement.get(), update_index, event_id) ||
+                !bind_int64(update_statement.get(), update_index,
+                            static_cast<std::int64_t>(expected_review_revision)))
+                return Result<EventReviewOutcome>::failure(
+                    std::move(bind_failure(impl_->database.get(), "database.review.update.bind"))
+                        .error());
+            auto stepped = step_done(impl_->database.get(), update_statement.get(),
+                                     "database.review.update", true);
+            if (!stepped)
+                return Result<EventReviewOutcome>::failure(std::move(stepped).error());
+            if (sqlite3_changes(impl_->database.get()) != 1)
+            {
+                auto error = make_error("EVENT_VERSION_CONFLICT", Severity::warning,
+                                        "事件复核版本冲突", "storage", "database.review");
+                return Result<EventReviewOutcome>::failure(std::move(error));
+            }
+        }
+    }
+    auto event = get_event(event_id);
+    if (!event)
+        return Result<EventReviewOutcome>::failure(std::move(event).error());
+    return Result<EventReviewOutcome>::success(
+        {.event = std::move(event).value(), .duplicate = duplicate});
 }
 
 Result<void> EventMetadataDatabase::set_retention_policy(const std::string_view event_id,

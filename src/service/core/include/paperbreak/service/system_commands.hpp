@@ -6,7 +6,10 @@
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/monitoring/monitoring.hpp"
 #include "paperbreak/pipeline/preview.hpp"
+#include "paperbreak/service/event_runtime.hpp"
 #include "paperbreak/service/runtime.hpp"
+#include "paperbreak/storage/event_inspector.hpp"
+#include "paperbreak/storage/metadata_database.hpp"
 
 #include <atomic>
 #include <filesystem>
@@ -49,7 +52,10 @@ class SystemCommandService final : public ipc::IRequestHandler
                          std::shared_ptr<logging::LoggingRuntime> logging = {},
                          std::filesystem::path config_directory = {},
                          std::shared_ptr<pipeline::PreviewRuntime> preview = {},
-                         std::shared_ptr<camera::CameraControlRuntime> cameras = {});
+                         std::shared_ptr<camera::CameraControlRuntime> cameras = {},
+                         std::shared_ptr<EventRuntime> event_runtime = {},
+                         std::shared_ptr<storage::EventMetadataDatabase> event_database = {},
+                         std::shared_ptr<storage::EventInspector> event_inspector = {});
 
     [[nodiscard]] Result<ipc::CommandResponse> handle(const ipc::RequestMessage& request,
                                                       const ipc::PeerIdentity& peer,
@@ -64,6 +70,9 @@ class SystemCommandService final : public ipc::IRequestHandler
     std::filesystem::path config_directory_;
     std::shared_ptr<pipeline::PreviewRuntime> preview_;
     std::shared_ptr<camera::CameraControlRuntime> cameras_;
+    std::shared_ptr<EventRuntime> event_runtime_;
+    std::shared_ptr<storage::EventMetadataDatabase> event_database_;
+    std::shared_ptr<storage::EventInspector> event_inspector_;
 };
 
 } // namespace paperbreak::service

@@ -1,5 +1,6 @@
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
+#include "paperbreak/console/event_client.hpp"
 #include "paperbreak/console/navigation_model.hpp"
 #include "paperbreak/console/operations_client.hpp"
 #include "paperbreak/console/preview_client.hpp"
@@ -12,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -203,6 +205,89 @@ class OperationsHandler final : public paperbreak::ipc::IRequestHandler
     std::mutex mutex;
     std::string last_alarm_payload;
     std::string last_log_payload;
+};
+
+class EventClientHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    EventClientHandler()
+    {
+        static std::atomic_uint64_t sequence{};
+        export_source = std::filesystem::temp_directory_path() /
+                        (L"paperbreak-verified-event-" + std::to_wstring(++sequence) + L".zip");
+    }
+
+    ~EventClientHandler() override
+    {
+        std::error_code error;
+        std::filesystem::remove(export_source, error);
+    }
+
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage& request, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        if (request.command == "event.getConfig")
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     R"({"event":{"preEventSeconds":10,"postEventSeconds":10,"maxEventSeconds":60,"mergeGapSeconds":3,"keyFrameCount":7,"saveRaw":true,"generatePreviewVideo":false,"uploadPolicy":"confirmed","retentionDays":30},"storedConfigRevision":4,"effectiveConfigRevision":4,"previewVideoGenerationAvailable":false,"uploadRuntimeAvailable":false})",
+                 .binary = {}});
+        if (request.command == "event.list")
+        {
+            std::scoped_lock lock{mutex};
+            last_list_payload = request.payload_json;
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     R"({"events":[{"eventId":"event-1","eventState":"Candidate","reviewRevision":1,"candidateTimeUtcMs":1785801600000,"triggerCameraId":"CAM01","confidence":0.875,"uploadState":"Pending","storageState":"Present","thumbnailAvailable":true}],"total":1,"offset":0,"limit":50})",
+                 .binary = {}});
+        }
+        if (request.command == "event.get")
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     R"({"event":{"eventId":"event-1","eventState":"Candidate","reviewRevision":1,"candidateTimeUtcMs":1785801600000,"triggerCameraId":"CAM01","confidence":0.875,"uploadState":"Pending","storageState":"Present","thumbnailAvailable":true},"committedDirectory":"C:/事件 数据/2026/08/04/event-1","rawFrameCount":2,"keyFrameCount":1,"observedSequenceGaps":0,"keyFramesTraceable":true,"manifestBytes":21,"thumbnailBytes":4})",
+                 .binary = {std::byte{0xff}, std::byte{0xd8}, std::byte{0xff}, std::byte{0xd9}}});
+        if (request.command == "event.getManifest")
+        {
+            const std::string manifest = R"({"eventId":"event-1"})";
+            std::vector<std::byte> bytes;
+            for (const unsigned char byte : manifest)
+                bytes.push_back(static_cast<std::byte>(byte));
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = nlohmann::json{{"eventId", "event-1"},
+                                                {"verified", true},
+                                                {"size", bytes.size()}}
+                                     .dump(),
+                 .binary = std::move(bytes)});
+        }
+        if (request.command == "event.export")
+        {
+            std::ofstream output{export_source, std::ios::binary | std::ios::trunc};
+            const std::array<unsigned char, 4U> signature{0x50U, 0x4bU, 0x03U, 0x04U};
+            output.write(reinterpret_cast<const char*>(signature.data()),
+                         static_cast<std::streamsize>(signature.size()));
+            output.close();
+            const auto utf8 = export_source.generic_u8string();
+            const std::string source{reinterpret_cast<const char*>(utf8.data()), utf8.size()};
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = nlohmann::json{{"eventId", "event-1"},
+                                                {"verified", true},
+                                                {"size", 4U},
+                                                {"exportSourcePath", source}}
+                                     .dump(),
+                 .binary = {}});
+        }
+        if (request.command == "event.confirm" || request.command == "event.reject" ||
+            request.command == "event.manualTrigger" || request.command == "event.updateConfig")
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = R"({"accepted":true})", .binary = {}});
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+            paperbreak::make_error("IPC_REQUEST_INVALID", paperbreak::Severity::error, "unexpected",
+                                   "test", "eventClient.handle"));
+    }
+
+    std::mutex mutex;
+    std::string last_list_payload;
+    std::filesystem::path export_source;
 };
 
 class PreviewSubscriptionHandler final : public paperbreak::ipc::IRequestHandler
@@ -650,6 +735,79 @@ TEST(OperationsClient, QueriesFiltersAcknowledgesAndExportsThroughBoundedWorker)
     auto stale_export = client.export_alarm_csv(base / "stale.csv");
     ASSERT_FALSE(stale_export);
     EXPECT_EQ(stale_export.error().business_code, "IPC_NOT_CONNECTED");
+    stop_server(server);
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(base, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+}
+
+TEST(EventClient, QueriesDetailsReviewsAndExportsVerifiedArchive)
+{
+    const std::string name = state_name();
+    auto handler = std::make_shared<EventClientHandler>();
+    paperbreak::ipc::IpcServer server(handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name));
+    ASSERT_TRUE(server.start());
+
+    paperbreak::console::EventClientSnapshot latest;
+    paperbreak::console::EventClient client([&](const auto& snapshot) { latest = snapshot; },
+                                            client_options(name));
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until([&] { return !latest.configuration_stale && !latest.events_stale; }));
+    EXPECT_EQ(latest.stored_config_revision, 4U);
+    EXPECT_FALSE(latest.upload_runtime_available);
+    ASSERT_EQ(latest.events.size(), 1U);
+    EXPECT_EQ(latest.events.front().event_id, "event-1");
+
+    ASSERT_TRUE(client.query({.start_time_utc_ms = 1000,
+                              .end_time_utc_ms = 2000,
+                              .event_state = std::string{"Candidate"},
+                              .camera_id = std::string{"CAM01"},
+                              .offset = 0U,
+                              .limit = 50U}));
+    ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{handler->mutex};
+        const auto payload = nlohmann::json::parse(handler->last_list_payload);
+        return payload.value("startTimeUtcMs", 0) == 1000 &&
+               payload.value("endTimeUtcMs", 0) == 2000 &&
+               payload.value("eventState", "") == "Candidate" &&
+               payload.value("cameraId", "") == "CAM01";
+    }));
+
+    ASSERT_TRUE(client.get("event-1"));
+    ASSERT_TRUE(wait_until(
+        [&] { return latest.detail.has_value() && !latest.detail->manifest_json.empty(); }));
+    EXPECT_TRUE(latest.detail->key_frames_traceable);
+    EXPECT_EQ(latest.detail->raw_frame_count, 2U);
+    EXPECT_NE(latest.detail->manifest_json.find("event-1"), std::string::npos);
+
+    ASSERT_TRUE(client.review("event-1", 1U, true));
+    auto busy = client.manual_trigger("CAM01");
+    ASSERT_FALSE(busy);
+    EXPECT_EQ(busy.error().business_code, "IPC_BUSY");
+    ASSERT_TRUE(wait_until([&] { return !latest.operation_pending; }));
+
+    static std::atomic_uint64_t file_sequence{};
+    const auto base =
+        std::filesystem::temp_directory_path() /
+        std::filesystem::path{L"paperbreak-event-中文-" + std::to_wstring(++file_sequence)};
+    std::filesystem::create_directories(base);
+    const auto archive = base / L"事件导出.zip";
+    ASSERT_TRUE(client.export_event("event-1", archive));
+    ASSERT_TRUE(
+        wait_until([&] { return !latest.operation_pending && latest.exported_path == archive; }));
+    std::ifstream zip{archive, std::ios::binary};
+    const std::vector<unsigned char> signature{std::istreambuf_iterator<char>{zip},
+                                               std::istreambuf_iterator<char>{}};
+    ASSERT_EQ(signature.size(), 4U);
+    EXPECT_EQ(signature[0], 0x50U);
+    EXPECT_EQ(signature[1], 0x4bU);
+    zip.close();
+
+    client.stop();
+    auto disconnected = client.get("event-1");
+    ASSERT_FALSE(disconnected);
+    EXPECT_EQ(disconnected.error().business_code, "IPC_NOT_CONNECTED");
     stop_server(server);
     std::error_code cleanup_error;
     std::filesystem::remove_all(base, cleanup_error);

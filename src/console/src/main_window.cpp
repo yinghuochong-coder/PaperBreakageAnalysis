@@ -2,9 +2,12 @@
 
 #include "paperbreak/console/navigation_model.hpp"
 
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDateTimeEdit>
+#include <QDesktopServices>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -24,7 +27,9 @@
 #include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTextEdit>
 #include <QTimeZone>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -313,10 +318,11 @@ QString placeholder_message(const ConsolePageId id)
 
 MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                        CameraUiActions camera_actions, ThemeUiActions theme_actions,
-                       OperationsUiActions operations_actions, QWidget* parent)
+                       OperationsUiActions operations_actions, EventUiActions event_actions,
+                       QWidget* parent)
     : QMainWindow(parent), preview_pause_changed_(std::move(preview_pause_changed)),
       camera_actions_(std::move(camera_actions)), theme_actions_(std::move(theme_actions)),
-      operations_actions_(std::move(operations_actions))
+      operations_actions_(std::move(operations_actions)), event_actions_(std::move(event_actions))
 {
     setObjectName(QStringLiteral("main-window"));
     setWindowTitle(QStringLiteral("PaperBreakEdge 断纸分析控制台"));
@@ -701,6 +707,230 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             pages_->addWidget(page);
             continue;
         }
+        if (descriptor.id == ConsolePageId::event_configuration)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-event-configuration"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            auto* heading = make_child<QLabel>(page, QStringLiteral("事件窗口与保存策略"));
+            heading->setProperty("role", "pageTitle");
+            layout->addWidget(heading);
+            auto* editor = make_child<QWidget>(page);
+            auto* form = make_layout<QFormLayout>(editor);
+            event_pre_seconds_ = make_child<QSpinBox>(editor);
+            event_post_seconds_ = make_child<QSpinBox>(editor);
+            event_max_seconds_ = make_child<QSpinBox>(editor);
+            event_merge_seconds_ = make_child<QSpinBox>(editor);
+            event_key_frames_ = make_child<QSpinBox>(editor);
+            event_retention_days_ = make_child<QSpinBox>(editor);
+            event_pre_seconds_->setRange(0, 300);
+            event_post_seconds_->setRange(0, 300);
+            event_max_seconds_->setRange(1, 3600);
+            event_merge_seconds_->setRange(0, 300);
+            event_key_frames_->setRange(1, 64);
+            event_retention_days_->setRange(1, 3650);
+            event_save_raw_ = make_child<QCheckBox>(editor, QStringLiteral("保存原始帧"));
+            event_preview_video_ = make_child<QCheckBox>(editor, QStringLiteral("生成预览视频"));
+            event_upload_policy_ = make_child<QComboBox>(editor);
+            event_upload_policy_->addItem(QStringLiteral("仅已确认"), QStringLiteral("confirmed"));
+            event_upload_policy_->addItem(QStringLiteral("全部事件"), QStringLiteral("all"));
+            event_upload_policy_->addItem(QStringLiteral("不上传"), QStringLiteral("disabled"));
+            form->addRow(QStringLiteral("前置秒数"), event_pre_seconds_);
+            form->addRow(QStringLiteral("后置秒数"), event_post_seconds_);
+            form->addRow(QStringLiteral("最大事件时长（秒）"), event_max_seconds_);
+            form->addRow(QStringLiteral("合并间隔（秒）"), event_merge_seconds_);
+            form->addRow(QStringLiteral("关键帧数"), event_key_frames_);
+            form->addRow(QStringLiteral("原始数据"), event_save_raw_);
+            form->addRow(QStringLiteral("预览视频"), event_preview_video_);
+            form->addRow(QStringLiteral("上传策略"), event_upload_policy_);
+            form->addRow(QStringLiteral("保留天数"), event_retention_days_);
+            layout->addWidget(editor);
+            auto* save = make_child<QPushButton>(page, QStringLiteral("保存事件配置"));
+            save->setObjectName(QStringLiteral("event-config-save"));
+            QObject::connect(save, &QPushButton::clicked, this, [this] {
+                if (!event_actions_.update_configuration)
+                    return;
+                show_event_result(event_actions_.update_configuration(
+                    {.pre_event_seconds = static_cast<std::uint32_t>(event_pre_seconds_->value()),
+                     .post_event_seconds = static_cast<std::uint32_t>(event_post_seconds_->value()),
+                     .max_event_seconds = static_cast<std::uint32_t>(event_max_seconds_->value()),
+                     .merge_gap_seconds = static_cast<std::uint32_t>(event_merge_seconds_->value()),
+                     .key_frame_count = static_cast<std::uint32_t>(event_key_frames_->value()),
+                     .save_raw = event_save_raw_->isChecked(),
+                     .generate_preview_video = event_preview_video_->isChecked(),
+                     .upload_policy = event_upload_policy_->currentData().toString().toStdString(),
+                     .retention_days =
+                         static_cast<std::uint32_t>(event_retention_days_->value())}));
+            });
+            layout->addWidget(save);
+            event_config_status_ = make_child<QLabel>(page, QStringLiteral("正在读取事件配置"));
+            event_config_status_->setObjectName(QStringLiteral("event-config-status"));
+            event_config_status_->setWordWrap(true);
+            layout->addWidget(event_config_status_);
+            layout->addStretch(1);
+            pages_->addWidget(page);
+            continue;
+        }
+        if (descriptor.id == ConsolePageId::events)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-events"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            auto* heading = make_child<QLabel>(page, QStringLiteral("事件查询、校验与复核"));
+            heading->setProperty("role", "pageTitle");
+            layout->addWidget(heading);
+            auto* filters = make_child<QWidget>(page);
+            auto* filter_layout = make_layout<QHBoxLayout>(filters);
+            filter_layout->setContentsMargins(0, 0, 0, 0);
+            event_filter_start_ = make_child<QDateTimeEdit>(filters);
+            event_filter_start_->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+            event_filter_start_->setCalendarPopup(true);
+            event_filter_start_->setDateTime(QDateTime::currentDateTime().addDays(-1));
+            event_filter_end_ = make_child<QDateTimeEdit>(filters);
+            event_filter_end_->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+            event_filter_end_->setCalendarPopup(true);
+            event_filter_end_->setDateTime(QDateTime::currentDateTime());
+            event_filter_state_ = make_child<QComboBox>(filters);
+            event_filter_state_->addItem(QStringLiteral("全部状态"), QString{});
+            event_filter_state_->addItem(QStringLiteral("候选"), QStringLiteral("Candidate"));
+            event_filter_state_->addItem(QStringLiteral("已确认"), QStringLiteral("Confirmed"));
+            event_filter_state_->addItem(QStringLiteral("误报"), QStringLiteral("Rejected"));
+            event_filter_camera_ = make_child<QLineEdit>(filters);
+            event_filter_camera_->setPlaceholderText(QStringLiteral("相机 ID（可留空）"));
+            event_filter_camera_->setMaxLength(32);
+            auto* apply = make_child<QPushButton>(filters, QStringLiteral("查询"));
+            apply->setObjectName(QStringLiteral("event-filter-apply"));
+            QObject::connect(apply, &QPushButton::clicked, this, [this] {
+                if (!event_actions_.query)
+                    return;
+                EventListFilter filter{
+                    .start_time_utc_ms = event_filter_start_->dateTime().toMSecsSinceEpoch(),
+                    .end_time_utc_ms = event_filter_end_->dateTime().toMSecsSinceEpoch(),
+                    .offset = 0U,
+                    .limit = 50U};
+                if (!event_filter_state_->currentData().toString().isEmpty())
+                    filter.event_state =
+                        event_filter_state_->currentData().toString().toStdString();
+                if (!event_filter_camera_->text().trimmed().isEmpty())
+                    filter.camera_id = event_filter_camera_->text().trimmed().toStdString();
+                show_event_result(event_actions_.query(std::move(filter)));
+            });
+            auto* manual = make_child<QPushButton>(filters, QStringLiteral("人工触发"));
+            manual->setObjectName(QStringLiteral("event-manual-trigger"));
+            QObject::connect(manual, &QPushButton::clicked, this, [this] {
+                if (event_actions_.manual_trigger &&
+                    !event_filter_camera_->text().trimmed().isEmpty())
+                    show_event_result(event_actions_.manual_trigger(
+                        event_filter_camera_->text().trimmed().toStdString()));
+            });
+            filter_layout->addWidget(event_filter_start_);
+            filter_layout->addWidget(event_filter_end_);
+            filter_layout->addWidget(event_filter_state_);
+            filter_layout->addWidget(event_filter_camera_);
+            filter_layout->addWidget(apply);
+            filter_layout->addWidget(manual);
+            layout->addWidget(filters);
+            event_table_ = make_child<QTableWidget>(page);
+            event_table_->setObjectName(QStringLiteral("event-table"));
+            configure_table(event_table_, {QStringLiteral("时间"), QStringLiteral("状态"),
+                                           QStringLiteral("触发相机"), QStringLiteral("置信度"),
+                                           QStringLiteral("上传状态"), QStringLiteral("缩略图"),
+                                           QStringLiteral("事件 ID")});
+            QObject::connect(event_table_, &QTableWidget::itemSelectionChanged, this, [this] {
+                const int row = event_table_->currentRow();
+                if (row >= 0 && event_actions_.get && event_table_->item(row, 6))
+                    show_event_result(
+                        event_actions_.get(event_table_->item(row, 6)->text().toStdString()));
+            });
+            layout->addWidget(event_table_, 1);
+            auto* paging = make_child<QWidget>(page);
+            auto* paging_layout = make_layout<QHBoxLayout>(paging);
+            paging_layout->setContentsMargins(0, 0, 0, 0);
+            event_previous_ = make_child<QPushButton>(paging, QStringLiteral("上一页"));
+            event_next_ = make_child<QPushButton>(paging, QStringLiteral("下一页"));
+            const auto page_change = [this](const bool forward) {
+                if (!event_actions_.query)
+                    return;
+                auto filter = event_snapshot_.filter;
+                filter.offset =
+                    forward ? filter.offset + filter.limit
+                            : (filter.offset > filter.limit ? filter.offset - filter.limit : 0U);
+                show_event_result(event_actions_.query(std::move(filter)));
+            };
+            QObject::connect(event_previous_, &QPushButton::clicked, this,
+                             [page_change] { page_change(false); });
+            QObject::connect(event_next_, &QPushButton::clicked, this,
+                             [page_change] { page_change(true); });
+            paging_layout->addWidget(event_previous_);
+            paging_layout->addWidget(event_next_);
+            paging_layout->addStretch(1);
+            layout->addWidget(paging);
+            auto* details = make_child<QWidget>(page);
+            auto* details_layout = make_layout<QHBoxLayout>(details);
+            event_thumbnail_ = make_child<QLabel>(details, QStringLiteral("选择事件加载缩略图"));
+            event_thumbnail_->setMinimumSize(240, 140);
+            event_thumbnail_->setAlignment(Qt::AlignCenter);
+            event_thumbnail_->setScaledContents(true);
+            event_manifest_ = make_child<QTextEdit>(details);
+            event_manifest_->setReadOnly(true);
+            event_manifest_->setPlaceholderText(QStringLiteral("选择事件查看已校验 manifest"));
+            details_layout->addWidget(event_thumbnail_);
+            details_layout->addWidget(event_manifest_, 1);
+            layout->addWidget(details);
+            auto* actions = make_child<QWidget>(page);
+            auto* action_layout = make_layout<QHBoxLayout>(actions);
+            action_layout->setContentsMargins(0, 0, 0, 0);
+            event_confirm_ = make_child<QPushButton>(actions, QStringLiteral("确认为断纸"));
+            event_reject_ = make_child<QPushButton>(actions, QStringLiteral("标记误报"));
+            event_export_ = make_child<QPushButton>(actions, QStringLiteral("导出已校验事件"));
+            event_open_directory_ =
+                make_child<QPushButton>(actions, QStringLiteral("打开事件目录"));
+            event_retry_upload_ = make_child<QPushButton>(actions, QStringLiteral("重试上传"));
+            event_retry_upload_->setEnabled(false);
+            event_retry_upload_->setToolTip(QStringLiteral("上传队列将在 M8 接入，当前不可用"));
+            const auto review = [this](const bool confirmed) {
+                if (event_actions_.review && event_snapshot_.detail)
+                    show_event_result(event_actions_.review(
+                        event_snapshot_.detail->event.event_id,
+                        event_snapshot_.detail->event.review_revision, confirmed));
+            };
+            QObject::connect(event_confirm_, &QPushButton::clicked, this,
+                             [review] { review(true); });
+            QObject::connect(event_reject_, &QPushButton::clicked, this,
+                             [review] { review(false); });
+            QObject::connect(event_export_, &QPushButton::clicked, this, [this] {
+                if (!event_actions_.export_event || !event_snapshot_.detail)
+                    return;
+                const QString path = QFileDialog::getSaveFileName(
+                    this, QStringLiteral("导出事件"),
+                    QString::fromStdString(event_snapshot_.detail->event.event_id + ".zip"),
+                    QStringLiteral("ZIP 文件 (*.zip)"));
+                if (!path.isEmpty())
+                    show_event_result(
+                        event_actions_.export_event(event_snapshot_.detail->event.event_id,
+                                                    std::filesystem::path{path.toStdWString()}));
+            });
+            QObject::connect(event_open_directory_, &QPushButton::clicked, this, [this] {
+                if (event_snapshot_.detail)
+                    static_cast<void>(
+                        QDesktopServices::openUrl(QUrl::fromLocalFile(QString::fromStdWString(
+                            event_snapshot_.detail->committed_directory.wstring()))));
+            });
+            action_layout->addWidget(event_confirm_);
+            action_layout->addWidget(event_reject_);
+            action_layout->addWidget(event_export_);
+            action_layout->addWidget(event_open_directory_);
+            action_layout->addWidget(event_retry_upload_);
+            action_layout->addStretch(1);
+            layout->addWidget(actions);
+            event_status_ = make_child<QLabel>(page, QStringLiteral("正在读取事件列表"));
+            event_status_->setWordWrap(true);
+            layout->addWidget(event_status_);
+            pages_->addWidget(page);
+            continue;
+        }
         if (descriptor.id == ConsolePageId::device_status)
         {
             QWidget* page = make_child<QWidget>(pages_);
@@ -1047,7 +1277,7 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
         selected_serial = QString::fromStdString(
             camera_snapshot_.discovered_devices[discovered_devices_->currentRow()].serial);
     camera_snapshot_ = snapshot;
-    if (!camera_configuration_value_)
+    if (!camera_configuration_value_ || !camera_selector_ || !discovered_devices_)
         return;
 
     camera_selector_->blockSignals(true);
@@ -1289,6 +1519,13 @@ void MainWindow::show_operations_result(const Result<void>& result)
             QStringLiteral("失败：%1").arg(QString::fromStdString(result.error().message)));
 }
 
+void MainWindow::show_event_result(const Result<void>& result)
+{
+    if (!result && event_status_)
+        event_status_->setText(
+            QStringLiteral("失败：%1").arg(QString::fromStdString(result.error().message)));
+}
+
 void MainWindow::request_diagnostics_export()
 {
     if (!operations_actions_.export_diagnostics)
@@ -1425,6 +1662,114 @@ void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
         operations_status_->setText(QStringLiteral("后台服务连接中断，运维数据已标记过期"));
     else
         operations_status_->setText(QStringLiteral("运维数据已同步；诊断导出内容将强制脱敏"));
+}
+
+void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
+{
+    const bool configuration_changed =
+        event_snapshot_.stored_config_revision != snapshot.stored_config_revision ||
+        event_snapshot_.configuration_stale;
+    event_snapshot_ = snapshot;
+    if (!event_table_ || !event_config_status_)
+        return;
+
+    if (configuration_changed && !snapshot.configuration_stale)
+    {
+        event_pre_seconds_->setValue(static_cast<int>(snapshot.configuration.pre_event_seconds));
+        event_post_seconds_->setValue(static_cast<int>(snapshot.configuration.post_event_seconds));
+        event_max_seconds_->setValue(static_cast<int>(snapshot.configuration.max_event_seconds));
+        event_merge_seconds_->setValue(static_cast<int>(snapshot.configuration.merge_gap_seconds));
+        event_key_frames_->setValue(static_cast<int>(snapshot.configuration.key_frame_count));
+        event_retention_days_->setValue(static_cast<int>(snapshot.configuration.retention_days));
+        event_save_raw_->setChecked(snapshot.configuration.save_raw);
+        event_preview_video_->setChecked(snapshot.configuration.generate_preview_video);
+        const int upload = event_upload_policy_->findData(
+            QString::fromStdString(snapshot.configuration.upload_policy));
+        event_upload_policy_->setCurrentIndex(upload >= 0 ? upload : 0);
+    }
+    event_preview_video_->setEnabled(!snapshot.configuration_stale && !snapshot.operation_pending);
+    event_preview_video_->setToolTip(
+        snapshot.preview_video_generation_available
+            ? QString{}
+            : QStringLiteral("预览视频生成器尚未实现；配置可保存，但当前不会伪造视频"));
+    event_config_status_->setText(
+        snapshot.configuration_stale
+            ? QStringLiteral("事件配置不可用或已过期")
+            : QStringLiteral("配置版本 %1；预览视频当前%2；上传运行时将在 M8 接入")
+                  .arg(snapshot.stored_config_revision)
+                  .arg(snapshot.preview_video_generation_available ? QStringLiteral("可用")
+                                                                   : QStringLiteral("不可用")));
+
+    const QString selected_id =
+        event_table_->currentRow() >= 0 && event_table_->item(event_table_->currentRow(), 6)
+            ? event_table_->item(event_table_->currentRow(), 6)->text()
+            : QString{};
+    event_table_->setRowCount(static_cast<int>(snapshot.events.size()));
+    int selected_row = -1;
+    for (std::size_t index = 0; index < snapshot.events.size(); ++index)
+    {
+        const auto& event = snapshot.events[index];
+        const int row = static_cast<int>(index);
+        set_table_item(event_table_, row, 0,
+                       QDateTime::fromMSecsSinceEpoch(event.candidate_time_utc_ms, QTimeZone::utc())
+                           .toLocalTime()
+                           .toString(QString::fromLatin1(local_date_time_format)));
+        set_table_item(event_table_, row, 1, QString::fromStdString(event.event_state));
+        set_table_item(event_table_, row, 2, QString::fromStdString(event.trigger_camera_id));
+        set_table_item(event_table_, row, 3, QString::number(event.confidence, 'f', 3));
+        set_table_item(event_table_, row, 4, QString::fromStdString(event.upload_state));
+        set_table_item(event_table_, row, 5,
+                       event.thumbnail_available ? QStringLiteral("可用")
+                                                 : QStringLiteral("不可用"));
+        set_table_item(event_table_, row, 6, QString::fromStdString(event.event_id));
+        if (event_table_->item(row, 6)->text() == selected_id)
+            selected_row = row;
+    }
+    if (selected_row >= 0)
+        event_table_->selectRow(selected_row);
+    event_table_->resizeColumnsToContents();
+    event_previous_->setEnabled(!snapshot.operation_pending && snapshot.filter.offset > 0U);
+    event_next_->setEnabled(!snapshot.operation_pending &&
+                            snapshot.filter.offset + snapshot.events.size() < snapshot.total);
+
+    const bool has_detail = snapshot.detail.has_value();
+    if (has_detail)
+    {
+        const auto& detail = *snapshot.detail;
+        event_manifest_->setPlainText(QString::fromStdString(detail.manifest_json));
+        QImage thumbnail;
+        if (!detail.thumbnail_jpeg.empty())
+            static_cast<void>(
+                thumbnail.loadFromData(reinterpret_cast<const uchar*>(detail.thumbnail_jpeg.data()),
+                                       static_cast<int>(detail.thumbnail_jpeg.size()), "JPG"));
+        event_thumbnail_->setPixmap(thumbnail.isNull() ? QPixmap{} : QPixmap::fromImage(thumbnail));
+        if (thumbnail.isNull())
+            event_thumbnail_->setText(QStringLiteral("缩略图不可用"));
+    }
+    const bool candidate = has_detail && snapshot.detail->event.event_state == "Candidate" &&
+                           snapshot.connection.state == ipc::ClientConnectionState::connected &&
+                           !snapshot.operation_pending;
+    event_confirm_->setEnabled(candidate);
+    event_reject_->setEnabled(candidate);
+    event_export_->setEnabled(has_detail && !snapshot.operation_pending);
+    event_open_directory_->setEnabled(has_detail && !snapshot.operation_pending);
+    event_retry_upload_->setEnabled(false);
+    if (snapshot.operation_pending)
+        event_status_->setText(
+            QStringLiteral("正在执行 %1").arg(QString::fromStdString(snapshot.operation)));
+    else if (snapshot.error)
+        event_status_->setText(QStringLiteral("失败：%1（%2）")
+                                   .arg(QString::fromStdString(snapshot.error->message),
+                                        QString::fromStdString(snapshot.error->business_code)));
+    else if (snapshot.exported_path)
+        event_status_->setText(
+            QStringLiteral("导出完成：%1")
+                .arg(QString::fromStdWString(snapshot.exported_path->wstring())));
+    else
+        event_status_->setText(
+            QStringLiteral("共 %1 个事件；当前从第 %2 条开始；详情读取前会校验 manifest 与文件摘要")
+                .arg(snapshot.total)
+                .arg(snapshot.filter.offset + 1U));
 }
 
 void MainWindow::apply_snapshot(const ClientStateSnapshot& snapshot)
@@ -1588,6 +1933,17 @@ bool MainWindow::operations_pages_ready() const noexcept
            log_table_ && operations_status_ && diagnostics_export_ &&
            has_readable_table_header(metrics_table_) && has_readable_table_header(alarm_table_) &&
            has_readable_table_header(log_table_);
+}
+
+bool MainWindow::event_pages_ready() const noexcept
+{
+    return event_pre_seconds_ && event_post_seconds_ && event_max_seconds_ &&
+           event_merge_seconds_ && event_key_frames_ && event_retention_days_ && event_save_raw_ &&
+           event_preview_video_ && event_upload_policy_ && event_filter_start_ &&
+           event_filter_end_ && event_filter_state_ && event_filter_camera_ && event_table_ &&
+           event_thumbnail_ && event_manifest_ && event_confirm_ && event_reject_ &&
+           event_export_ && event_open_directory_ && event_retry_upload_ &&
+           !event_retry_upload_->isEnabled();
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

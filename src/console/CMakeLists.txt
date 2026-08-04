@@ -1,6 +1,7 @@
 add_library(paperbreak_console_model STATIC
     src/camera_client.cpp
     src/client_state_store.cpp
+    src/event_client.cpp
     src/navigation_model.cpp
     src/operations_client.cpp
     src/preview_client.cpp

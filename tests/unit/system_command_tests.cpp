@@ -5,12 +5,17 @@
 #include "paperbreak/pipeline/preview.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/service/system_commands.hpp"
+#include "paperbreak/storage/event_inspector.hpp"
+#include "paperbreak/storage/event_store.hpp"
+#include "paperbreak/storage/metadata_database.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
@@ -99,6 +104,83 @@ const paperbreak::ipc::PeerIdentity reader{
 const paperbreak::ipc::PeerIdentity administrator{
     .actor_sid = "S-1-5-21-admin", .local = true, .authenticated = true, .administrator = true};
 
+paperbreak::storage::EventPersistenceRequest command_event_request(const std::string& event_id)
+{
+    using namespace std::chrono_literals;
+    using namespace paperbreak;
+    using namespace paperbreak::camera;
+    using namespace paperbreak::event;
+    const auto wall = WallClockTime{std::chrono::sys_days{std::chrono::year{2026} / 8 / 4}};
+    const auto make_frame = [&](const std::uint64_t sequence,
+                                const std::chrono::milliseconds offset) {
+        auto buffer = std::make_shared<FrameBuffer>(16U);
+        for (std::size_t index = 0U; index < 16U; ++index)
+            buffer->writable_bytes()[index] = static_cast<std::byte>(sequence + index);
+        EXPECT_TRUE(buffer->set_size(16U));
+        auto view = make_frame_view({.camera_id = "CAM01",
+                                     .camera_frame_number = 100U + sequence,
+                                     .sequence_number = sequence,
+                                     .received_monotonic_time = MonotonicTime{offset},
+                                     .received_wall_clock_time = wall + offset,
+                                     .geometry = {.width = 4U, .height = 4U, .stride = 4U},
+                                     .pixel_format = PixelFormat::mono8,
+                                     .buffer = std::move(buffer)});
+        EXPECT_TRUE(view);
+        return std::move(view).value();
+    };
+    auto first = make_frame(1U, 100ms);
+    auto second = make_frame(2U, 200ms);
+    paperbreak::storage::EventPersistenceRequest request;
+    request.metadata = {.event_id = event_id,
+                        .event_state = "Candidate",
+                        .candidate_time = wall + 200ms,
+                        .start_time = wall + 100ms,
+                        .end_time = wall + 300ms,
+                        .camera_ids = {"CAM01"},
+                        .trigger_camera_id = "CAM01",
+                        .trigger_frame_number = 102U,
+                        .trigger_reason = "ManualTest",
+                        .confidence = 1.0,
+                        .pre_event_duration = 100ms,
+                        .post_event_duration = 100ms,
+                        .algorithm_name = "mock-detector",
+                        .algorithm_version = "m5",
+                        .config_version = "1",
+                        .machine_id = "EDGE-TEST",
+                        .production_line_id = "PM-TEST",
+                        .paper_type = "test",
+                        .upload_state = "Pending",
+                        .time_quality = "Normal"};
+    request.window = {.event_id = event_id,
+                      .version = 1U,
+                      .requested_start = MonotonicTime{100ms},
+                      .requested_end = MonotonicTime{300ms},
+                      .closed_monotonic_time = MonotonicTime{301ms},
+                      .display_wall_clock_time = wall + 200ms,
+                      .camera_windows = {{.camera_id = "CAM01",
+                                          .requested_start = MonotonicTime{100ms},
+                                          .requested_end = MonotonicTime{300ms},
+                                          .available_start = MonotonicTime{100ms},
+                                          .available_end = MonotonicTime{200ms},
+                                          .first_sequence_number = 1U,
+                                          .last_sequence_number = 2U,
+                                          .frames = {first, second},
+                                          .complete = true}},
+                      .complete = true};
+    request.key_frames.push_back(
+        {.descriptor = {.camera_id = "CAM01",
+                        .camera_frame_number = second.camera_frame_number(),
+                        .sequence_number = second.sequence_number(),
+                        .monotonic_time = second.received_monotonic_time(),
+                        .wall_clock_time = second.received_wall_clock_time(),
+                        .geometry = second.geometry(),
+                        .pixel_format = second.pixel_format(),
+                        .reasons = {KeyFrameReason::candidate_trigger}},
+         .jpeg = {std::byte{0xff}, std::byte{0xd8}, std::byte{0x01}, std::byte{0xff},
+                  std::byte{0xd9}}});
+    return request;
+}
+
 } // namespace
 
 TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
@@ -118,6 +200,125 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json version_json = Json::parse(version.value().payload_json);
     EXPECT_FALSE(version_json.at("applicationVersion").get<std::string>().empty());
     EXPECT_TRUE(version_json.at("dependencies").contains("qt"));
+}
+
+TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
+{
+    CommandFixture fixture;
+    const auto event_root =
+        fixture.config_path.parent_path() / std::filesystem::path{u8"数据/事件 文件"};
+    auto opened = paperbreak::storage::EventMetadataDatabase::open(
+        {.database_path = fixture.temp.path / L"数据库" / L"events.db",
+         .event_root = event_root,
+         .backup_directory = fixture.temp.path / L"备份"});
+    ASSERT_TRUE(opened);
+    std::shared_ptr<paperbreak::storage::EventMetadataDatabase> database{std::move(opened).value()};
+    auto writer = paperbreak::storage::EventTransactionWriter::create({.event_root = event_root});
+    ASSERT_TRUE(writer);
+    const std::string event_id = "019fcb3d-9999-7000-8000-000000000009";
+    auto persisted = writer.value()->persist(command_event_request(event_id));
+    ASSERT_TRUE(persisted);
+    ASSERT_TRUE(database->index_committed_event(persisted.value().committed_directory));
+    auto created_inspector =
+        paperbreak::storage::EventInspector::create({.event_root = event_root});
+    ASSERT_TRUE(created_inspector);
+    std::shared_ptr<paperbreak::storage::EventInspector> inspector{
+        std::move(created_inspector).value()};
+    paperbreak::service::SystemCommandService commands{fixture.repository,
+                                                       fixture.status,
+                                                       {},
+                                                       {},
+                                                       {},
+                                                       fixture.config_path.parent_path(),
+                                                       {},
+                                                       {},
+                                                       {},
+                                                       database,
+                                                       inspector};
+
+    auto list = commands.handle(
+        fixture.request("event.list",
+                        R"({"eventState":"Candidate","cameraId":"CAM01","offset":0,"limit":1})"),
+        reader, {});
+    ASSERT_TRUE(list) << list.error().message;
+    const Json listed = Json::parse(list.value().payload_json);
+    EXPECT_EQ(listed["total"], 1U);
+    ASSERT_EQ(listed["events"].size(), 1U);
+    EXPECT_EQ(listed["events"][0]["eventId"], event_id);
+    EXPECT_EQ(listed["events"][0]["reviewRevision"], 1U);
+    EXPECT_TRUE(listed["events"][0]["thumbnailAvailable"].get<bool>());
+
+    auto detail = commands.handle(fixture.request("event.get", Json{{"eventId", event_id}}.dump()),
+                                  reader, {});
+    ASSERT_TRUE(detail) << detail.error().message;
+    const Json detail_json = Json::parse(detail.value().payload_json);
+    EXPECT_GT(detail_json["manifestBytes"].get<std::size_t>(), 0U);
+    EXPECT_TRUE(detail_json["keyFramesTraceable"].get<bool>());
+    EXPECT_EQ(detail_json["thumbnailBytes"], detail.value().binary.size());
+    EXPECT_FALSE(detail.value().binary.empty());
+    auto manifest = commands.handle(
+        fixture.request("event.getManifest", Json{{"eventId", event_id}}.dump()), reader, {});
+    ASSERT_TRUE(manifest) << manifest.error().message;
+    const Json manifest_header = Json::parse(manifest.value().payload_json);
+    EXPECT_TRUE(manifest_header["verified"].get<bool>());
+    const std::string manifest_text{reinterpret_cast<const char*>(manifest.value().binary.data()),
+                                    manifest.value().binary.size()};
+    EXPECT_EQ(Json::parse(manifest_text)["eventId"], event_id);
+
+    const auto review_payload = Json{{"eventId", event_id}, {"expectedReviewRevision", 1U}}.dump();
+    auto denied = commands.handle(fixture.request("event.confirm", review_payload), reader, {});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
+    auto confirmed =
+        commands.handle(fixture.request("event.confirm", review_payload), administrator, {});
+    ASSERT_TRUE(confirmed);
+    const Json confirmed_json = Json::parse(confirmed.value().payload_json);
+    EXPECT_EQ(confirmed_json["event"]["eventState"], "Confirmed");
+    EXPECT_EQ(confirmed_json["event"]["reviewRevision"], 2U);
+    auto conflicting =
+        commands.handle(fixture.request("event.reject", review_payload), administrator, {});
+    ASSERT_FALSE(conflicting);
+    EXPECT_EQ(conflicting.error().business_code, "EVENT_VERSION_CONFLICT");
+
+    auto exported = commands.handle(
+        fixture.request("event.export", Json{{"eventId", event_id}}.dump()), administrator, {});
+    ASSERT_TRUE(exported) << exported.error().message;
+    const auto export_json = Json::parse(exported.value().payload_json);
+    EXPECT_EQ(export_json["verified"], true);
+    EXPECT_TRUE(exported.value().binary.empty());
+    const auto source_utf8 = export_json["exportSourcePath"].get<std::string>();
+    std::u8string source_path_text;
+    source_path_text.reserve(source_utf8.size());
+    for (const unsigned char byte : source_utf8)
+        source_path_text.push_back(static_cast<char8_t>(byte));
+    std::ifstream archive{std::filesystem::path{source_path_text}, std::ios::binary};
+    std::array<unsigned char, 2U> signature{};
+    archive.read(reinterpret_cast<char*>(signature.data()),
+                 static_cast<std::streamsize>(signature.size()));
+    EXPECT_EQ(signature[0], 0x50U);
+    EXPECT_EQ(signature[1], 0x4bU);
+
+    auto config = commands.handle(fixture.request("event.getConfig"), reader, {});
+    ASSERT_TRUE(config);
+    Json config_json = Json::parse(config.value().payload_json);
+    EXPECT_FALSE(config_json["uploadRuntimeAvailable"].get<bool>());
+    config_json["event"]["preEventSeconds"] = 9U;
+    auto updated = commands.handle(
+        fixture.request(
+            "event.updateConfig",
+            Json{{"expectedConfigRevision", 1U}, {"event", config_json["event"]}}.dump()),
+        administrator, {});
+    ASSERT_TRUE(updated) << updated.error().message;
+    EXPECT_EQ(Json::parse(updated.value().payload_json)["event"]["preEventSeconds"], 9U);
+    auto retry =
+        commands.handle(fixture.request("event.retryUpload", Json{{"eventId", event_id}}.dump()),
+                        administrator, {});
+    ASSERT_FALSE(retry);
+    EXPECT_EQ(retry.error().business_code, "SYS_NOT_SUPPORTED");
+
+    auto invalid = commands.handle(fixture.request("event.list", R"({"limit":0})"), reader, {});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
 }
 
 TEST(SystemCommand, ValidatesPreviewSubscriptionAgainstBoundedRuntime)

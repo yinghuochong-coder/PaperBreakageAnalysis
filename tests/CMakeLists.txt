@@ -10,6 +10,7 @@ add_executable(PaperBreakTests
     unit/event_candidate_state_tests.cpp
     unit/event_key_frame_tests.cpp
     unit/event_memory_ring_tests.cpp
+    unit/event_runtime_tests.cpp
     unit/event_window_tests.cpp
     unit/ipc_client_tests.cpp
     unit/ipc_protocol_tests.cpp

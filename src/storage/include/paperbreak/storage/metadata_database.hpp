@@ -15,7 +15,7 @@
 namespace paperbreak::storage
 {
 
-inline constexpr std::uint32_t database_schema_version = 2U;
+inline constexpr std::uint32_t database_schema_version = 3U;
 inline constexpr std::size_t database_default_page_size = 50U;
 inline constexpr std::size_t database_maximum_page_size = 200U;
 
@@ -48,6 +48,9 @@ struct EventMetadataRecord final
     std::string event_id;
     std::uint32_t event_schema_version{};
     std::string event_state;
+    std::uint64_t review_revision{1U};
+    std::optional<std::int64_t> reviewed_at_utc_ms;
+    std::string reviewed_by;
     std::int64_t candidate_time_utc_ms{};
     std::optional<std::int64_t> confirmed_time_utc_ms;
     std::int64_t start_time_utc_ms{};
@@ -67,12 +70,25 @@ struct EventMetadataRecord final
 
 struct EventQuery final
 {
+    std::optional<std::string> event_id;
     std::optional<std::int64_t> start_time_utc_ms;
     std::optional<std::int64_t> end_time_utc_ms;
     std::optional<std::string> event_state;
     std::optional<std::string> camera_id;
     std::size_t offset{};
     std::size_t limit{database_default_page_size};
+};
+
+enum class EventReviewDecision
+{
+    confirmed,
+    rejected,
+};
+
+struct EventReviewOutcome final
+{
+    EventMetadataRecord event;
+    bool duplicate{};
 };
 
 struct EventQueryPage final
@@ -146,6 +162,17 @@ class EventMetadataDatabase final
         const std::filesystem::path& committed_directory);
 
     [[nodiscard]] Result<EventQueryPage> query_events(const EventQuery& query) const;
+
+    /// Returns one indexed event or EVENT_NOT_FOUND. The immutable manifest is not modified.
+    [[nodiscard]] Result<EventMetadataRecord> get_event(std::string_view event_id) const;
+
+    /// Applies an operator review with optimistic concurrency. Repeating the same terminal
+    /// decision is idempotent; a stale conflicting decision returns EVENT_VERSION_CONFLICT.
+    [[nodiscard]] Result<EventReviewOutcome> review_event(std::string_view event_id,
+                                                          std::uint64_t expected_review_revision,
+                                                          EventReviewDecision decision,
+                                                          std::int64_t reviewed_at_utc_ms,
+                                                          std::string_view reviewed_by);
 
     /// Updates operator-controlled retention flags. Upload state is managed separately by M8.
     [[nodiscard]] Result<void> set_retention_policy(std::string_view event_id, bool locked,

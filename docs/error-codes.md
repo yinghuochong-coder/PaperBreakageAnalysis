@@ -174,6 +174,10 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `EVENT_CHECKSUM_FAILED` | Critical | 视来源 | 本地写后校验不一致；隔离文件，不提交完整事件 |
 | `EVENT_RECOVERY_FAILED` | Critical | 视原因 | 启动时无法恢复/隔离未完成事件；不得伪报已提交 |
 | `EVENT_SCHEMA_UNSUPPORTED` | Error | 否 | 事件清单版本超出读取范围；不得部分解析后宣称完整 |
+| `EVENT_QUEUE_FULL` | Critical | 是 | 待编码/持久化事件达到固定上限；拒绝新事件，不扩容或反压采集 |
+| `EVENT_EXPORT_TOO_LARGE` | Error | 否 | 已校验事件 ZIP64 超过显式 64 GiB、单文件或文件数上限；不返回截断包或成功标志 |
+| `EVENT_EXPORT_FAILED` | Error | 视 I/O | Qt 客户端无法原子写入事件 ZIP；`QSaveFile` 放弃临时文件且不覆盖既有目标 |
+| `ALGORITHM_QUEUE_FULL` | Error | 是 | 相机转发到事件处理的固定帧队列已满；当前帧显式跳过并计数，采集线程不等待 |
 | `STORAGE_LOW_SPACE` | Warning | 是 | 达到预警水位；清理已上传且允许删除的旧事件 |
 | `STORAGE_CRITICAL_SPACE` | Critical | 是 | 达到严重水位；停止普通滚动缓存，优先正式事件 |
 | `STORAGE_STOP_SAVE` | Critical | 否 | 达到停止保存水位；禁止新大文件并明确事件未保存 |

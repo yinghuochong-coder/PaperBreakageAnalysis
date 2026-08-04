@@ -27,9 +27,6 @@ namespace
 {
 constexpr std::size_t maximum_discovered_devices = 64U;
 constexpr std::size_t maximum_operator_snapshot_bytes = 256U * 1024U * 1024U;
-constexpr std::size_t preview_frame_pool_capacity = 8U;
-constexpr std::size_t preview_acquisition_queue_capacity = 4U;
-constexpr auto preview_capture_timeout = std::chrono::milliseconds{250};
 constexpr auto preview_forward_timeout = std::chrono::milliseconds{50};
 constexpr auto preview_shutdown_timeout = std::chrono::seconds{2};
 
@@ -40,8 +37,10 @@ Error unsupported(std::string op)
 }
 } // namespace
 CameraControlRuntime::CameraControlRuntime(std::shared_ptr<ICameraProvider> p,
-                                           CameraFrameObserver frame_observer)
-    : provider_(std::move(p)), frame_observer_(std::move(frame_observer))
+                                           CameraFrameObserver frame_observer,
+                                           CameraFrameDeliveryOptions delivery_options)
+    : provider_(std::move(p)), frame_observer_(std::move(frame_observer)),
+      delivery_options_(delivery_options)
 {
 }
 CameraControlRuntime::~CameraControlRuntime()
@@ -66,6 +65,12 @@ Result<void> CameraControlRuntime::start_frame_delivery(Session& session)
 {
     if (!frame_observer_)
         return Result<void>::success();
+    if (delivery_options_.frame_pool_capacity == 0U || delivery_options_.queue_capacity == 0U ||
+        delivery_options_.queue_capacity > delivery_options_.frame_pool_capacity ||
+        delivery_options_.receive_timeout <= std::chrono::milliseconds::zero())
+        return Result<void>::failure(
+            make_camera_error(CameraErrorKind::config_failed, "相机帧投递容量配置无效",
+                              "camera.control.startFrameDelivery", session.id));
 
     auto capabilities = session.device->capabilities();
     if (!capabilities)
@@ -81,13 +86,13 @@ Result<void> CameraControlRuntime::start_frame_delivery(Session& session)
     try
     {
         session.frame_pool =
-            std::make_unique<FrameBufferPool>(preview_frame_pool_capacity, payload_bytes);
+            std::make_unique<FrameBufferPool>(delivery_options_.frame_pool_capacity, payload_bytes);
         session.acquisition_queue =
-            std::make_unique<AcquisitionQueue>(preview_acquisition_queue_capacity);
+            std::make_unique<AcquisitionQueue>(delivery_options_.queue_capacity);
         session.acquisition = std::make_unique<AcquisitionWorker>(
             *session.device, *session.frame_pool, *session.acquisition_queue,
             AcquisitionWorkerOptions{.camera_id = session.id,
-                                     .receive_timeout = preview_capture_timeout,
+                                     .receive_timeout = delivery_options_.receive_timeout,
                                      .statistics_window = std::chrono::seconds{1},
                                      .consecutive_timeout_limit =
                                          std::numeric_limits<std::size_t>::max()});

@@ -975,6 +975,16 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M5-09 事件配置、查询、复核与导出
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-04
+
+完成日期：2026-08-04
+
+执行记录：`.agent/plans/m5-09-event-review-export.md`
+
 实施：
 
 - 实现 `event.list/get/manualTrigger/confirm/reject` IPC 命令；
@@ -995,6 +1005,8 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 - SQLite 可查询且迁移测试通过；
 - 事件可查询、复核、校验、导出并按帧顺序检查；
 - 磁盘满和写入失败不会导致采集线程执行 I/O 或无限阻塞。
+
+完成证据（2026-08-04）：服务组合根现已把最多四路相机帧以容量 64 的非阻塞队列接入每相机内存环、M5 mock detector、候选/窗口、关键帧 JPEG、容量 8 的事件写队列、原子事件目录和 SQLite schema v3；默认帧池提升到 2048，并在启动/重配置时校验前后窗口预算。服务启动恢复/对账后开放 IPC，30 秒周期执行水位和保留维护，StopSave 拒绝新增大文件但不停止检测。数据库提供单事件详情和带 `review_revision` 的 Confirmed/Rejected 乐观并发及幂等语义，对账保留人工复核。只读检查器只接受正式提交目录，验证 manifest、SHA-256、原始帧顺序/缺口和关键帧追溯，并以单文件 128 MiB、总计 64 GiB 上限流式生成 ZIP64。事件 IPC 增加配置读取/更新、分页筛选、详情、独立 manifest、人工触发、复核和受控缓存导出；Qt `EventClient` 与两张页面提供全部路线图字段、状态/相机/置信度/上传状态/缩略图、manifest、目录、复核以及中文空格路径的 `QSaveFile` 原子导出，`retryUpload`、正式算法和预览视频生成均明确标注阶段不可用。Debug/Release `/W4 /WX` 全量构建和两套非硬件 CTest 均为 23/23，33 项相关单元/模拟集成测试、默认 MSVC 静态分析、25 个任务 C++ 文件格式检查和 `git diff --check` 通过；全仓 `format-check` 仍首先被未修改的 `src/pipeline/include/paperbreak/pipeline/preview.hpp:6` 既有格式问题阻断。未执行实体相机、四路生产内存/吞吐、真实 NVMe 水位、SCM 强杀或断电测试，不能声明硬件门禁通过。
 
 ## 12. M6：正式算法接口与初版算法
 

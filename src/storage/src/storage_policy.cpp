@@ -496,6 +496,17 @@ Result<void> StoragePolicyManager::admit_large_write() const
     return Result<void>::failure(std::move(error));
 }
 
+Result<void> StoragePolicyManager::set_retention_age(const std::chrono::days retention_age)
+{
+    if (retention_age.count() <= 0)
+        return Result<void>::failure(policy_error("SYS_CONFIG_INVALID", Severity::error,
+                                                  "事件保留天数必须大于零",
+                                                  "storage.policy.retention.configure"));
+    const std::scoped_lock lock{impl_->mutex};
+    impl_->options.retention_age = retention_age;
+    return Result<void>::success();
+}
+
 StoragePolicySnapshot StoragePolicyManager::snapshot() const noexcept
 {
     const std::scoped_lock lock{impl_->mutex};

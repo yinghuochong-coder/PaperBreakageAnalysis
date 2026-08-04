@@ -326,6 +326,40 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 响应仍保留 `saved=true`，同时返回 `applied=false` 和结构化 `applyError`，客户端不得把保存值显示为
 实际值。
 
+### 事件配置、查询、复核与导出
+
+事件读取命令要求已认证本机用户；`event.updateConfig`、`event.manualTrigger`、
+`event.confirm`、`event.reject`、`event.export` 和 `event.retryUpload` 要求本机管理员。
+事件目录只有在 manifest 写完并完成同卷原子提交后才对这些命令可见。
+
+- `event.getConfig`：payload 为空。返回完整 `event` 配置、存储/有效配置修订，及
+  `previewVideoGenerationAvailable`、`uploadRuntimeAvailable` 能力标志。M5 两项均为
+  `false`，客户端不得把配置开关显示成运行成功。
+- `event.updateConfig`：payload 必须且只能包含 `expectedConfigRevision` 和完整 `event`
+  对象。沿用配置修订、原子保存、审计、热应用和失败回滚语义。
+- `event.list`：payload 可包含 `startTimeUtcMs`、`endTimeUtcMs`、`eventState`、
+  `cameraId`、`offset` 和 `limit`；`limit` 为 1～200。返回稳定排序的 `events`、`total`、
+  `offset`、`limit`。每项包含当前复核状态/版本、候选时间、触发相机、置信度、上传/存储
+  状态、正式相对目录和缩略图可用性。
+- `event.get`：payload 为 `{"eventId":"..."}`。先复验 manifest、长度和 SHA-256，再
+  返回当前数据库状态、服务解析出的正式绝对目录、manifest 字节数、原始/关键帧数、序列
+  缺口和追溯状态；二进制负载为首张关键帧 JPEG 缩略图。
+- `event.getManifest`：payload 为 `{"eventId":"..."}`。再次校验正式事件后，以不超过
+  8 MiB 的二进制 UTF-8 JSON 返回完整不可变 manifest，响应包含 `verified=true`；借此避免
+  大事件索引突破 1 MiB JSON 头上限。
+- `event.manualTrigger`：payload 为 `{"cameraId":"CAM01"}`。只在下一张新有效帧触发；
+  返回 `accepted` 和 `alreadyPending`，不会停止相机采集或在相机回调中编码/写盘。
+- `event.confirm` / `event.reject`：payload 必须包含 `eventId` 和正整数
+  `expectedReviewRevision`。SQLite 使用乐观版本并发；相同终态重复请求幂等，过期或相反
+  终态返回 `EVENT_VERSION_CONFLICT`，不可变 manifest 不修改。
+- `event.export`：payload 为 `{"eventId":"..."}`。服务再次完整校验，只将正式事件按
+  manifest 顺序流式打包到配置缓存根内的受控暂存目录；响应包含 `verified=true`、大小、
+  文件数和 `exportSourcePath`，不通过 IPC 传完整原始序列。Qt 客户端只从该服务返回路径
+  分块读取，并通过 `QSaveFile` 原子保存到用户选择的目标；服务不接受任意目标路径。导出器
+  支持 ZIP64，并在显式 64 GiB 总上限或单文件/文件数上限之外返回
+  `EVENT_EXPORT_TOO_LARGE`。
+- `event.retryUpload`：M5 固定返回 `SYS_NOT_SUPPORTED`；上传队列在 M8 接入前不伪造成功。
+
 ### `preview.subscribe`
 
 权限：已认证本机用户。请求二进制负载必须为空。
@@ -355,6 +389,8 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
   `cameraFrameNumber`、`sequenceNumber`、源图像 `width`/`height`/`stride`、可选 `brightness`、
   `actualFps`、`cameraStatus`、`roi` 和 `detectionResult`；二进制负载为 JPEG。每个连接/相机
   在服务端只保留最新待发送帧，旧帧可丢弃。二进制负载仍受 16 MiB 通用上限约束。
+- `event.committed` 为事件客户端保留；M5 客户端即使未收到该推送也会以 `event.list`
+  周期补查为事实来源，事件推送不得作为唯一可见性机制。
 
 三类报警推送 payload 均包含 `registryRevision` 和完整报警字段。报警推送允许丢弃，
 `alarm.list` 始终是恢复事实来源。

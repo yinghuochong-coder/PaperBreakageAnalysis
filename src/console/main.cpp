@@ -1,6 +1,7 @@
 #include "paperbreak/common/version.hpp"
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
+#include "paperbreak/console/event_client.hpp"
 #include "paperbreak/console/navigation_model.hpp"
 #include "paperbreak/console/operations_client.hpp"
 #include "paperbreak/console/preview_client.hpp"
@@ -46,6 +47,11 @@ bool has_argument(const int argc, char* argv[], const std::string_view expected)
 
 } // namespace
 
+#if defined(_MSC_VER)
+// This entry point intentionally owns the GUI objects for the application lifetime. The
+// statically reported frame remains bounded (well below the Windows main-thread stack).
+#pragma warning(suppress : 6262)
+#endif
 int main(int argc, char* argv[])
 {
     if (has_argument(argc, argv, "--version"))
@@ -86,6 +92,7 @@ int main(int argc, char* argv[])
     std::unique_ptr<paperbreak::console::PreviewClient> preview_client;
     std::unique_ptr<paperbreak::console::CameraClient> camera_client;
     std::unique_ptr<paperbreak::console::OperationsClient> operations_client;
+    std::unique_ptr<paperbreak::console::EventClient> event_client;
     paperbreak::console::MainWindow main_window(
         [&preview_client](const bool paused) {
             if (preview_client)
@@ -176,6 +183,60 @@ int main(int argc, char* argv[])
                  return paperbreak::Result<void>::failure(paperbreak::make_error(
                      "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "运维客户端尚未初始化",
                      "console", "console.operations.alarmExport", true));
+             }},
+        {.refresh =
+             [&event_client] {
+                 if (event_client)
+                     event_client->refresh();
+             },
+         .query =
+             [&event_client](paperbreak::console::EventListFilter filter) {
+                 if (event_client)
+                     return event_client->query(std::move(filter));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "事件客户端尚未初始化",
+                     "console", "console.event.list", true));
+             },
+         .get =
+             [&event_client](std::string event_id) {
+                 if (event_client)
+                     return event_client->get(std::move(event_id));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "事件客户端尚未初始化",
+                     "console", "console.event.get", true));
+             },
+         .update_configuration =
+             [&event_client](paperbreak::console::EventConfigurationValue value) {
+                 if (event_client)
+                     return event_client->update_configuration(std::move(value));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "事件客户端尚未初始化",
+                     "console", "console.event.updateConfig", true));
+             },
+         .manual_trigger =
+             [&event_client](std::string camera_id) {
+                 if (event_client)
+                     return event_client->manual_trigger(std::move(camera_id));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "事件客户端尚未初始化",
+                     "console", "console.event.manualTrigger", true));
+             },
+         .review =
+             [&event_client](std::string event_id, const std::uint64_t revision,
+                             const bool confirmed) {
+                 if (event_client)
+                     return event_client->review(std::move(event_id), revision, confirmed);
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "事件客户端尚未初始化",
+                     "console", "console.event.review", true));
+             },
+         .export_event =
+             [&event_client](std::string event_id, std::filesystem::path destination) {
+                 if (event_client)
+                     return event_client->export_event(std::move(event_id), std::move(destination));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "事件客户端尚未初始化",
+                     "console", "console.event.export", true));
              }});
     preview_client = std::make_unique<paperbreak::console::PreviewClient>(
         [&main_window](const paperbreak::console::PreviewSnapshot& snapshot) {
@@ -192,10 +253,16 @@ int main(int argc, char* argv[])
                 preview_client->set_camera_ids(std::move(camera_ids));
         });
     if (!smoke_test)
+    {
         operations_client = std::make_unique<paperbreak::console::OperationsClient>(
             [&main_window](const paperbreak::console::OperationsSnapshot& snapshot) {
                 main_window.apply_operations_snapshot(snapshot);
             });
+        event_client = std::make_unique<paperbreak::console::EventClient>(
+            [&main_window](const paperbreak::console::EventClientSnapshot& snapshot) {
+                main_window.apply_event_snapshot(snapshot);
+            });
+    }
     paperbreak::console::ClientStateSnapshot latest_snapshot;
     std::atomic_bool restart_running{};
     std::jthread restart_task;
@@ -316,6 +383,8 @@ int main(int argc, char* argv[])
         static_cast<void>(camera_client->start());
     if (!smoke_test)
         static_cast<void>(operations_client->start());
+    if (!smoke_test)
+        static_cast<void>(event_client->start());
 
     bool smoke_ok = true;
     if (smoke_test)
@@ -382,6 +451,11 @@ int main(int argc, char* argv[])
                                          .level = "warning",
                                          .message = "camera timeout"});
         main_window.apply_operations_snapshot(operations_smoke);
+        paperbreak::console::EventClientSnapshot event_smoke;
+        event_smoke.configuration_stale = false;
+        event_smoke.events_stale = false;
+        event_smoke.stored_config_revision = 1U;
+        main_window.apply_event_snapshot(event_smoke);
         auto* const metrics_table =
             main_window.findChild<QTableWidget*>(QStringLiteral("operations-metrics"));
         auto* const alarm_table =
@@ -426,8 +500,8 @@ int main(int argc, char* argv[])
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && empty_configuration_kept_discovery &&
                    restart_state_disabled_controls && main_window.operations_pages_ready() &&
-                   local_time_displayed && diagnostic_enabled_when_connected &&
-                   diagnostic_disabled_when_disconnected &&
+                   main_window.event_pages_ready() && local_time_displayed &&
+                   diagnostic_enabled_when_connected && diagnostic_disabled_when_disconnected &&
                    theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
                    selected_light && selected_dark && dark_theme_persisted && selected_system &&
                    main_window.select_page(11U) && main_window.select_page(0U);
@@ -462,6 +536,10 @@ int main(int argc, char* argv[])
         if (operations_client)
             operations_client->refresh();
     });
+    QObject::connect(&refresh_timer, &QTimer::timeout, [&event_client] {
+        if (event_client)
+            event_client->refresh();
+    });
     QTimer clock_timer;
     QObject::connect(&clock_timer, &QTimer::timeout, &main_window,
                      [&main_window] { main_window.update_clock(); });
@@ -485,6 +563,11 @@ int main(int argc, char* argv[])
     {
         operations_client->stop();
         operations_client.reset();
+    }
+    if (event_client)
+    {
+        event_client->stop();
+        event_client.reset();
     }
     if (restart_task.joinable())
     {

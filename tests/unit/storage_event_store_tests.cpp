@@ -1,3 +1,4 @@
+#include "paperbreak/storage/event_inspector.hpp"
 #include "paperbreak/storage/event_store.hpp"
 
 #include <gtest/gtest.h>
@@ -6,6 +7,7 @@
 
 #include <Windows.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -13,6 +15,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -179,6 +183,10 @@ class FaultingFileSystem final : public IEventFileSystem
     Result<std::vector<std::byte>> read_file_bounded(const std::filesystem::path& path,
                                                      const std::size_t maximum_bytes) override
     {
+        const auto occurrence = ++read_occurrences[path.filename().string()];
+        if (!fail_read_filename.empty() && path.filename() == fail_read_filename &&
+            occurrence == fail_read_occurrence)
+            return Result<std::vector<std::byte>>::failure(injected_io_error(native_code));
         auto result = delegate_->read_file_bounded(path, maximum_bytes);
         if (result && !corrupt_read_filename.empty() && path.filename() == corrupt_read_filename &&
             !result.value().empty())
@@ -206,7 +214,10 @@ class FaultingFileSystem final : public IEventFileSystem
     }
 
     std::filesystem::path fail_write_filename;
+    std::filesystem::path fail_read_filename;
     std::filesystem::path corrupt_read_filename;
+    std::map<std::string, std::size_t> read_occurrences;
+    std::size_t fail_read_occurrence{1U};
     std::string native_code{"112"};
     bool fail_move{};
 
@@ -257,6 +268,113 @@ TEST(StorageEventStore, PersistsReplayableManifestWithChecksumsUnderChinesePath)
               "sha256:5dfbabeedf318bf33c0927c43d7630f51b82f351740301354fa3d7fc51f0132e");
     EXPECT_EQ(std::filesystem::file_size(raw_path), 16U);
     EXPECT_FALSE(std::filesystem::exists(persisted.value().transaction_directory));
+}
+
+TEST(StorageEventInspector, ReadsManifestOrderTracesKeyFramesAndExportsVerifiedZip)
+{
+    TemporaryDirectory temporary{"inspect-export"};
+    const auto root = temporary.path() / L"事件 导出";
+    auto file_system = std::make_shared<FaultingFileSystem>(make_windows_event_file_system());
+    auto writer = writer_for(root, file_system);
+    auto persisted = writer->persist(request("019f-m509-inspect-0001"));
+    ASSERT_TRUE(persisted);
+    auto inspector = EventInspector::create({.event_root = root}, file_system);
+    ASSERT_TRUE(inspector);
+    const auto relative = persisted.value().committed_directory.lexically_relative(root);
+
+    auto inspected = inspector.value()->inspect(relative);
+
+    ASSERT_TRUE(inspected) << inspected.error().message;
+    EXPECT_EQ(inspected.value().event_id, "019f-m509-inspect-0001");
+    ASSERT_EQ(inspected.value().raw_frames.size(), 2U);
+    EXPECT_EQ(inspected.value().raw_frames[0].sequence_number, 1U);
+    EXPECT_EQ(inspected.value().raw_frames[1].sequence_number, 2U);
+    EXPECT_EQ(inspected.value().observed_sequence_gaps, 0U);
+    EXPECT_TRUE(inspected.value().key_frames_traceable);
+    ASSERT_EQ(inspected.value().key_frames.size(), 1U);
+    EXPECT_EQ(inspected.value().key_frames[0].sequence_number, 2U);
+    EXPECT_FALSE(inspected.value().thumbnail_jpeg.empty());
+
+    auto archive = inspector.value()->export_zip(relative);
+    ASSERT_TRUE(archive) << archive.error().message;
+    EXPECT_EQ(archive.value().source_file_count, 5U);
+    ASSERT_GE(archive.value().zip.size(), 4U);
+    EXPECT_EQ(archive.value().zip[0], std::byte{0x50});
+    EXPECT_EQ(archive.value().zip[1], std::byte{0x4b});
+
+    const auto destination = temporary.path() / L"导出 目标" / L"已校验事件.zip";
+    auto file_archive = inspector.value()->export_zip_file(relative, destination);
+    ASSERT_TRUE(file_archive) << file_archive.error().message;
+    EXPECT_EQ(file_archive.value().source_file_count, 5U);
+    EXPECT_EQ(file_archive.value().path, destination);
+    std::ifstream input{destination, std::ios::binary};
+    std::array<unsigned char, 2U> signature{};
+    input.read(reinterpret_cast<char*>(signature.data()),
+               static_cast<std::streamsize>(signature.size()));
+    EXPECT_EQ(signature[0], 0x50U);
+    EXPECT_EQ(signature[1], 0x4bU);
+    input.clear();
+    input.seekg(0);
+    const std::vector<unsigned char> streamed{std::istreambuf_iterator<char>{input},
+                                              std::istreambuf_iterator<char>{}};
+    ASSERT_EQ(streamed.size(), archive.value().zip.size());
+    for (std::size_t index = 0U; index < streamed.size(); ++index)
+        EXPECT_EQ(streamed[index], std::to_integer<unsigned char>(archive.value().zip[index]));
+}
+
+TEST(StorageEventInspector, RejectsPendingDamagedOversizedAndInterruptedExports)
+{
+    TemporaryDirectory temporary{"inspect-failures"};
+    const auto root = temporary.path() / L"事件 导出";
+    auto file_system = std::make_shared<FaultingFileSystem>(make_windows_event_file_system());
+    auto writer = writer_for(root, file_system);
+    auto persisted = writer->persist(request("019f-m509-inspect-0002"));
+    ASSERT_TRUE(persisted);
+    const auto relative = persisted.value().committed_directory.lexically_relative(root);
+
+    auto tiny =
+        EventInspector::create({.event_root = root, .maximum_export_bytes = 1024U}, file_system);
+    ASSERT_TRUE(tiny);
+    auto oversized = tiny.value()->export_zip(relative);
+    ASSERT_FALSE(oversized);
+    EXPECT_EQ(oversized.error().business_code, "EVENT_EXPORT_TOO_LARGE");
+
+    file_system->read_occurrences.clear();
+    file_system->fail_read_filename = "frame-1.raw";
+    file_system->fail_read_occurrence = 2U;
+    auto inspector = EventInspector::create({.event_root = root}, file_system);
+    ASSERT_TRUE(inspector);
+    auto interrupted = inspector.value()->export_zip(relative);
+    ASSERT_FALSE(interrupted);
+    EXPECT_EQ(interrupted.error().business_code, "STORAGE_IO_FAILED");
+    file_system->fail_read_filename.clear();
+
+    file_system->read_occurrences.clear();
+    file_system->fail_read_filename = "frame-1.raw";
+    file_system->fail_read_occurrence = 2U;
+    const auto interrupted_path = temporary.path() / L"中文 目标" / L"中断.zip";
+    auto interrupted_file = inspector.value()->export_zip_file(relative, interrupted_path);
+    ASSERT_FALSE(interrupted_file);
+    EXPECT_EQ(interrupted_file.error().business_code, "STORAGE_IO_FAILED");
+    EXPECT_FALSE(std::filesystem::exists(interrupted_path));
+    EXPECT_FALSE(std::filesystem::exists(interrupted_path.wstring() + L".partial"));
+    file_system->fail_read_filename.clear();
+
+    auto hidden = inspector.value()->inspect(std::filesystem::path{".transactions"} /
+                                             "019f-m509-hidden.pending");
+    ASSERT_FALSE(hidden);
+    EXPECT_EQ(hidden.error().business_code, "EVENT_NOT_FOUND");
+
+    const auto raw_path =
+        persisted.value().committed_directory / "raw" / "camera-0" / "frame-1.raw";
+    {
+        std::ofstream output{raw_path, std::ios::binary | std::ios::app};
+        output << "damage";
+    }
+    auto damaged = inspector.value()->inspect(relative);
+    ASSERT_FALSE(damaged);
+    EXPECT_TRUE(damaged.error().business_code == "EVENT_CHECKSUM_FAILED" ||
+                damaged.error().business_code == "EVENT_RECOVERY_FAILED");
 }
 
 TEST(StorageEventStore, RejectsUnsafeIdentityBudgetOverflowAndUntraceableKeyFrameBeforeIo)

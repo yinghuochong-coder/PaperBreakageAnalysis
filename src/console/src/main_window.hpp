@@ -2,6 +2,7 @@
 
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
+#include "paperbreak/console/event_client.hpp"
 #include "paperbreak/console/operations_client.hpp"
 #include "paperbreak/console/preview_client.hpp"
 #include "theme_controller.hpp"
@@ -20,6 +21,9 @@ class QDoubleSpinBox;
 class QSpinBox;
 class QLineEdit;
 class QTableWidget;
+class QCheckBox;
+class QDateTimeEdit;
+class QTextEdit;
 class QWidget;
 
 namespace paperbreak::console
@@ -49,18 +53,31 @@ struct OperationsUiActions final
     std::function<Result<void>(std::filesystem::path)> export_alarm_csv;
 };
 
+struct EventUiActions final
+{
+    std::function<void()> refresh;
+    std::function<Result<void>(EventListFilter)> query;
+    std::function<Result<void>(std::string)> get;
+    std::function<Result<void>(EventConfigurationValue)> update_configuration;
+    std::function<Result<void>(std::string)> manual_trigger;
+    std::function<Result<void>(std::string, std::uint64_t, bool)> review;
+    std::function<Result<void>(std::string, std::filesystem::path)> export_event;
+};
+
 class MainWindow final : public QMainWindow
 {
   public:
     explicit MainWindow(std::function<void(bool)> preview_pause_changed = {},
                         CameraUiActions camera_actions = {}, ThemeUiActions theme_actions = {},
-                        OperationsUiActions operations_actions = {}, QWidget* parent = nullptr);
+                        OperationsUiActions operations_actions = {},
+                        EventUiActions event_actions = {}, QWidget* parent = nullptr);
 
     void apply_snapshot(const ClientStateSnapshot& snapshot);
     void update_clock();
     void apply_preview_snapshot(const PreviewSnapshot& snapshot);
     void apply_camera_snapshot(const CameraClientSnapshot& snapshot);
     void apply_operations_snapshot(const OperationsSnapshot& snapshot);
+    void apply_event_snapshot(const EventClientSnapshot& snapshot);
     void request_diagnostics_export();
 
     [[nodiscard]] std::size_t page_count() const noexcept;
@@ -71,6 +88,7 @@ class MainWindow final : public QMainWindow
     [[nodiscard]] bool camera_device_controls_disabled() const noexcept;
     [[nodiscard]] bool select_theme_mode(ThemeMode mode) noexcept;
     [[nodiscard]] bool operations_pages_ready() const noexcept;
+    [[nodiscard]] bool event_pages_ready() const noexcept;
 
   private:
     void closeEvent(QCloseEvent* event) override;
@@ -80,6 +98,7 @@ class MainWindow final : public QMainWindow
     void run_camera_control(const std::string& command, bool confirmation_required);
     void show_camera_result(const Result<void>& result);
     void show_operations_result(const Result<void>& result);
+    void show_event_result(const Result<void>& result);
     void update_alarm_details();
 
     QLabel* connection_banner_{};
@@ -125,6 +144,7 @@ class MainWindow final : public QMainWindow
     CameraUiActions camera_actions_;
     ThemeUiActions theme_actions_;
     OperationsUiActions operations_actions_;
+    EventUiActions event_actions_;
     CameraClientSnapshot camera_snapshot_;
     std::string camera_editor_id_;
     std::uint64_t camera_editor_revision_{};
@@ -146,6 +166,32 @@ class MainWindow final : public QMainWindow
     QLabel* operations_status_{};
     QPushButton* diagnostics_export_{};
     OperationsSnapshot operations_snapshot_;
+    EventClientSnapshot event_snapshot_;
+    QSpinBox* event_pre_seconds_{};
+    QSpinBox* event_post_seconds_{};
+    QSpinBox* event_max_seconds_{};
+    QSpinBox* event_merge_seconds_{};
+    QSpinBox* event_key_frames_{};
+    QSpinBox* event_retention_days_{};
+    QCheckBox* event_save_raw_{};
+    QCheckBox* event_preview_video_{};
+    QComboBox* event_upload_policy_{};
+    QLabel* event_config_status_{};
+    QDateTimeEdit* event_filter_start_{};
+    QDateTimeEdit* event_filter_end_{};
+    QComboBox* event_filter_state_{};
+    QLineEdit* event_filter_camera_{};
+    QTableWidget* event_table_{};
+    QLabel* event_thumbnail_{};
+    QTextEdit* event_manifest_{};
+    QLabel* event_status_{};
+    QPushButton* event_previous_{};
+    QPushButton* event_next_{};
+    QPushButton* event_confirm_{};
+    QPushButton* event_reject_{};
+    QPushButton* event_export_{};
+    QPushButton* event_open_directory_{};
+    QPushButton* event_retry_upload_{};
     QListWidget* navigation_{};
     QStackedWidget* pages_{};
     QComboBox* theme_selector_{};

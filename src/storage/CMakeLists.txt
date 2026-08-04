@@ -1,4 +1,5 @@
 add_library(paperbreak_storage STATIC
+    src/event_inspector.cpp
     src/event_file_system_win.cpp
     src/metadata_database.cpp
     src/event_store.cpp

@@ -280,6 +280,10 @@ TEST(StoragePolicy, WarningDeletesOnlyUploadedAllowedUnlockedOldestEvent)
     policy.maximum_deletions_per_run = 1U;
     auto manager = StoragePolicyManager::create(policy, *database.value(), files);
     ASSERT_TRUE(manager);
+    EXPECT_TRUE(manager.value()->set_retention_age(std::chrono::days{2}));
+    auto invalid_retention = manager.value()->set_retention_age(std::chrono::days{0});
+    ASSERT_FALSE(invalid_retention);
+    EXPECT_EQ(invalid_retention.error().business_code, "SYS_CONFIG_INVALID");
     auto report =
         manager.value()->run_maintenance(std::chrono::sys_days{std::chrono::year{2026} / 8 / 4});
     ASSERT_TRUE(report);

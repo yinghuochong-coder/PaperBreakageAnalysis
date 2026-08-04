@@ -1,0 +1,113 @@
+#pragma once
+
+#include "paperbreak/common/result.hpp"
+#include "paperbreak/storage/event_store.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace paperbreak::storage
+{
+
+struct InspectedRawFrame final
+{
+    std::filesystem::path relative_path;
+    std::string camera_id;
+    std::uint64_t camera_frame_number{};
+    std::uint64_t sequence_number{};
+    std::int64_t wall_clock_time_utc_ms{};
+};
+
+struct InspectedKeyFrame final
+{
+    std::filesystem::path relative_path;
+    std::string camera_id;
+    std::uint64_t camera_frame_number{};
+    std::uint64_t sequence_number{};
+    std::vector<std::string> reasons;
+};
+
+struct EventInspectionReport final
+{
+    std::string event_id;
+    std::filesystem::path committed_directory;
+    std::string manifest_json;
+    std::vector<InspectedRawFrame> raw_frames;
+    std::vector<InspectedKeyFrame> key_frames;
+    std::vector<std::byte> thumbnail_jpeg;
+    std::uint64_t observed_sequence_gaps{};
+    bool key_frames_traceable{};
+};
+
+struct EventInspectorOptions final
+{
+    std::filesystem::path event_root;
+    std::size_t maximum_manifest_bytes{8U * 1024U * 1024U};
+    std::size_t maximum_file_bytes{128U * 1024U * 1024U};
+    std::size_t maximum_files{262144U};
+    std::size_t maximum_export_bytes{16U * 1024U * 1024U};
+    std::uint64_t maximum_file_export_bytes{64ULL * 1024ULL * 1024ULL * 1024ULL};
+};
+
+struct EventExportArchive final
+{
+    std::string event_id;
+    std::string file_name;
+    std::size_t source_file_count{};
+    std::vector<std::byte> zip;
+};
+
+struct EventExportFile final
+{
+    std::string event_id;
+    std::string file_name;
+    std::size_t source_file_count{};
+    std::uint64_t size_bytes{};
+    std::filesystem::path path;
+};
+
+/// Read-only inspector for atomically committed events. Every entry is verified against the
+/// immutable manifest before details, thumbnails, or export bytes are returned.
+class EventInspector final
+{
+  public:
+    class ConstructionKey final
+    {
+      public:
+        ConstructionKey(const ConstructionKey&) = default;
+
+      private:
+        friend class EventInspector;
+        ConstructionKey() = default;
+    };
+
+    [[nodiscard]] static Result<std::unique_ptr<EventInspector>> create(
+        EventInspectorOptions options,
+        std::shared_ptr<IEventFileSystem> file_system = make_windows_event_file_system());
+
+    EventInspector(ConstructionKey, EventInspectorOptions options,
+                   std::shared_ptr<IEventFileSystem> file_system);
+    ~EventInspector();
+    EventInspector(const EventInspector&) = delete;
+    EventInspector& operator=(const EventInspector&) = delete;
+    EventInspector(EventInspector&&) = delete;
+    EventInspector& operator=(EventInspector&&) = delete;
+
+    [[nodiscard]] Result<EventInspectionReport> inspect(
+        const std::filesystem::path& committed_relative_directory) const;
+    [[nodiscard]] Result<EventExportArchive> export_zip(
+        const std::filesystem::path& committed_relative_directory) const;
+    [[nodiscard]] Result<EventExportFile> export_zip_file(
+        const std::filesystem::path& committed_relative_directory,
+        const std::filesystem::path& destination) const;
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace paperbreak::storage

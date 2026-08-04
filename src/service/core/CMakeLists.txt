@@ -1,4 +1,5 @@
 add_library(paperbreak_service_core STATIC
+    src/event_runtime.cpp
     src/runtime.cpp
     src/system_commands.cpp)
 
@@ -7,10 +8,13 @@ target_link_libraries(paperbreak_service_core
         paperbreak_common
         paperbreak_config
         paperbreak_camera
+        paperbreak_algorithm_mock
+        paperbreak_event_codec
         paperbreak_ipc
         paperbreak_logging
         paperbreak_monitoring
         paperbreak_pipeline
+        paperbreak_storage
         paperbreak_compiler_options)
 target_link_libraries(paperbreak_service_core PRIVATE nlohmann_json::nlohmann_json)
 target_include_directories(paperbreak_service_core
