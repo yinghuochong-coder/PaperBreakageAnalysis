@@ -20,6 +20,7 @@ enum class TriggerSource
     fixed_period,
     mean_grayscale_change,
     roi_paper_ratio,
+    background_change,
 };
 
 /// Returns the event-manifest spelling for a trigger source.

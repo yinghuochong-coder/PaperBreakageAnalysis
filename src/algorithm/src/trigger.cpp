@@ -17,6 +17,8 @@ std::string_view to_string(const TriggerSource source) noexcept
         return "MeanGrayscaleChange";
     case TriggerSource::roi_paper_ratio:
         return "RoiPaperRatio";
+    case TriggerSource::background_change:
+        return "BackgroundChange";
     }
     return "None";
 }

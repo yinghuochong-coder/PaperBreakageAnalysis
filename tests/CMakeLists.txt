@@ -1,5 +1,6 @@
 add_executable(PaperBreakTests
     test_main.cpp
+    unit/algorithm_classical_vision_tests.cpp
     unit/algorithm_detector_lifecycle_tests.cpp
     unit/algorithm_mock_trigger_tests.cpp
     unit/camera_acquisition_tests.cpp
@@ -32,6 +33,7 @@ add_executable(PaperBreakTests
 target_link_libraries(PaperBreakTests
     PRIVATE
         paperbreak_common
+        paperbreak_algorithm_classical
         paperbreak_algorithm_mock
         paperbreak_camera
         paperbreak_camera_mock

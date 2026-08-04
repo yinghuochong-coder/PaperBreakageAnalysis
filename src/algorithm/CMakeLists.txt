@@ -15,3 +15,4 @@ install(TARGETS paperbreak_algorithm ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
 add_subdirectory(mock)
+add_subdirectory(classical)

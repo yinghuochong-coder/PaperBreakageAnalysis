@@ -152,6 +152,9 @@ void mark_triggered(TriggerResult& result, const TriggerSource source, std::stri
     case TriggerSource::roi_paper_ratio:
         result.candidate_type = DetectionCandidateType::paper_missing;
         break;
+    case TriggerSource::background_change:
+        result.candidate_type = DetectionCandidateType::paper_break;
+        break;
     case TriggerSource::manual_test:
     case TriggerSource::fixed_period:
         result.candidate_type = DetectionCandidateType::indeterminate;
