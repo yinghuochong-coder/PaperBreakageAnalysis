@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "baselineId": "m6-00-v1",
+  "reviewDate": "2026-08-04",
+  "status": "blocked",
+  "gateDecision": "not-approved",
+  "prototypeOnly": true,
+  "dataset": {
+    "requiredManifestSchema": "dataset-manifest-v1.schema.json",
+    "approvedManifest": null,
+    "datasetId": null,
+    "datasetVersion": null,
+    "rootSha256": null,
+    "status": "missing"
+  },
+  "labelSpecification": {
+    "document": "labeling-and-evaluation-v1.md",
+    "version": "1.0.0",
+    "approvalStatus": "pending",
+    "classes": [
+      "normal_web",
+      "web_break",
+      "non_break_disturbance",
+      "unscorable"
+    ],
+    "positiveClass": "web_break",
+    "excludedFromQualityMetrics": [
+      "unscorable"
+    ]
+  },
+  "qualityGate": {
+    "approvalStatus": "pending-business-approval",
+    "primaryUnit": "event",
+    "minimumEventRecall": null,
+    "minimumEventPrecision": null,
+    "maximumFalseAlarmsPerCameraHour": null,
+    "maximumP95DetectionDelayMs": null,
+    "minimumPositiveEventsInFrozenTest": null,
+    "minimumNegativeCameraHoursInFrozenTest": null,
+    "confidenceLevel": 0.95,
+    "frameAccuracyIsAcceptanceMetric": false
+  },
+  "performanceGate": {
+    "approvalStatus": "pending-target-hardware-baseline",
+    "targetCameraModel": "MV-CS020-60GM",
+    "cameraCount": 4,
+    "configuredFramesPerSecondPerCamera": 60,
+    "requiredSustainedInputFramesPerSecond": 240,
+    "singleWorkerTheoreticalMeanServiceTimeMs": 4.1667,
+    "productionRoi": null,
+    "productionPixelFormat": null,
+    "algorithmWorkerCount": null,
+    "maximumMeanFrameTimeMs": null,
+    "maximumP95FrameTimeMs": null,
+    "maximumP99FrameTimeMs": null,
+    "minimumSustainedProcessedFramesPerSecond": null,
+    "maximumAlgorithmCpuPercent": null,
+    "maximumAlgorithmWorkingSetMiB": null,
+    "targetHardwareInventory": null
+  },
+  "artifactPolicy": {
+    "classicalPrototypeExternalModelRequired": false,
+    "classicalImplementationIdentity": [
+      "algorithmSemanticVersion",
+      "sourceCommit",
+      "configurationSha256"
+    ],
+    "externalArtifactRequiredFields": [
+      "logicalName",
+      "origin",
+      "licenseOrAuthorization",
+      "version",
+      "byteSize",
+      "sha256",
+      "runtimeCompatibility"
+    ],
+    "hashAlgorithm": "SHA-256",
+    "externalArtifacts": []
+  },
+  "requiredApprovals": [
+    "production-process-owner",
+    "algorithm-owner",
+    "data-qa-owner",
+    "target-hardware-system-owner"
+  ],
+  "blockingItems": [
+    "frozen-labeled-dataset-manifest-and-sha256",
+    "business-approved-quality-thresholds",
+    "target-roi-pixel-format-and-hardware-budget",
+    "artifact-source-version-license-and-checksum-if-applicable",
+    "signed-gate-review-record"
+  ]
+}

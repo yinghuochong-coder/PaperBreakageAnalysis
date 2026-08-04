@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "replace-with-dataset-id",
+  "datasetVersion": "0.0.0",
+  "status": "draft",
+  "createdAtUtc": "2000-01-01T00:00:00Z",
+  "frozenAtUtc": null,
+  "labelSpecificationVersion": "1.0.0",
+  "scope": {
+    "targetCameraModels": ["MV-CS020-60GM"],
+    "pixelFormats": ["REPLACE_WITH_APPROVED_PIXEL_FORMAT"],
+    "roiPolicy": "REPLACE_WITH_APPROVED_ROI_POLICY",
+    "classes": ["normal_web", "web_break", "non_break_disturbance", "unscorable"]
+  },
+  "provenance": {
+    "pseudonymousSiteIds": ["REPLACE_WITH_PSEUDONYMOUS_SITE_ID"],
+    "captureStartUtc": "2000-01-01T00:00:00Z",
+    "captureEndUtc": "2000-01-01T00:00:00Z",
+    "authorizationReference": "REPLACE_WITH_APPROVED_REFERENCE"
+  },
+  "annotation": {
+    "guideVersion": "1.0.0",
+    "toolAndVersion": "REPLACE_WITH_TOOL_AND_VERSION",
+    "annotatorCount": 2,
+    "adjudicationPolicy": "REPLACE_WITH_ADJUDICATION_POLICY",
+    "completedAtUtc": "2000-01-01T00:00:00Z"
+  },
+  "splitIndependence": {
+    "groupKeys": ["production-roll", "capture-session", "physical-event"],
+    "adjacentFramesDisjoint": true,
+    "duplicateContentDisjoint": true,
+    "verifiedBy": "REPLACE_WITH_REVIEW_RECORD"
+  },
+  "splits": {
+    "development": {
+      "sampleCount": 0,
+      "positiveEventCount": 0,
+      "negativeCameraHours": 0,
+      "indexReference": "REPLACE_WITH_DEVELOPMENT_INDEX",
+      "indexSha256": "REPLACE_WITH_64_LOWERCASE_HEX_DIGITS"
+    },
+    "validation": {
+      "sampleCount": 0,
+      "positiveEventCount": 0,
+      "negativeCameraHours": 0,
+      "indexReference": "REPLACE_WITH_VALIDATION_INDEX",
+      "indexSha256": "REPLACE_WITH_64_LOWERCASE_HEX_DIGITS"
+    },
+    "test": {
+      "sampleCount": 0,
+      "positiveEventCount": 0,
+      "negativeCameraHours": 0,
+      "indexReference": "REPLACE_WITH_FROZEN_TEST_INDEX",
+      "indexSha256": "REPLACE_WITH_64_LOWERCASE_HEX_DIGITS"
+    }
+  },
+  "content": {
+    "hashAlgorithm": "SHA-256",
+    "rootSha256": "REPLACE_WITH_64_LOWERCASE_HEX_DIGITS",
+    "totalFiles": 0,
+    "totalBytes": 0,
+    "storageReference": "REPLACE_WITH_CONTROLLED_STORAGE_REFERENCE"
+  },
+  "changeNotes": "Template only. Replace every placeholder, freeze content, then set status to frozen."
+}

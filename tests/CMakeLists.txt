@@ -222,6 +222,12 @@ add_test(NAME hikrobot_sdk_boundary
         -P "${PROJECT_SOURCE_DIR}/src/camera/hikrobot/cmake/CheckSdkBoundary.cmake")
 set_tests_properties(hikrobot_sdk_boundary PROPERTIES LABELS "integration")
 
+add_test(NAME m6_00_acceptance_baseline
+    COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+        -P "${PROJECT_SOURCE_DIR}/cmake/ValidateM600Baseline.cmake")
+set_tests_properties(m6_00_acceptance_baseline PROPERTIES LABELS "validation")
+
 set(path_scan_inputs "$ENV{PAPERBREAK_QT_ROOT}|${OpenCV_DIR}|$ENV{VCPKG_ROOT}")
 if(DEFINED PAPERBREAK_MVS_ROOT AND NOT PAPERBREAK_MVS_ROOT STREQUAL "")
     set(path_scan_mvs_root "${PAPERBREAK_MVS_ROOT}")
