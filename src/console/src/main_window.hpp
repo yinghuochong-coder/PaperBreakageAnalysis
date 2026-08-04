@@ -99,6 +99,7 @@ class MainWindow final : public QMainWindow
     void show_camera_result(const Result<void>& result);
     void show_operations_result(const Result<void>& result);
     void show_event_result(const Result<void>& result);
+    void show_event_config_result(const Result<void>& result);
     void update_alarm_details();
 
     QLabel* connection_banner_{};
@@ -176,6 +177,8 @@ class MainWindow final : public QMainWindow
     QCheckBox* event_save_raw_{};
     QCheckBox* event_preview_video_{};
     QComboBox* event_upload_policy_{};
+    QWidget* event_config_editor_{};
+    QPushButton* event_config_save_{};
     QLabel* event_config_status_{};
     QDateTimeEdit* event_filter_start_{};
     QDateTimeEdit* event_filter_end_{};

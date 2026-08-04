@@ -716,26 +716,29 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             auto* heading = make_child<QLabel>(page, QStringLiteral("事件窗口与保存策略"));
             heading->setProperty("role", "pageTitle");
             layout->addWidget(heading);
-            auto* editor = make_child<QWidget>(page);
-            auto* form = make_layout<QFormLayout>(editor);
-            event_pre_seconds_ = make_child<QSpinBox>(editor);
-            event_post_seconds_ = make_child<QSpinBox>(editor);
-            event_max_seconds_ = make_child<QSpinBox>(editor);
-            event_merge_seconds_ = make_child<QSpinBox>(editor);
-            event_key_frames_ = make_child<QSpinBox>(editor);
-            event_retention_days_ = make_child<QSpinBox>(editor);
-            event_pre_seconds_->setRange(0, 300);
-            event_post_seconds_->setRange(0, 300);
+            event_config_editor_ = make_child<QWidget>(page);
+            auto* form = make_layout<QFormLayout>(event_config_editor_);
+            event_pre_seconds_ = make_child<QSpinBox>(event_config_editor_);
+            event_post_seconds_ = make_child<QSpinBox>(event_config_editor_);
+            event_max_seconds_ = make_child<QSpinBox>(event_config_editor_);
+            event_merge_seconds_ = make_child<QSpinBox>(event_config_editor_);
+            event_key_frames_ = make_child<QSpinBox>(event_config_editor_);
+            event_retention_days_ = make_child<QSpinBox>(event_config_editor_);
+            event_pre_seconds_->setRange(0, 600);
+            event_post_seconds_->setRange(0, 600);
             event_max_seconds_->setRange(1, 3600);
-            event_merge_seconds_->setRange(0, 300);
-            event_key_frames_->setRange(1, 64);
+            event_merge_seconds_->setRange(0, 3600);
+            event_key_frames_->setRange(1, 32);
             event_retention_days_->setRange(1, 3650);
-            event_save_raw_ = make_child<QCheckBox>(editor, QStringLiteral("保存原始帧"));
-            event_preview_video_ = make_child<QCheckBox>(editor, QStringLiteral("生成预览视频"));
-            event_upload_policy_ = make_child<QComboBox>(editor);
+            event_save_raw_ =
+                make_child<QCheckBox>(event_config_editor_, QStringLiteral("保存原始帧"));
+            event_preview_video_ =
+                make_child<QCheckBox>(event_config_editor_, QStringLiteral("生成预览视频"));
+            event_upload_policy_ = make_child<QComboBox>(event_config_editor_);
+            event_upload_policy_->setObjectName(QStringLiteral("event-upload-policy"));
             event_upload_policy_->addItem(QStringLiteral("仅已确认"), QStringLiteral("confirmed"));
             event_upload_policy_->addItem(QStringLiteral("全部事件"), QStringLiteral("all"));
-            event_upload_policy_->addItem(QStringLiteral("不上传"), QStringLiteral("disabled"));
+            event_upload_policy_->addItem(QStringLiteral("不上传"), QStringLiteral("never"));
             form->addRow(QStringLiteral("前置秒数"), event_pre_seconds_);
             form->addRow(QStringLiteral("后置秒数"), event_post_seconds_);
             form->addRow(QStringLiteral("最大事件时长（秒）"), event_max_seconds_);
@@ -745,13 +748,15 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             form->addRow(QStringLiteral("预览视频"), event_preview_video_);
             form->addRow(QStringLiteral("上传策略"), event_upload_policy_);
             form->addRow(QStringLiteral("保留天数"), event_retention_days_);
-            layout->addWidget(editor);
-            auto* save = make_child<QPushButton>(page, QStringLiteral("保存事件配置"));
-            save->setObjectName(QStringLiteral("event-config-save"));
-            QObject::connect(save, &QPushButton::clicked, this, [this] {
+            layout->addWidget(event_config_editor_);
+            event_config_save_ = make_child<QPushButton>(page, QStringLiteral("保存事件配置"));
+            event_config_save_->setObjectName(QStringLiteral("event-config-save"));
+            event_config_editor_->setEnabled(false);
+            event_config_save_->setEnabled(false);
+            QObject::connect(event_config_save_, &QPushButton::clicked, this, [this] {
                 if (!event_actions_.update_configuration)
                     return;
-                show_event_result(event_actions_.update_configuration(
+                show_event_config_result(event_actions_.update_configuration(
                     {.pre_event_seconds = static_cast<std::uint32_t>(event_pre_seconds_->value()),
                      .post_event_seconds = static_cast<std::uint32_t>(event_post_seconds_->value()),
                      .max_event_seconds = static_cast<std::uint32_t>(event_max_seconds_->value()),
@@ -763,7 +768,7 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                      .retention_days =
                          static_cast<std::uint32_t>(event_retention_days_->value())}));
             });
-            layout->addWidget(save);
+            layout->addWidget(event_config_save_);
             event_config_status_ = make_child<QLabel>(page, QStringLiteral("正在读取事件配置"));
             event_config_status_->setObjectName(QStringLiteral("event-config-status"));
             event_config_status_->setWordWrap(true);
@@ -1526,6 +1531,15 @@ void MainWindow::show_event_result(const Result<void>& result)
             QStringLiteral("失败：%1").arg(QString::fromStdString(result.error().message)));
 }
 
+void MainWindow::show_event_config_result(const Result<void>& result)
+{
+    if (!result && event_config_status_)
+        event_config_status_->setText(
+            QStringLiteral("保存失败：%1（%2）")
+                .arg(QString::fromStdString(result.error().message),
+                     QString::fromStdString(result.error().business_code)));
+}
+
 void MainWindow::request_diagnostics_export()
 {
     if (!operations_actions_.export_diagnostics)
@@ -1687,18 +1701,31 @@ void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
             QString::fromStdString(snapshot.configuration.upload_policy));
         event_upload_policy_->setCurrentIndex(upload >= 0 ? upload : 0);
     }
+    const bool configuration_editable =
+        snapshot.connection.state == ipc::ClientConnectionState::connected &&
+        !snapshot.configuration_stale && !snapshot.operation_pending;
+    event_config_editor_->setEnabled(configuration_editable);
+    event_config_save_->setEnabled(configuration_editable);
     event_preview_video_->setEnabled(!snapshot.configuration_stale && !snapshot.operation_pending);
     event_preview_video_->setToolTip(
         snapshot.preview_video_generation_available
             ? QString{}
             : QStringLiteral("预览视频生成器尚未实现；配置可保存，但当前不会伪造视频"));
-    event_config_status_->setText(
-        snapshot.configuration_stale
-            ? QStringLiteral("事件配置不可用或已过期")
-            : QStringLiteral("配置版本 %1；预览视频当前%2；上传运行时将在 M8 接入")
-                  .arg(snapshot.stored_config_revision)
-                  .arg(snapshot.preview_video_generation_available ? QStringLiteral("可用")
-                                                                   : QStringLiteral("不可用")));
+    if (snapshot.operation_pending && snapshot.operation == "event.updateConfig")
+        event_config_status_->setText(QStringLiteral("正在保存事件配置"));
+    else if (snapshot.configuration_error)
+        event_config_status_->setText(
+            QStringLiteral("事件配置失败：%1（%2）")
+                .arg(QString::fromStdString(snapshot.configuration_error->message),
+                     QString::fromStdString(snapshot.configuration_error->business_code)));
+    else if (snapshot.configuration_stale)
+        event_config_status_->setText(QStringLiteral("事件配置尚未从后台服务同步，暂不能保存"));
+    else
+        event_config_status_->setText(
+            QStringLiteral("配置版本 %1；预览视频当前%2；上传运行时将在 M8 接入")
+                .arg(snapshot.stored_config_revision)
+                .arg(snapshot.preview_video_generation_available ? QStringLiteral("可用")
+                                                                 : QStringLiteral("不可用")));
 
     const QString selected_id =
         event_table_->currentRow() >= 0 && event_table_->item(event_table_->currentRow(), 6)
@@ -1937,7 +1964,8 @@ bool MainWindow::operations_pages_ready() const noexcept
 
 bool MainWindow::event_pages_ready() const noexcept
 {
-    return event_pre_seconds_ && event_post_seconds_ && event_max_seconds_ &&
+    return event_config_editor_ && event_config_save_ && event_pre_seconds_ &&
+           event_post_seconds_ && event_max_seconds_ &&
            event_merge_seconds_ && event_key_frames_ && event_retention_days_ && event_save_raw_ &&
            event_preview_video_ && event_upload_policy_ && event_filter_start_ &&
            event_filter_end_ && event_filter_state_ && event_filter_camera_ && event_table_ &&

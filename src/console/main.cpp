@@ -11,6 +11,7 @@
 #include "src/system_tray_controller.hpp"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -18,6 +19,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPushButton>
 #include <QSettings>
 #include <QTableWidget>
 #include <QTimer>
@@ -452,10 +454,19 @@ int main(int argc, char* argv[])
                                          .message = "camera timeout"});
         main_window.apply_operations_snapshot(operations_smoke);
         paperbreak::console::EventClientSnapshot event_smoke;
+        event_smoke.connection.state = paperbreak::ipc::ClientConnectionState::connected;
         event_smoke.configuration_stale = false;
         event_smoke.events_stale = false;
         event_smoke.stored_config_revision = 1U;
         main_window.apply_event_snapshot(event_smoke);
+        auto* const event_upload_policy =
+            main_window.findChild<QComboBox*>(QStringLiteral("event-upload-policy"));
+        auto* const event_config_save =
+            main_window.findChild<QPushButton*>(QStringLiteral("event-config-save"));
+        const bool event_configuration_editable =
+            event_upload_policy &&
+            event_upload_policy->findData(QStringLiteral("never")) >= 0 && event_config_save &&
+            event_config_save->isEnabled();
         auto* const metrics_table =
             main_window.findChild<QTableWidget*>(QStringLiteral("operations-metrics"));
         auto* const alarm_table =
@@ -500,7 +511,8 @@ int main(int argc, char* argv[])
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && empty_configuration_kept_discovery &&
                    restart_state_disabled_controls && main_window.operations_pages_ready() &&
-                   main_window.event_pages_ready() && local_time_displayed &&
+                   main_window.event_pages_ready() && event_configuration_editable &&
+                   local_time_displayed &&
                    diagnostic_enabled_when_connected && diagnostic_disabled_when_disconnected &&
                    theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
                    selected_light && selected_dark && dark_theme_persisted && selected_system &&

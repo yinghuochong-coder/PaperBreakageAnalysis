@@ -277,9 +277,23 @@ class EventClientHandler final : public paperbreak::ipc::IRequestHandler
                  .binary = {}});
         }
         if (request.command == "event.confirm" || request.command == "event.reject" ||
-            request.command == "event.manualTrigger" || request.command == "event.updateConfig")
+            request.command == "event.manualTrigger")
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json = R"({"accepted":true})", .binary = {}});
+        if (request.command == "event.updateConfig")
+        {
+            {
+                std::scoped_lock lock{mutex};
+                last_update_payload = request.payload_json;
+            }
+            if (reject_config_update.load())
+                return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+                    paperbreak::make_error("SYS_CONFIG_INVALID", paperbreak::Severity::error,
+                                           "事件配置校验失败", "test",
+                                           "eventClient.updateConfig"));
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = R"({"accepted":true})", .binary = {}});
+        }
         return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
             paperbreak::make_error("IPC_REQUEST_INVALID", paperbreak::Severity::error, "unexpected",
                                    "test", "eventClient.handle"));
@@ -287,6 +301,8 @@ class EventClientHandler final : public paperbreak::ipc::IRequestHandler
 
     std::mutex mutex;
     std::string last_list_payload;
+    std::string last_update_payload;
+    std::atomic_bool reject_config_update{};
     std::filesystem::path export_source;
 };
 
@@ -759,6 +775,37 @@ TEST(EventClient, QueriesDetailsReviewsAndExportsVerifiedArchive)
     ASSERT_EQ(latest.events.size(), 1U);
     EXPECT_EQ(latest.events.front().event_id, "event-1");
 
+    paperbreak::console::EventConfigurationValue changed_configuration;
+    changed_configuration.pre_event_seconds = 600U;
+    changed_configuration.post_event_seconds = 0U;
+    changed_configuration.max_event_seconds = 600U;
+    changed_configuration.merge_gap_seconds = 600U;
+    changed_configuration.key_frame_count = 32U;
+    changed_configuration.upload_policy = "never";
+    ASSERT_TRUE(client.update_configuration(changed_configuration));
+    ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{handler->mutex};
+        return !handler->last_update_payload.empty() && !latest.operation_pending;
+    }));
+    {
+        std::scoped_lock lock{handler->mutex};
+        const auto payload = nlohmann::json::parse(handler->last_update_payload);
+        EXPECT_EQ(payload["expectedConfigRevision"], 4U);
+        EXPECT_EQ(payload["event"]["preEventSeconds"], 600U);
+        EXPECT_EQ(payload["event"]["mergeGapSeconds"], 600U);
+        EXPECT_EQ(payload["event"]["keyFrameCount"], 32U);
+        EXPECT_EQ(payload["event"]["uploadPolicy"], "never");
+    }
+
+    handler->reject_config_update.store(true);
+    ASSERT_TRUE(client.update_configuration(changed_configuration));
+    ASSERT_TRUE(wait_until([&] {
+        return !latest.operation_pending && latest.configuration_error.has_value();
+    }));
+    EXPECT_EQ(latest.configuration_error->business_code, "SYS_CONFIG_INVALID");
+    EXPECT_EQ(latest.configuration_error->message, "事件配置校验失败");
+    handler->reject_config_update.store(false);
+
     ASSERT_TRUE(client.query({.start_time_utc_ms = 1000,
                               .end_time_utc_ms = 2000,
                               .event_state = std::string{"Candidate"},
@@ -805,6 +852,9 @@ TEST(EventClient, QueriesDetailsReviewsAndExportsVerifiedArchive)
     zip.close();
 
     client.stop();
+    auto disconnected_update = client.update_configuration(changed_configuration);
+    ASSERT_FALSE(disconnected_update);
+    EXPECT_EQ(disconnected_update.error().business_code, "IPC_NOT_CONNECTED");
     auto disconnected = client.get("event-1");
     ASSERT_FALSE(disconnected);
     EXPECT_EQ(disconnected.error().business_code, "IPC_NOT_CONNECTED");

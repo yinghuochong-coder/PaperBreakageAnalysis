@@ -344,6 +344,14 @@ Result<void> EventClient::get(std::string event_id)
 
 Result<void> EventClient::update_configuration(EventConfigurationValue value)
 {
+    if (snapshot_.connection.state != ipc::ClientConnectionState::connected)
+        return Result<void>::failure(client_error("IPC_NOT_CONNECTED", "后台服务尚未连接",
+                                                  "console.event.updateConfig", true));
+    if (snapshot_.configuration_stale)
+        return Result<void>::failure(client_error("EVENT_CONFIG_STALE",
+                                                  "事件配置尚未同步，不能保存",
+                                                  "console.event.updateConfig", true));
+    snapshot_.configuration_error.reset();
     return send_operation("event.updateConfig",
                           Json{{"expectedConfigRevision", snapshot_.stored_config_revision},
                                {"event", event_configuration_json(value)}}
@@ -405,7 +413,7 @@ void EventClient::config_completed(ipc::ClientRequestHandle handle,
     config_request_.reset();
     auto payload = response_payload(result, "console.event.getConfig");
     if (!payload)
-        snapshot_.error = payload.error();
+        snapshot_.configuration_error = payload.error();
     else
     {
         snapshot_.configuration = event_configuration(payload.value().at("event"));
@@ -414,6 +422,7 @@ void EventClient::config_completed(ipc::ClientRequestHandle handle,
             payload.value().value("previewVideoGenerationAvailable", false);
         snapshot_.upload_runtime_available = payload.value().value("uploadRuntimeAvailable", false);
         snapshot_.configuration_stale = false;
+        snapshot_.configuration_error.reset();
     }
     notify();
 }
@@ -517,6 +526,8 @@ void EventClient::operation_completed(ipc::ClientRequestHandle handle,
     {
         snapshot_.operation_pending = false;
         snapshot_.error = payload.error();
+        if (snapshot_.operation == "event.updateConfig")
+            snapshot_.configuration_error = payload.error();
         notify();
         return;
     }
@@ -553,6 +564,8 @@ void EventClient::operation_completed(ipc::ClientRequestHandle handle,
         return;
     }
     snapshot_.operation_pending = false;
+    if (snapshot_.operation == "event.updateConfig")
+        snapshot_.configuration_error.reset();
     refresh();
     notify();
 }

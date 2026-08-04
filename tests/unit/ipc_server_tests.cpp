@@ -428,6 +428,33 @@ TEST(IpcServer, RejectsConnectionsBeyondConfiguredActiveLimit)
     stop_server(server);
 }
 
+TEST(IpcServer, DefaultCapacitySupportsFiveIsolatedConsoleConnections)
+{
+    auto options = unique_options();
+    ASSERT_GE(options.maximum_connections, 5U);
+    paperbreak::ipc::IpcServer server{std::make_shared<EchoHandler>(),
+                                      std::make_unique<FixedAuthorizer>(), options};
+    ASSERT_TRUE(server.start());
+
+    std::vector<std::unique_ptr<QLocalSocket>> sockets;
+    sockets.reserve(5U);
+    for (std::size_t index = 0; index < 5U; ++index)
+    {
+        auto socket = std::make_unique<QLocalSocket>();
+        ASSERT_TRUE(connect_socket(*socket, options.server_name));
+        sockets.push_back(std::move(socket));
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    while (server.metrics_snapshot().active_connections < 5U &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    EXPECT_EQ(server.metrics_snapshot().active_connections, 5U);
+    for (const auto& socket : sockets)
+        EXPECT_EQ(socket->state(), QLocalSocket::ConnectedState);
+    stop_server(server);
+}
+
 TEST(IpcServer, ReturnsUnsupportedVersionThenClosesConnection)
 {
     auto options = unique_options();

@@ -71,6 +71,7 @@ struct EventClientSnapshot final
     bool preview_video_generation_available{};
     bool upload_runtime_available{};
     bool configuration_stale{true};
+    std::optional<Error> configuration_error;
     EventListFilter filter;
     std::vector<EventListItem> events;
     std::size_t total{};

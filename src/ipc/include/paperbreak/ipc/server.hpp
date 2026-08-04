@@ -51,7 +51,7 @@ struct IpcServerOptions final
 {
     std::string server_name{default_server_name};
     std::wstring instance_guard_name{L"Global\\PaperBreakEdgeService.Ipc.ServerGuard"};
-    std::size_t maximum_connections{4U};
+    std::size_t maximum_connections{8U};
     std::size_t maximum_in_flight_per_connection{16U};
     std::size_t recent_request_ids_per_connection{1024U};
     std::size_t command_queue_capacity{64U};
