@@ -852,6 +852,18 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M5-03 候选事件状态机
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-04
+
+完成日期：2026-08-04
+
+执行记录：`.agent/plans/m5-03-candidate-event-state-machine.md`
+
+完成证据（2026-08-04）：`paperbreak_event` 新增固定最多四路的线程安全 `CandidateEventManager`，实现 Idle、Suspicious、Candidate、Confirmed、Rejected、Timeout、连续异常精确阈值、单调时间超时、版本化确认/拒绝、重复结果/命令幂等和确定性停止。首次 Candidate 使用进程内单调 UUIDv7 生成不可变 EventId，记录首次异常及候选帧/双时钟，立即持有 M5-01 前缓存租约，明确报告完整性并标记后帧收集已开始；通知在锁外同步发布且异常隔离计数。9 项定向测试覆盖全部转换、缓存保护、精确超时、墙上时间跳变、版本冲突、四路并发唯一 ID、错误恢复、回调异常、非法配置和停止；Debug/Release `/W4 /WX` 全量构建和两套非硬件 CTest 均为 23/23，Debug unit 入口 198/198。本任务 C++ 文件 clang-format 与 `git diff --check` 通过；全仓格式目标仍被未修改的 `src/console/src/preview_client.cpp` 既有格式问题阻断。未实现 M5-04 的精确后窗口/事件合并，也未接入服务配置、IPC/UI 或执行实体相机测试。
+
 实现 Idle、Suspicious、Candidate、Confirmed、Rejected、Timeout；Candidate 产生时立即分配事件 ID、记录触发时间/帧、保护前缓存、收集后帧并发通知。
 
 测试：状态转换、连续帧阈值、超时、拒绝、并发相机触发、重复触发幂等和服务停止。

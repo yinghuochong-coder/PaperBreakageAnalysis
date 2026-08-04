@@ -107,6 +107,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `SYS_SHUTDOWN_TIMEOUT` | Critical | 否 | 组件未在共享关闭截止时间内停止；记录未完成阶段 |
 | `SYS_TIME_JUMP_DETECTED` | Warning | 否 | 墙上时间与单调时间增量显著不一致；继续单调计时并降低时间质量 |
 | `SYS_ID_COLLISION` | Critical | 是 | 新生成 ID 命中本地唯一约束；重新生成并记录生成器健康状态 |
+| `SYS_ID_GENERATION_FAILED` | Critical | 是 | 本地 UUIDv7 时间范围或系统熵源不可用；拒绝创建无可靠身份的事件并报警 |
 | `SYS_CONFIG_INVALID` | Error | 否 | 配置 JSON、schema、类型、范围或依赖校验失败；保持最后有效配置 |
 | `SYS_CONFIG_VERSION_CONFLICT` | Warning | 否 | `expectedConfigRevision` 与当前修订不一致；返回当前修订供调用方重新读取 |
 | `SYS_CONFIG_APPLY_FAILED` | Error | 视原因 | 组件预应用或回读失败；回滚已修改组件，不提交新修订 |

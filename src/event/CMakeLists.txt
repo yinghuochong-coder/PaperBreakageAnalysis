@@ -1,8 +1,10 @@
 add_library(paperbreak_event STATIC
+    src/candidate_event.cpp
     src/memory_ring.cpp
     src/module.cpp)
 target_link_libraries(paperbreak_event
     PUBLIC
+        paperbreak_algorithm
         paperbreak_camera
         paperbreak_common
         paperbreak_compiler_options)
