@@ -18,6 +18,7 @@ add_executable(PaperBreakTests
     unit/monitoring_tests.cpp
     unit/mock_camera_tests.cpp
     unit/pipeline_tests.cpp
+    unit/storage_event_store_tests.cpp
     unit/service_runtime_tests.cpp
     unit/system_command_tests.cpp
     unit/windows_control_tests.cpp
@@ -40,6 +41,7 @@ target_link_libraries(PaperBreakTests
         paperbreak_pipeline
         paperbreak_ipc
         paperbreak_service_core
+        paperbreak_storage
         paperbreak_windows_service
         paperbreak_compiler_options
         Qt6::Core
@@ -70,7 +72,7 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Algorithm*:Camera*:Pipeline*:Event*:Common*:Result*:Version*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
+    COMMAND PaperBreakTests --gtest_filter=Algorithm*:Camera*:Pipeline*:Event*:Storage*:Common*:Result*:Version*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
 set_tests_properties(unit PROPERTIES
     LABELS "unit"
     ENVIRONMENT "PATH=$<TARGET_FILE_DIR:Qt6::Core>\\;$<TARGET_FILE_DIR:opencv_core>\\;$ENV{PATH}")
