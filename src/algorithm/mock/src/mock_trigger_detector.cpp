@@ -33,6 +33,17 @@ Error process_error(const std::string& camera_id, std::string reason)
     return error;
 }
 
+Error lifecycle_error(const std::string& camera_id, std::string reason,
+                      std::string operation = "algorithm.mock.initialize")
+{
+    auto error = make_error("SYS_CONFIG_INVALID", Severity::error, "模拟检测器生命周期配置无效",
+                            "algorithm", std::move(operation));
+    if (!camera_id.empty())
+        error.source_id = camera_id;
+    error.details.push_back({"reason", std::move(reason)});
+    return error;
+}
+
 bool normalized(const double value) noexcept
 {
     return std::isfinite(value) && value >= 0.0 && value <= 1.0;
@@ -131,6 +142,24 @@ void mark_triggered(TriggerResult& result, const TriggerSource source, std::stri
     result.triggered = true;
     result.trigger_source = source;
     result.reason = std::move(reason);
+    result.anomalous = true;
+    result.confidence = 1.0;
+    switch (source)
+    {
+    case TriggerSource::mean_grayscale_change:
+        result.candidate_type = DetectionCandidateType::paper_break;
+        break;
+    case TriggerSource::roi_paper_ratio:
+        result.candidate_type = DetectionCandidateType::paper_missing;
+        break;
+    case TriggerSource::manual_test:
+    case TriggerSource::fixed_period:
+        result.candidate_type = DetectionCandidateType::indeterminate;
+        break;
+    case TriggerSource::none:
+        result.candidate_type = DetectionCandidateType::none;
+        break;
+    }
 }
 
 } // namespace
@@ -140,6 +169,8 @@ struct MockTriggerDetector::Impl final
     explicit Impl(MockTriggerDetectorConfig value) : config(std::move(value)) {}
 
     MockTriggerDetectorConfig config;
+    DetectorConfig lifecycle_config;
+    bool initialized{};
     std::atomic_bool manual_pending{};
     std::optional<camera::MonotonicTime> last_frame_time;
     std::optional<std::uint64_t> last_sequence_number;
@@ -181,6 +212,15 @@ Result<std::unique_ptr<MockTriggerDetector>> MockTriggerDetector::create(
     }
 
     auto detector = std::make_unique<MockTriggerDetector>(ConstructionKey{}, std::move(config));
+    auto initialized = detector->initialize({.plugin_id = std::string{mock_trigger_plugin_id},
+                                             .camera_id = detector->impl_->config.camera_id,
+                                             .revision = 1U,
+                                             .processing_timeout = std::chrono::milliseconds{100}});
+    if (!initialized)
+    {
+        return Result<std::unique_ptr<MockTriggerDetector>>::failure(
+            std::move(initialized.error()));
+    }
     return Result<std::unique_ptr<MockTriggerDetector>>::success(std::move(detector));
 }
 
@@ -190,6 +230,29 @@ MockTriggerDetector::MockTriggerDetector(ConstructionKey, MockTriggerDetectorCon
 }
 
 MockTriggerDetector::~MockTriggerDetector() = default;
+
+Result<void> MockTriggerDetector::initialize(const DetectorConfig& config)
+{
+    if (config.plugin_id != mock_trigger_plugin_id)
+    {
+        return Result<void>::failure(
+            lifecycle_error(impl_->config.camera_id, "plugin-id-mismatch"));
+    }
+    if (config.camera_id != impl_->config.camera_id)
+    {
+        return Result<void>::failure(
+            lifecycle_error(impl_->config.camera_id, "camera-id-mismatch"));
+    }
+    if (config.revision == 0U || config.processing_timeout.count() <= 0)
+    {
+        return Result<void>::failure(
+            lifecycle_error(impl_->config.camera_id, "invalid-lifecycle-boundary"));
+    }
+
+    impl_->lifecycle_config = config;
+    impl_->initialized = true;
+    return reset();
+}
 
 ManualTriggerRequestStatus MockTriggerDetector::request_manual_trigger() noexcept
 {
@@ -204,6 +267,11 @@ ManualTriggerRequestStatus MockTriggerDetector::request_manual_trigger() noexcep
 
 Result<TriggerResult> MockTriggerDetector::process(const camera::FrameView& frame)
 {
+    if (!impl_->initialized)
+    {
+        return Result<TriggerResult>::failure(
+            process_error(impl_->config.camera_id, "detector-not-initialized"));
+    }
     if (frame.camera_id() != impl_->config.camera_id)
     {
         return Result<TriggerResult>::failure(
@@ -253,6 +321,7 @@ Result<TriggerResult> MockTriggerDetector::process(const camera::FrameView& fram
         if (impl_->previous_mean_grayscale)
         {
             result.mean_grayscale_change = std::abs(*mean - *impl_->previous_mean_grayscale);
+            result.change_score = result.mean_grayscale_change;
             if (result.mean_grayscale_change >= impl_->config.mean_grayscale_change_threshold)
             {
                 mark_triggered(result, TriggerSource::mean_grayscale_change,
@@ -274,6 +343,7 @@ Result<TriggerResult> MockTriggerDetector::process(const camera::FrameView& fram
             return Result<TriggerResult>::failure(process_error(impl_->config.camera_id, reason));
         }
         result.paper_ratio = *ratio;
+        result.area_ratio = *ratio;
         if (*ratio < impl_->config.minimum_paper_ratio)
         {
             mark_triggered(result, TriggerSource::roi_paper_ratio, "paper-ratio-below-minimum");
@@ -289,6 +359,45 @@ Result<TriggerResult> MockTriggerDetector::process(const camera::FrameView& fram
         mark_triggered(result, TriggerSource::manual_test, "manual-test-requested");
 
     return Result<TriggerResult>::success(std::move(result));
+}
+
+Result<void> MockTriggerDetector::update_config(const DetectorConfig& config)
+{
+    if (!impl_->initialized)
+    {
+        return Result<void>::failure(lifecycle_error(impl_->config.camera_id, "not-initialized",
+                                                     "algorithm.mock.updateConfig"));
+    }
+    if (config.plugin_id != impl_->lifecycle_config.plugin_id ||
+        config.camera_id != impl_->lifecycle_config.camera_id ||
+        config.revision <= impl_->lifecycle_config.revision ||
+        config.processing_timeout.count() <= 0)
+    {
+        return Result<void>::failure(lifecycle_error(impl_->config.camera_id, "invalid-hot-update",
+                                                     "algorithm.mock.updateConfig"));
+    }
+    impl_->lifecycle_config = config;
+    return reset();
+}
+
+Result<void> MockTriggerDetector::reset()
+{
+    impl_->manual_pending.store(false, std::memory_order_release);
+    impl_->last_frame_time.reset();
+    impl_->last_sequence_number.reset();
+    impl_->period_anchor.reset();
+    impl_->previous_mean_grayscale.reset();
+    return Result<void>::success();
+}
+
+DetectorInfo MockTriggerDetector::info() const
+{
+    return {.plugin_id = std::string{mock_trigger_plugin_id},
+            .display_name = "M5 Mock Trigger Detector",
+            .implementation_version = "1.0.0-prototype",
+            .model_version = "none",
+            .supports_hot_update = true,
+            .prototype_only = true};
 }
 
 } // namespace paperbreak::algorithm::mock

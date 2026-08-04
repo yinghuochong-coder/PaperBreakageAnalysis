@@ -1,5 +1,6 @@
 add_executable(PaperBreakTests
     test_main.cpp
+    unit/algorithm_detector_lifecycle_tests.cpp
     unit/algorithm_mock_trigger_tests.cpp
     unit/camera_acquisition_tests.cpp
     unit/camera_model_tests.cpp

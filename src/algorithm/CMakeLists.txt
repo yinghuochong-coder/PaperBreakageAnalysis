@@ -1,4 +1,5 @@
 add_library(paperbreak_algorithm STATIC
+    src/detector_host.cpp
     src/module.cpp
     src/trigger.cpp)
 target_link_libraries(paperbreak_algorithm

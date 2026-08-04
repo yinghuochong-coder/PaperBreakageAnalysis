@@ -17,6 +17,7 @@ namespace
 
 using namespace std::chrono_literals;
 using paperbreak::algorithm::DetectionRegion;
+using paperbreak::algorithm::DetectorConfig;
 using paperbreak::algorithm::TriggerSource;
 using paperbreak::algorithm::mock::ManualTriggerRequestStatus;
 using paperbreak::algorithm::mock::MockTriggerDetector;
@@ -260,6 +261,35 @@ TEST(AlgorithmMockTrigger, RejectsIncompleteFrameAndOutOfBoundsRoi)
         detector->process(make_frame("CAM01", 1U, 3ms, 3U, 1U, 3U, {255U, 255U, 255U}));
     ASSERT_TRUE(recovered);
     EXPECT_FALSE(recovered.value().triggered);
+}
+
+TEST(AlgorithmMockTrigger, ImplementsLifecycleInformationHotUpdateAndReset)
+{
+    auto detector = make_detector({.camera_id = "CAM01", .mode = MockTriggerMode::manual_only});
+
+    const auto info = detector->info();
+    EXPECT_EQ(info.plugin_id, paperbreak::algorithm::mock::mock_trigger_plugin_id);
+    EXPECT_TRUE(info.supports_hot_update);
+    EXPECT_TRUE(info.prototype_only);
+
+    EXPECT_EQ(detector->request_manual_trigger(), ManualTriggerRequestStatus::accepted);
+    ASSERT_TRUE(detector->reset());
+    auto after_reset = detector->process(make_frame("CAM01", 1U, 1ms, 1U, 1U, 1U, {0U}));
+    ASSERT_TRUE(after_reset);
+    EXPECT_FALSE(after_reset.value().triggered);
+
+    const DetectorConfig revision_two{
+        .plugin_id = std::string{paperbreak::algorithm::mock::mock_trigger_plugin_id},
+        .camera_id = "CAM01",
+        .revision = 2U,
+        .processing_timeout = 50ms};
+    ASSERT_TRUE(detector->update_config(revision_two));
+    EXPECT_FALSE(detector->update_config(revision_two));
+
+    auto wrong_camera = revision_two;
+    wrong_camera.revision = 3U;
+    wrong_camera.camera_id = "CAM02";
+    EXPECT_FALSE(detector->update_config(wrong_camera));
 }
 
 } // namespace

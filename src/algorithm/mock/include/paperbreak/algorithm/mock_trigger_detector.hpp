@@ -1,14 +1,17 @@
 #pragma once
 
-#include "paperbreak/algorithm/trigger.hpp"
+#include "paperbreak/algorithm/detector.hpp"
 
 #include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace paperbreak::algorithm::mock
 {
+
+inline constexpr std::string_view mock_trigger_plugin_id = "mock-trigger";
 
 enum class MockTriggerMode
 {
@@ -60,7 +63,11 @@ class MockTriggerDetector final : public ITriggerDetector
 
     /// Requests one ManualTest result on the next valid frame. Capacity is exactly one request.
     [[nodiscard]] ManualTriggerRequestStatus request_manual_trigger() noexcept;
+    [[nodiscard]] Result<void> initialize(const DetectorConfig& config) override;
     [[nodiscard]] Result<TriggerResult> process(const camera::FrameView& frame) override;
+    [[nodiscard]] Result<void> update_config(const DetectorConfig& config) override;
+    [[nodiscard]] Result<void> reset() override;
+    [[nodiscard]] DetectorInfo info() const override;
 
     /// ConstructionKey keeps direct construction unavailable while allowing std::make_unique.
     MockTriggerDetector(ConstructionKey, MockTriggerDetectorConfig config);

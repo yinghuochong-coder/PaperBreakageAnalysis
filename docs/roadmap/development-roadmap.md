@@ -1036,6 +1036,18 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M6-01 插件接口与生命周期
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-04
+
+完成日期：2026-08-04
+
+执行记录：`.agent/plans/m6-01-detector-plugin-lifecycle.md`
+
+完成证据（2026-08-04）：`paperbreak_algorithm` 新增不暴露 Qt/OpenCV/MVS 类型的 `DetectorConfig`、`DetectionResult`、`DetectorInfo`、`IBreakDetector`、容量 16 的编译期插件注册表和串行 `DetectorHost`；结果模型保持 M5 事件触发字段源码兼容并补齐异常类型、置信度、区域/面积、变化量、实测耗时、实现/模型版本及调试指标。宿主只在创建、初始化和信息校验全部成功后装载；热更新通过“候选实例按旧配置初始化、在候选上应用新修订、成功后交换”保证失败/异常时保留旧实例和旧配置。工厂及全部生命周期异常转换为稳定业务错误，同步处理超预算在调用返回后丢弃结果并记录调用/成功/失败/超时和最大耗时，不伪装成可安全抢占的硬超时。Mock 已实现初始化、热更新、重置和版本查询且保持手工/周期/灰度/ROI 行为；ADR-016 明确首版是同工具链进程内编译期边界而非跨 DLL ABI。15 项定向测试覆盖未知/重复插件、工厂/初始化失败、强回滚、更新/处理标准及未知异常、慢处理、重置和 Mock 生命周期；Debug/Release `/W4 /WX` 全量构建及两套 CTest 均为 24/24，算法与 Mock 静态分析构建、任务 C++ 文件 clang-format 和 `git diff --check` 通过。全仓 `format-check` 仍被未修改的 `src/console/main.cpp:467` 既有格式问题阻断。未执行实体相机、冻结数据集、四路目标机算法性能或正式断纸验收；M6-00 仍 blocked，所有检测器继续标记为原型。
+
 实现 `IBreakDetector`、DetectorConfig、DetectionResult、DetectorInfo；支持初始化、处理、热更新、重置和版本查询；插件 ABI/装载策略通过 ADR 明确，第一版可优先采用进程内编译期插件边界。
 
 测试：加载失败、初始化失败、配置回滚、处理异常、超时/慢处理和重置。

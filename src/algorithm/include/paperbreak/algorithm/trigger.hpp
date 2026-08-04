@@ -3,9 +3,11 @@
 #include "paperbreak/camera/frame.hpp"
 #include "paperbreak/common/result.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace paperbreak::algorithm
 {
@@ -32,7 +34,24 @@ struct DetectionRegion final
     bool operator==(const DetectionRegion&) const = default;
 };
 
-/// Minimal M5 detector output consumed by the later candidate state machine.
+enum class DetectionCandidateType
+{
+    none,
+    paper_break,
+    paper_missing,
+    obstruction,
+    flicker,
+    indeterminate,
+};
+
+struct DetectionDebugMetric final
+{
+    std::string name;
+    double value{};
+    bool operator==(const DetectionDebugMetric&) const = default;
+};
+
+/// Detector output. The M5 trigger fields remain stable for the event state machine.
 struct TriggerResult final
 {
     bool triggered{};
@@ -47,21 +66,15 @@ struct TriggerResult final
     double mean_grayscale_change{};
     double paper_ratio{};
     std::string reason;
-};
-
-/// M5-only candidate trigger boundary. The full plugin lifecycle is introduced in M6-01.
-class ITriggerDetector
-{
-  public:
-    virtual ~ITriggerDetector() = default;
-
-    ITriggerDetector() = default;
-    ITriggerDetector(const ITriggerDetector&) = delete;
-    ITriggerDetector& operator=(const ITriggerDetector&) = delete;
-    ITriggerDetector(ITriggerDetector&&) = delete;
-    ITriggerDetector& operator=(ITriggerDetector&&) = delete;
-
-    [[nodiscard]] virtual Result<TriggerResult> process(const camera::FrameView& frame) = 0;
+    bool anomalous{};
+    DetectionCandidateType candidate_type{DetectionCandidateType::none};
+    double confidence{};
+    double area_ratio{};
+    double change_score{};
+    std::chrono::microseconds processing_time{};
+    std::string detector_version;
+    std::string model_version;
+    std::vector<DetectionDebugMetric> debug_metrics;
 };
 
 } // namespace paperbreak::algorithm
