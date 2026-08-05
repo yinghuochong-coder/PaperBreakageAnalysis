@@ -131,6 +131,8 @@ class StoragePolicyManager final
         std::chrono::system_clock::time_point now);
     [[nodiscard]] Result<void> admit_large_write() const;
     [[nodiscard]] Result<void> set_retention_age(std::chrono::days retention_age);
+    [[nodiscard]] Result<void> reconfigure_limits(StorageWatermarkThresholds watermarks,
+                                                  std::optional<std::uint64_t> maximum_event_bytes);
     [[nodiscard]] StoragePolicySnapshot snapshot() const noexcept;
 
     [[nodiscard]] static StorageWatermark classify(

@@ -97,6 +97,7 @@ int main(int argc, char* argv[])
     std::unique_ptr<paperbreak::console::OperationsClient> operations_client;
     std::unique_ptr<paperbreak::console::AlgorithmClient> algorithm_client;
     std::unique_ptr<paperbreak::console::EventClient> event_client;
+    std::unique_ptr<paperbreak::console::StorageClient> storage_client;
     paperbreak::console::MainWindow main_window(
         [&preview_client](const bool paused) {
             if (preview_client)
@@ -270,6 +271,19 @@ int main(int argc, char* argv[])
                  return paperbreak::Result<void>::failure(paperbreak::make_error(
                      "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "事件客户端尚未初始化",
                      "console", "console.event.export", true));
+             }},
+        {.refresh =
+             [&storage_client] {
+                 if (storage_client)
+                     storage_client->refresh();
+             },
+         .update_configuration =
+             [&storage_client](paperbreak::console::StorageConfigurationValue value) {
+                 if (storage_client)
+                     return storage_client->update_configuration(std::move(value));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "存储客户端尚未初始化",
+                     "console", "console.storage.updateConfig", true));
              }});
     preview_client = std::make_unique<paperbreak::console::PreviewClient>(
         [&main_window](const paperbreak::console::PreviewSnapshot& snapshot) {
@@ -298,6 +312,10 @@ int main(int argc, char* argv[])
         event_client = std::make_unique<paperbreak::console::EventClient>(
             [&main_window](const paperbreak::console::EventClientSnapshot& snapshot) {
                 main_window.apply_event_snapshot(snapshot);
+            });
+        storage_client = std::make_unique<paperbreak::console::StorageClient>(
+            [&main_window](const paperbreak::console::StorageClientSnapshot& snapshot) {
+                main_window.apply_storage_snapshot(snapshot);
             });
     }
     paperbreak::console::ClientStateSnapshot latest_snapshot;
@@ -424,6 +442,8 @@ int main(int argc, char* argv[])
         static_cast<void>(algorithm_client->start());
     if (!smoke_test)
         static_cast<void>(event_client->start());
+    if (!smoke_test)
+        static_cast<void>(storage_client->start());
 
     bool smoke_ok = true;
     if (smoke_test)
@@ -474,6 +494,8 @@ int main(int argc, char* argv[])
              .value = std::to_string(sample_last_date_time.toMSecsSinceEpoch()),
              .unit = "unix_milliseconds",
              .available = true});
+        operations_smoke.metrics.push_back(
+            {.name = "storage.nvme.state", .value = "running", .unit = "state", .available = true});
         operations_smoke.alarms.push_back({.alarm_id = 1U,
                                            .code = "CAMERA_OFFLINE",
                                            .severity = "Warning",
@@ -496,6 +518,15 @@ int main(int argc, char* argv[])
         event_smoke.events_stale = false;
         event_smoke.stored_config_revision = 1U;
         main_window.apply_event_snapshot(event_smoke);
+        paperbreak::console::StorageClientSnapshot storage_smoke;
+        storage_smoke.connection.state = paperbreak::ipc::ClientConnectionState::connected;
+        storage_smoke.stale = false;
+        storage_smoke.stored_config_revision = 1U;
+        storage_smoke.effective_config_revision = 1U;
+        storage_smoke.configuration.event_root = "data/events";
+        storage_smoke.configuration.cache_root = "data/cache";
+        storage_smoke.effective_configuration = storage_smoke.configuration;
+        main_window.apply_storage_snapshot(storage_smoke);
         paperbreak::console::AlgorithmClientSnapshot algorithm_smoke;
         algorithm_smoke.connection.state = paperbreak::ipc::ClientConnectionState::connected;
         algorithm_smoke.stale = false;
@@ -562,8 +593,9 @@ int main(int argc, char* argv[])
                    main_window.camera_configuration_ready() && empty_configuration_kept_discovery &&
                    restart_state_disabled_controls && main_window.operations_pages_ready() &&
                    main_window.algorithm_page_ready() && main_window.event_pages_ready() &&
-                   event_configuration_editable && local_time_displayed &&
-                   diagnostic_enabled_when_connected && diagnostic_disabled_when_disconnected &&
+                   main_window.storage_page_ready() && event_configuration_editable &&
+                   local_time_displayed && diagnostic_enabled_when_connected &&
+                   diagnostic_disabled_when_disconnected &&
                    theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
                    selected_light && selected_dark && dark_theme_persisted && selected_system &&
                    main_window.select_page(11U) && main_window.select_page(0U);
@@ -605,6 +637,10 @@ int main(int argc, char* argv[])
     QObject::connect(&refresh_timer, &QTimer::timeout, [&event_client] {
         if (event_client)
             event_client->refresh();
+    });
+    QObject::connect(&refresh_timer, &QTimer::timeout, [&storage_client] {
+        if (storage_client)
+            storage_client->refresh();
     });
     QTimer clock_timer;
     QObject::connect(&clock_timer, &QTimer::timeout, &main_window,

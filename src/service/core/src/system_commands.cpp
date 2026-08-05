@@ -337,6 +337,20 @@ Json event_config_json(const config::EventConfig& value)
             {"retentionDays", value.retention_days}};
 }
 
+Json storage_config_json(const config::StorageConfig& value)
+{
+    return {{"eventRoot", value.event_root},
+            {"cacheRoot", value.cache_root},
+            {"rollingCacheEnabled", value.rolling_cache_enabled},
+            {"maximumCacheStorageGiB", value.maximum_cache_storage_gib},
+            {"rollingCacheWriteLimitMiBps", value.rolling_cache_write_limit_mibps},
+            {"rollingCacheIoTimeoutMs", value.rolling_cache_io_timeout_ms},
+            {"warningFreeSpaceGiB", value.warning_free_space_gib},
+            {"criticalFreeSpaceGiB", value.critical_free_space_gib},
+            {"stopFreeSpaceGiB", value.stop_free_space_gib},
+            {"maximumEventStorageGiB", value.maximum_event_storage_gib}};
+}
+
 Json algorithm_config_json(const config::AlgorithmConfig& value)
 {
     return {{"enabled", value.enabled},
@@ -1318,6 +1332,80 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
     if (!payload)
     {
         return Result<ipc::CommandResponse>::failure(payload.error());
+    }
+
+    if (request.command.starts_with("storage."))
+    {
+        if (!peer.local || !peer.authenticated)
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_UNAUTHORIZED", Severity::error,
+                              "存储配置读取只允许已认证本机用户", "ipc.storage.dispatch"));
+        const bool write_command = request.command == "storage.updateConfig";
+        if (write_command && !peer.administrator)
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_UNAUTHORIZED", Severity::error,
+                              "存储配置修改要求提升后的本机管理员身份", "ipc.storage.dispatch"));
+        if (write_command && stop_token.stop_requested())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_SERVICE_STOPPING", Severity::warning,
+                              "服务正在停止，拒绝存储配置修改", "ipc.storage.dispatch", true));
+
+        if (request.command == "storage.getConfig")
+        {
+            if (!payload.value().empty())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "storage.getConfig payload 必须为空", "ipc.storage.getConfig"));
+            auto snapshot = repository_.snapshot();
+            if (!snapshot)
+                return Result<ipc::CommandResponse>::failure(snapshot.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{{"storage", storage_config_json(snapshot.value().stored->storage)},
+                          {"effectiveStorage",
+                           storage_config_json(snapshot.value().effective->storage)},
+                          {"storedConfigRevision", snapshot.value().stored_config_revision},
+                          {"effectiveConfigRevision", snapshot.value().effective_config_revision},
+                          {"pendingRestartPaths", snapshot.value().pending_restart_paths}}
+                         .dump(),
+                 .binary = {}});
+        }
+        if (request.command == "storage.updateConfig")
+        {
+            if (!has_only_fields(payload.value(), {"expectedConfigRevision", "storage"}) ||
+                !payload.value().contains("expectedConfigRevision") ||
+                !payload.value()["expectedConfigRevision"].is_number_unsigned() ||
+                !payload.value().contains("storage") || !payload.value()["storage"].is_object())
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error,
+                    "storage.updateConfig 需要 expectedConfigRevision 和完整 storage 对象",
+                    "ipc.storage.updateConfig"));
+            auto current = repository_.snapshot();
+            if (!current)
+                return Result<ipc::CommandResponse>::failure(current.error());
+            Json document = Json::parse(config::serialize_config(*current.value().stored));
+            document["storage"] = payload.value()["storage"];
+            auto updated = repository_.update(
+                document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
+                {.source = config::ConfigChangeSource::local_ipc,
+                 .actor = peer.actor_sid,
+                 .correlation_id = request.request_id});
+            if (!updated)
+                return Result<ipc::CommandResponse>::failure(updated.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{{"storage", storage_config_json(updated.value().stored->storage)},
+                          {"effectiveStorage",
+                           storage_config_json(updated.value().effective->storage)},
+                          {"storedConfigRevision", updated.value().stored_config_revision},
+                          {"effectiveConfigRevision", updated.value().effective_config_revision},
+                          {"applied", updated.value().pending_restart_paths.empty()},
+                          {"pendingRestartPaths", updated.value().pending_restart_paths}}
+                         .dump(),
+                 .binary = {}});
+        }
+        return Result<ipc::CommandResponse>::failure(command_error(
+            "IPC_COMMAND_UNKNOWN", Severity::error, "未知 storage 命令", "ipc.storage.dispatch"));
     }
 
     if (request.command.starts_with("algorithm."))

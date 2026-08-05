@@ -5,6 +5,7 @@
 #include "paperbreak/console/navigation_model.hpp"
 #include "paperbreak/console/operations_client.hpp"
 #include "paperbreak/console/preview_client.hpp"
+#include "paperbreak/console/storage_client.hpp"
 #include "paperbreak/console/tray_status_model.hpp"
 #include "paperbreak/ipc/server.hpp"
 
@@ -409,6 +410,69 @@ class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
 
     std::mutex mutex;
     std::string last_update_payload;
+};
+
+class StorageClientHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage& request, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        const nlohmann::json storage{{"eventRoot", "数据/事件 文件"},
+                                     {"cacheRoot", "data/cache"},
+                                     {"rollingCacheEnabled", false},
+                                     {"maximumCacheStorageGiB", 1000U},
+                                     {"rollingCacheWriteLimitMiBps", 600U},
+                                     {"rollingCacheIoTimeoutMs", 10000U},
+                                     {"warningFreeSpaceGiB", 200U},
+                                     {"criticalFreeSpaceGiB", 100U},
+                                     {"stopFreeSpaceGiB", 20U},
+                                     {"maximumEventStorageGiB", 1000U}};
+        if (request.command == "storage.getConfig")
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = nlohmann::json{{"storage", storage},
+                                                {"effectiveStorage", storage},
+                                                {"storedConfigRevision", 4U},
+                                                {"effectiveConfigRevision", 4U},
+                                                {"pendingRestartPaths", nlohmann::json::array()}}
+                                     .dump(),
+                 .binary = {}});
+        if (request.command == "storage.updateConfig")
+        {
+            const auto payload = nlohmann::json::parse(request.payload_json);
+            {
+                std::scoped_lock lock{mutex};
+                last_update_payload = payload;
+            }
+            if (reject_update.load())
+                return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+                    paperbreak::make_error("SYS_CONFIG_INVALID", paperbreak::Severity::error,
+                                           "存储配置校验失败", "test",
+                                           "storageClient.updateConfig"));
+            auto saved = payload.at("storage");
+            auto effective = saved;
+            effective["cacheRoot"] = "data/cache";
+            effective["rollingCacheEnabled"] = false;
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     nlohmann::json{{"storage", saved},
+                                    {"effectiveStorage", effective},
+                                    {"storedConfigRevision", 5U},
+                                    {"effectiveConfigRevision", 4U},
+                                    {"pendingRestartPaths",
+                                     nlohmann::json::array({"/storage/roots", "/storage/nvme"})}}
+                         .dump(),
+                 .binary = {}});
+        }
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+            paperbreak::make_error("IPC_REQUEST_INVALID", paperbreak::Severity::error, "unexpected",
+                                   "test", "storageClient.handle"));
+    }
+
+    std::mutex mutex;
+    nlohmann::json last_update_payload;
+    std::atomic_bool reject_update{};
 };
 
 class PreviewSubscriptionHandler final : public paperbreak::ipc::IRequestHandler
@@ -860,6 +924,64 @@ TEST(OperationsClient, QueriesFiltersAcknowledgesAndExportsThroughBoundedWorker)
     std::error_code cleanup_error;
     std::filesystem::remove_all(base, cleanup_error);
     EXPECT_FALSE(cleanup_error);
+}
+
+TEST(StorageClient, SynchronizesCompleteConfigurationAndPreservesRestartReadback)
+{
+    const std::string name = state_name();
+    auto handler = std::make_shared<StorageClientHandler>();
+    paperbreak::ipc::IpcServer server(handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name));
+    ASSERT_TRUE(server.start());
+
+    paperbreak::console::StorageClientSnapshot latest;
+    paperbreak::console::StorageClient client([&](const auto& snapshot) { latest = snapshot; },
+                                              client_options(name));
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until([&] { return !latest.stale; }));
+    EXPECT_EQ(latest.stored_config_revision, 4U);
+    EXPECT_EQ(latest.configuration.event_root, "数据/事件 文件");
+    EXPECT_EQ(latest.configuration.maximum_cache_storage_gib, 1000U);
+    EXPECT_EQ(latest.configuration, latest.effective_configuration);
+
+    auto changed = latest.configuration;
+    changed.cache_root = "高速 缓存/NVMe";
+    changed.rolling_cache_enabled = true;
+    changed.maximum_cache_storage_gib = 800U;
+    changed.rolling_cache_write_limit_mibps = 500U;
+    changed.rolling_cache_io_timeout_ms = 20000U;
+    changed.warning_free_space_gib = 220U;
+    changed.critical_free_space_gib = 120U;
+    changed.stop_free_space_gib = 30U;
+    changed.maximum_event_storage_gib = 900U;
+    ASSERT_TRUE(client.update_configuration(changed));
+    auto busy = client.update_configuration(changed);
+    ASSERT_FALSE(busy);
+    EXPECT_EQ(busy.error().business_code, "IPC_BUSY");
+    ASSERT_TRUE(wait_until([&] { return !latest.operation_pending; }));
+    {
+        std::scoped_lock lock{handler->mutex};
+        ASSERT_TRUE(handler->last_update_payload.is_object());
+        EXPECT_EQ(handler->last_update_payload["expectedConfigRevision"], 4U);
+        const auto& storage = handler->last_update_payload["storage"];
+        EXPECT_EQ(storage.size(), 10U);
+        EXPECT_EQ(storage["cacheRoot"], "高速 缓存/NVMe");
+        EXPECT_TRUE(storage["rollingCacheEnabled"].get<bool>());
+        EXPECT_EQ(storage["rollingCacheWriteLimitMiBps"], 500U);
+        EXPECT_EQ(storage["maximumEventStorageGiB"], 900U);
+    }
+    EXPECT_EQ(latest.stored_config_revision, 5U);
+    EXPECT_EQ(latest.effective_config_revision, 4U);
+    EXPECT_EQ(latest.configuration.cache_root, "高速 缓存/NVMe");
+    EXPECT_EQ(latest.effective_configuration.cache_root, "data/cache");
+    EXPECT_EQ(latest.pending_restart_paths.size(), 2U);
+
+    client.stop();
+    EXPECT_TRUE(latest.stale);
+    auto disconnected = client.update_configuration(changed);
+    ASSERT_FALSE(disconnected);
+    EXPECT_EQ(disconnected.error().business_code, "IPC_NOT_CONNECTED");
+    stop_server(server);
 }
 
 TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)

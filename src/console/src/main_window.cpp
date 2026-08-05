@@ -302,7 +302,7 @@ QString placeholder_message(const ConsolePageId id)
     case ConsolePageId::event_configuration:
         return QStringLiteral("导航骨架已建立。事件链与事件配置将在 M5 接入。");
     case ConsolePageId::storage_configuration:
-        return QStringLiteral("导航骨架已建立。事件存储与 NVMe 配置将在 M5、M7 接入。");
+        return QStringLiteral("存储配置正在从后台服务同步。");
     case ConsolePageId::uplink_configuration:
         return QStringLiteral("导航骨架已建立。上位机连接与上传配置将在 M8 接入。");
     case ConsolePageId::device_status:
@@ -323,11 +323,13 @@ QString placeholder_message(const ConsolePageId id)
 MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                        CameraUiActions camera_actions, ThemeUiActions theme_actions,
                        OperationsUiActions operations_actions, AlgorithmUiActions algorithm_actions,
-                       EventUiActions event_actions, QWidget* parent)
+                       EventUiActions event_actions, StorageUiActions storage_actions,
+                       QWidget* parent)
     : QMainWindow(parent), preview_pause_changed_(std::move(preview_pause_changed)),
       camera_actions_(std::move(camera_actions)), theme_actions_(std::move(theme_actions)),
       operations_actions_(std::move(operations_actions)),
-      algorithm_actions_(std::move(algorithm_actions)), event_actions_(std::move(event_actions))
+      algorithm_actions_(std::move(algorithm_actions)), event_actions_(std::move(event_actions)),
+      storage_actions_(std::move(storage_actions))
 {
     setObjectName(QStringLiteral("main-window"));
     setWindowTitle(QStringLiteral("PaperBreakEdge 断纸分析控制台"));
@@ -976,6 +978,127 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             event_config_status_->setWordWrap(true);
             layout->addWidget(event_config_status_);
             layout->addStretch(1);
+            pages_->addWidget(page);
+            continue;
+        }
+        if (descriptor.id == ConsolePageId::storage_configuration)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-storage-configuration"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            layout->setSpacing(12);
+            auto* heading = make_child<QLabel>(page, QStringLiteral("事件存储与 NVMe 滚动缓存"));
+            heading->setProperty("role", "pageTitle");
+            layout->addWidget(heading);
+            auto* notice = make_child<QLabel>(
+                page, QStringLiteral(
+                          "事件根目录、缓存根目录及 NVMe 滚动缓存参数保存后需要重启后台服务；"
+                          "磁盘水位与事件容量上限会立即应用。启用 NVMe 前须完成目标盘带宽验收。"));
+            notice->setObjectName(QStringLiteral("storage-restart-notice"));
+            notice->setWordWrap(true);
+            notice->setProperty("role", "warning");
+            layout->addWidget(notice);
+
+            auto* scroll = make_child<QScrollArea>(page);
+            scroll->setWidgetResizable(true);
+            QWidget* content = make_child<QWidget>(scroll);
+            auto* content_layout = make_layout<QVBoxLayout>(content);
+            content_layout->setContentsMargins(2, 2, 8, 2);
+            content_layout->setSpacing(12);
+
+            storage_editor_ = make_child<QWidget>(content);
+            storage_editor_->setObjectName(QStringLiteral("storage-editor"));
+            auto* form = make_layout<QFormLayout>(storage_editor_);
+            storage_event_root_ = make_child<QLineEdit>(storage_editor_);
+            storage_cache_root_ = make_child<QLineEdit>(storage_editor_);
+            storage_event_root_->setMaxLength(1024);
+            storage_cache_root_->setMaxLength(1024);
+            storage_event_root_->setObjectName(QStringLiteral("storage-event-root"));
+            storage_cache_root_->setObjectName(QStringLiteral("storage-cache-root"));
+            storage_rolling_cache_enabled_ =
+                make_child<QCheckBox>(storage_editor_, QStringLiteral("启用普通滚动缓存"));
+            storage_rolling_cache_enabled_->setObjectName(
+                QStringLiteral("storage-rolling-cache-enabled"));
+            storage_maximum_cache_gib_ = make_child<QSpinBox>(storage_editor_);
+            storage_write_limit_mibps_ = make_child<QSpinBox>(storage_editor_);
+            storage_io_timeout_ms_ = make_child<QSpinBox>(storage_editor_);
+            storage_warning_gib_ = make_child<QSpinBox>(storage_editor_);
+            storage_critical_gib_ = make_child<QSpinBox>(storage_editor_);
+            storage_stop_gib_ = make_child<QSpinBox>(storage_editor_);
+            storage_maximum_event_gib_ = make_child<QSpinBox>(storage_editor_);
+            storage_maximum_cache_gib_->setRange(1, 1000000);
+            storage_write_limit_mibps_->setRange(1, 1000000);
+            storage_io_timeout_ms_->setRange(100, 600000);
+            storage_warning_gib_->setRange(1, 1000000);
+            storage_critical_gib_->setRange(1, 1000000);
+            storage_stop_gib_->setRange(1, 1000000);
+            storage_maximum_event_gib_->setRange(1, 1000000);
+            form->addRow(QStringLiteral("事件根目录（需重启）"), storage_event_root_);
+            form->addRow(QStringLiteral("NVMe 缓存根目录（需重启）"), storage_cache_root_);
+            form->addRow(QStringLiteral("滚动缓存（需重启）"), storage_rolling_cache_enabled_);
+            form->addRow(QStringLiteral("滚动缓存容量上限 (GiB，需重启)"),
+                         storage_maximum_cache_gib_);
+            form->addRow(QStringLiteral("滚动写限速 (MiB/s，需重启)"), storage_write_limit_mibps_);
+            form->addRow(QStringLiteral("单块 I/O 截止时间 (ms，需重启)"), storage_io_timeout_ms_);
+            form->addRow(QStringLiteral("预警剩余空间 (GiB)"), storage_warning_gib_);
+            form->addRow(QStringLiteral("严重剩余空间 (GiB)"), storage_critical_gib_);
+            form->addRow(QStringLiteral("停止保存剩余空间 (GiB)"), storage_stop_gib_);
+            form->addRow(QStringLiteral("事件容量上限 (GiB)"), storage_maximum_event_gib_);
+            storage_editor_->setEnabled(false);
+            content_layout->addWidget(storage_editor_);
+
+            storage_save_ = make_child<QPushButton>(content, QStringLiteral("保存存储配置"));
+            storage_save_->setObjectName(QStringLiteral("storage-config-save"));
+            storage_save_->setEnabled(false);
+            QObject::connect(storage_save_, &QPushButton::clicked, this, [this] {
+                if (!storage_actions_.update_configuration)
+                    return;
+                if (storage_warning_gib_->value() <= storage_critical_gib_->value() ||
+                    storage_critical_gib_->value() <= storage_stop_gib_->value())
+                {
+                    QMessageBox::warning(
+                        this, QStringLiteral("存储水位无效"),
+                        QStringLiteral("必须满足：预警水位 > 严重水位 > 停止保存水位。"));
+                    return;
+                }
+                show_storage_result(storage_actions_.update_configuration(
+                    {.event_root = storage_event_root_->text().trimmed().toStdString(),
+                     .cache_root = storage_cache_root_->text().trimmed().toStdString(),
+                     .rolling_cache_enabled = storage_rolling_cache_enabled_->isChecked(),
+                     .maximum_cache_storage_gib =
+                         static_cast<std::uint32_t>(storage_maximum_cache_gib_->value()),
+                     .rolling_cache_write_limit_mibps =
+                         static_cast<std::uint32_t>(storage_write_limit_mibps_->value()),
+                     .rolling_cache_io_timeout_ms =
+                         static_cast<std::uint32_t>(storage_io_timeout_ms_->value()),
+                     .warning_free_space_gib =
+                         static_cast<std::uint32_t>(storage_warning_gib_->value()),
+                     .critical_free_space_gib =
+                         static_cast<std::uint32_t>(storage_critical_gib_->value()),
+                     .stop_free_space_gib = static_cast<std::uint32_t>(storage_stop_gib_->value()),
+                     .maximum_event_storage_gib =
+                         static_cast<std::uint32_t>(storage_maximum_event_gib_->value())}));
+            });
+            content_layout->addWidget(storage_save_);
+            storage_status_ = make_child<QLabel>(content, QStringLiteral("正在读取存储配置"));
+            storage_status_->setObjectName(QStringLiteral("storage-config-status"));
+            storage_status_->setWordWrap(true);
+            storage_status_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            content_layout->addWidget(storage_status_);
+
+            auto* runtime_group =
+                make_child<QGroupBox>(content, QStringLiteral("实际存储与 NVMe 运行指标"));
+            auto* runtime_layout = make_layout<QVBoxLayout>(runtime_group);
+            storage_metrics_ = make_child<QTableWidget>(runtime_group);
+            storage_metrics_->setObjectName(QStringLiteral("storage-runtime-metrics"));
+            configure_table(storage_metrics_, {QStringLiteral("指标"), QStringLiteral("值"),
+                                               QStringLiteral("单位"), QStringLiteral("状态")});
+            runtime_layout->addWidget(storage_metrics_);
+            content_layout->addWidget(runtime_group);
+            content_layout->addStretch(1);
+            scroll->setWidget(content);
+            layout->addWidget(scroll, 1);
             pages_->addWidget(page);
             continue;
         }
@@ -1751,6 +1874,14 @@ void MainWindow::show_event_config_result(const Result<void>& result)
                      QString::fromStdString(result.error().business_code)));
 }
 
+void MainWindow::show_storage_result(const Result<void>& result)
+{
+    if (!result && storage_status_)
+        storage_status_->setText(QStringLiteral("保存失败：%1（%2）")
+                                     .arg(QString::fromStdString(result.error().message),
+                                          QString::fromStdString(result.error().business_code)));
+}
+
 void MainWindow::request_diagnostics_export()
 {
     if (!operations_actions_.export_diagnostics)
@@ -1824,6 +1955,34 @@ void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
                                    snapshot.metrics_stale));
     }
     metrics_table_->resizeColumnsToContents();
+
+    if (storage_metrics_)
+    {
+        const auto storage_metric = [](const std::string_view name) {
+            return name.starts_with("storage.") || name == "system.nvme_write_bytes_per_second" ||
+                   name.starts_with("disk.event.") || name.starts_with("disk.cache.");
+        };
+        const auto count = std::ranges::count_if(
+            snapshot.metrics, [&](const auto& metric) { return storage_metric(metric.name); });
+        storage_metrics_->setRowCount(static_cast<int>(count));
+        int storage_row = 0;
+        for (const auto& metric : snapshot.metrics)
+        {
+            if (!storage_metric(metric.name))
+                continue;
+            set_table_item(storage_metrics_, storage_row, 0, QString::fromStdString(metric.name));
+            set_table_item(storage_metrics_, storage_row, 1,
+                           metric.available ? QString::fromStdString(metric.value)
+                                            : QStringLiteral("不可用"));
+            set_table_item(storage_metrics_, storage_row, 2, QString::fromStdString(metric.unit));
+            set_table_item(storage_metrics_, storage_row, 3,
+                           stale_value(metric.available ? QStringLiteral("可用")
+                                                        : QStringLiteral("未初始化/不可用"),
+                                       snapshot.metrics_stale));
+            ++storage_row;
+        }
+        storage_metrics_->resizeColumnsToContents();
+    }
 
     std::optional<std::uint64_t> selected_alarm;
     if (alarm_table_->currentRow() >= 0 && alarm_table_->item(alarm_table_->currentRow(), 0))
@@ -2103,6 +2262,72 @@ void MainWindow::apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapsho
     else
         algorithm_operation_status_->setText(
             QStringLiteral("配置与实际状态已同步；单帧测试不会创建候选或写入磁盘"));
+}
+
+void MainWindow::apply_storage_snapshot(const StorageClientSnapshot& snapshot)
+{
+    const bool configuration_changed =
+        storage_snapshot_.stored_config_revision != snapshot.stored_config_revision ||
+        storage_snapshot_.stale;
+    storage_snapshot_ = snapshot;
+    if (!storage_editor_ || !storage_status_ || !storage_save_)
+        return;
+
+    if (configuration_changed && !snapshot.stale)
+    {
+        const auto& value = snapshot.configuration;
+        storage_event_root_->setText(QString::fromStdString(value.event_root));
+        storage_cache_root_->setText(QString::fromStdString(value.cache_root));
+        storage_rolling_cache_enabled_->setChecked(value.rolling_cache_enabled);
+        storage_maximum_cache_gib_->setValue(static_cast<int>(value.maximum_cache_storage_gib));
+        storage_write_limit_mibps_->setValue(
+            static_cast<int>(value.rolling_cache_write_limit_mibps));
+        storage_io_timeout_ms_->setValue(static_cast<int>(value.rolling_cache_io_timeout_ms));
+        storage_warning_gib_->setValue(static_cast<int>(value.warning_free_space_gib));
+        storage_critical_gib_->setValue(static_cast<int>(value.critical_free_space_gib));
+        storage_stop_gib_->setValue(static_cast<int>(value.stop_free_space_gib));
+        storage_maximum_event_gib_->setValue(static_cast<int>(value.maximum_event_storage_gib));
+    }
+
+    const bool editable = snapshot.connection.state == ipc::ClientConnectionState::connected &&
+                          !snapshot.stale && !snapshot.operation_pending;
+    storage_editor_->setEnabled(editable);
+    storage_save_->setEnabled(editable);
+    if (snapshot.operation_pending)
+        storage_status_->setText(QStringLiteral("正在保存并应用存储配置"));
+    else if (snapshot.error)
+        storage_status_->setText(QStringLiteral("存储配置失败：%1（%2）")
+                                     .arg(QString::fromStdString(snapshot.error->message),
+                                          QString::fromStdString(snapshot.error->business_code)));
+    else if (snapshot.stale)
+        storage_status_->setText(QStringLiteral("存储配置尚未从后台服务同步，旧值不可用于保存"));
+    else
+    {
+        QString pending;
+        for (const auto& path : snapshot.pending_restart_paths)
+        {
+            if (path == "/storage/roots" || path == "/storage/nvme")
+            {
+                if (!pending.isEmpty())
+                    pending += QStringLiteral("、");
+                pending += QString::fromStdString(path);
+            }
+        }
+        const QString application = pending.isEmpty()
+                                        ? QStringLiteral("全部字段已应用，无需重启")
+                                        : QStringLiteral("以下保存值需重启后生效：%1").arg(pending);
+        storage_status_->setText(
+            QStringLiteral("保存配置修订 %1；当前有效修订 %2。%3\n"
+                           "实际事件根：%4；实际缓存根：%5；实际滚动缓存：%6")
+                .arg(snapshot.stored_config_revision)
+                .arg(snapshot.effective_config_revision)
+                .arg(application,
+                     QString::fromStdString(snapshot.effective_configuration.event_root),
+                     QString::fromStdString(snapshot.effective_configuration.cache_root),
+                     snapshot.effective_configuration.rolling_cache_enabled
+                         ? QStringLiteral("已启用")
+                         : QStringLiteral("未启用")));
+    }
 }
 
 void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
@@ -2411,6 +2636,17 @@ bool MainWindow::event_pages_ready() const noexcept
            event_filter_state_ && event_filter_camera_ && event_table_ && event_thumbnail_ &&
            event_manifest_ && event_confirm_ && event_reject_ && event_export_ &&
            event_open_directory_ && event_retry_upload_ && !event_retry_upload_->isEnabled();
+}
+
+bool MainWindow::storage_page_ready() const noexcept
+{
+    return storage_editor_ && storage_event_root_ && storage_cache_root_ &&
+           storage_rolling_cache_enabled_ && storage_maximum_cache_gib_ &&
+           storage_write_limit_mibps_ && storage_io_timeout_ms_ && storage_warning_gib_ &&
+           storage_critical_gib_ && storage_stop_gib_ && storage_maximum_event_gib_ &&
+           storage_save_ && storage_status_ && storage_metrics_ &&
+           has_readable_table_header(storage_metrics_) &&
+           findChild<QLabel*>(QStringLiteral("storage-restart-notice"));
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

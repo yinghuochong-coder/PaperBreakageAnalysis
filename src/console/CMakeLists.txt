@@ -6,6 +6,7 @@ add_library(paperbreak_console_model STATIC
     src/navigation_model.cpp
     src/operations_client.cpp
     src/preview_client.cpp
+    src/storage_client.cpp
     src/tray_status_model.cpp)
 target_link_libraries(paperbreak_console_model
     PUBLIC

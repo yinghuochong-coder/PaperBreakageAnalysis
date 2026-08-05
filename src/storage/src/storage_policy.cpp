@@ -216,14 +216,17 @@ struct StoragePolicyManager::Impl final
         auto bytes = database->retained_event_bytes();
         if (!bytes)
             return Result<void>::failure(std::move(bytes).error());
-        snapshot.capacity_bytes = space.value().capacity_bytes;
-        snapshot.available_bytes = space.value().available_bytes;
-        snapshot.retained_event_bytes = bytes.value();
-        snapshot.watermark =
-            StoragePolicyManager::classify(snapshot.available_bytes, options.watermarks);
-        snapshot.ordinary_rolling_writes_allowed = snapshot.watermark == StorageWatermark::normal ||
-                                                   snapshot.watermark == StorageWatermark::warning;
-        snapshot.large_writes_allowed = snapshot.watermark != StorageWatermark::stop_save;
+        auto refreshed = snapshot;
+        refreshed.capacity_bytes = space.value().capacity_bytes;
+        refreshed.available_bytes = space.value().available_bytes;
+        refreshed.retained_event_bytes = bytes.value();
+        refreshed.watermark =
+            StoragePolicyManager::classify(refreshed.available_bytes, options.watermarks);
+        refreshed.ordinary_rolling_writes_allowed =
+            refreshed.watermark == StorageWatermark::normal ||
+            refreshed.watermark == StorageWatermark::warning;
+        refreshed.large_writes_allowed = refreshed.watermark != StorageWatermark::stop_save;
+        snapshot = refreshed;
         return Result<void>::success();
     }
 
@@ -504,6 +507,32 @@ Result<void> StoragePolicyManager::set_retention_age(const std::chrono::days ret
                                                   "storage.policy.retention.configure"));
     const std::scoped_lock lock{impl_->mutex};
     impl_->options.retention_age = retention_age;
+    return Result<void>::success();
+}
+
+Result<void> StoragePolicyManager::reconfigure_limits(
+    const StorageWatermarkThresholds watermarks,
+    const std::optional<std::uint64_t> maximum_event_bytes)
+{
+    if (watermarks.warning_available_bytes <= watermarks.critical_available_bytes ||
+        watermarks.critical_available_bytes <= watermarks.stop_save_available_bytes ||
+        (maximum_event_bytes && *maximum_event_bytes == 0U))
+        return Result<void>::failure(policy_error("SYS_CONFIG_INVALID", Severity::error,
+                                                  "存储水位或事件容量上限配置无效",
+                                                  "storage.policy.limits.configure"));
+
+    const std::scoped_lock lock{impl_->mutex};
+    const auto previous_watermarks = impl_->options.watermarks;
+    const auto previous_maximum_event_bytes = impl_->options.maximum_event_bytes;
+    impl_->options.watermarks = watermarks;
+    impl_->options.maximum_event_bytes = maximum_event_bytes;
+    auto refreshed = impl_->refresh_snapshot();
+    if (!refreshed)
+    {
+        impl_->options.watermarks = previous_watermarks;
+        impl_->options.maximum_event_bytes = previous_maximum_event_bytes;
+        return refreshed;
+    }
     return Result<void>::success();
 }
 

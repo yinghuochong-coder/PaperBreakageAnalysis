@@ -10,9 +10,9 @@
     "confirmationThreshold": 0.8,
     "consecutiveFrames": 3,
     "cooldownMs": 1000,
-    "debugOverlay": false,
+    "debugOverlay": true,
     "device": "cpu",
-    "enabled": false,
+    "enabled": true,
     "modelReference": "",
     "modelVersion": "",
     "roi": {
@@ -46,7 +46,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 11,
+  "configRevision": 13,
   "configSchemaVersion": 2,
   "event": {
     "generatePreviewVideo": true,
@@ -74,7 +74,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-04T09:35:28.663Z",
+  "modifiedAt": "2026-08-05T02:24:02.534Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

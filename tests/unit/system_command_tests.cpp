@@ -256,6 +256,60 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     EXPECT_TRUE(version_json.at("dependencies").contains("qt"));
 }
 
+TEST(SystemCommand, ReadsAndUpdatesCompleteStorageConfigurationWithRestartSemantics)
+{
+    CommandFixture fixture;
+    auto read = fixture.commands.handle(fixture.request("storage.getConfig"), reader, {});
+    ASSERT_TRUE(read) << read.error().message;
+    const Json initial = Json::parse(read.value().payload_json);
+    EXPECT_EQ(initial["storedConfigRevision"], 1U);
+    EXPECT_EQ(initial["storage"]["maximumCacheStorageGiB"], 1000U);
+    EXPECT_EQ(initial["effectiveStorage"], initial["storage"]);
+    EXPECT_TRUE(initial["pendingRestartPaths"].empty());
+
+    Json storage = initial["storage"];
+    storage["eventRoot"] = "data/new-events";
+    storage["rollingCacheEnabled"] = true;
+    storage["warningFreeSpaceGiB"] = 210U;
+    storage["criticalFreeSpaceGiB"] = 110U;
+    storage["stopFreeSpaceGiB"] = 21U;
+    storage["maximumEventStorageGiB"] = 900U;
+    const Json update{{"expectedConfigRevision", 1U}, {"storage", storage}};
+    auto denied =
+        fixture.commands.handle(fixture.request("storage.updateConfig", update.dump()), reader, {});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
+
+    auto updated = fixture.commands.handle(fixture.request("storage.updateConfig", update.dump()),
+                                           administrator, {});
+    ASSERT_TRUE(updated) << updated.error().message;
+    const Json response = Json::parse(updated.value().payload_json);
+    EXPECT_EQ(response["storedConfigRevision"], 2U);
+    EXPECT_EQ(response["effectiveConfigRevision"], 1U);
+    EXPECT_FALSE(response["applied"].get<bool>());
+    EXPECT_EQ(response["storage"]["eventRoot"], "data/new-events");
+    EXPECT_TRUE(response["storage"]["rollingCacheEnabled"].get<bool>());
+    EXPECT_NE(response["effectiveStorage"]["eventRoot"], "data/new-events");
+    EXPECT_FALSE(response["effectiveStorage"]["rollingCacheEnabled"].get<bool>());
+    EXPECT_EQ(response["effectiveStorage"]["warningFreeSpaceGiB"], 210U);
+    EXPECT_EQ(response["effectiveStorage"]["maximumEventStorageGiB"], 900U);
+    const auto pending = response["pendingRestartPaths"].get<std::vector<std::string>>();
+    EXPECT_NE(std::ranges::find(pending, "/storage/roots"), pending.end());
+    EXPECT_NE(std::ranges::find(pending, "/storage/nvme"), pending.end());
+    ASSERT_EQ(fixture.audit.records.size(), 1U);
+    EXPECT_EQ(fixture.audit.records.front().source,
+              paperbreak::config::ConfigChangeSource::local_ipc);
+
+    Json invalid_storage = response["storage"];
+    invalid_storage["unexpected"] = true;
+    auto invalid = fixture.commands.handle(
+        fixture.request("storage.updateConfig",
+                        Json{{"expectedConfigRevision", 2U}, {"storage", invalid_storage}}.dump()),
+        administrator, {});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "SYS_CONFIG_INVALID");
+}
+
 TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
 {
     using namespace std::chrono_literals;

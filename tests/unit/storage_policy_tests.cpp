@@ -255,6 +255,37 @@ TEST(StoragePolicy, ClassifiesExactWatermarkBoundariesAndRejectsStopSaveWrites)
     EXPECT_TRUE(manager.value()->admit_large_write());
 }
 
+TEST(StoragePolicy, HotReconfiguresWatermarksAndRejectsInvalidLimitsWithoutChangingPolicy)
+{
+    TemporaryDirectory temporary{"hot-limits"};
+    const auto database_configuration = database_options(temporary);
+    auto database = EventMetadataDatabase::open(database_configuration);
+    ASSERT_TRUE(database);
+    auto files = std::make_shared<ControlledFileSystem>();
+    files->sampled_space.available_bytes = 500U;
+    auto manager = StoragePolicyManager::create(policy_options(database_configuration),
+                                                *database.value(), files);
+    ASSERT_TRUE(manager);
+    EXPECT_EQ(manager.value()->snapshot().watermark, StorageWatermark::warning);
+
+    ASSERT_TRUE(manager.value()->reconfigure_limits({.warning_available_bytes = 400U,
+                                                     .critical_available_bytes = 200U,
+                                                     .stop_save_available_bytes = 50U},
+                                                    4096U));
+    EXPECT_EQ(manager.value()->snapshot().watermark, StorageWatermark::normal);
+    EXPECT_TRUE(manager.value()->snapshot().ordinary_rolling_writes_allowed);
+
+    auto invalid = manager.value()->reconfigure_limits({.warning_available_bytes = 200U,
+                                                        .critical_available_bytes = 200U,
+                                                        .stop_save_available_bytes = 50U},
+                                                       4096U);
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "SYS_CONFIG_INVALID");
+    files->sampled_space.available_bytes = 300U;
+    ASSERT_TRUE(manager.value()->run_maintenance(std::chrono::system_clock::now()));
+    EXPECT_EQ(manager.value()->snapshot().watermark, StorageWatermark::warning);
+}
+
 TEST(StoragePolicy, WarningDeletesOnlyUploadedAllowedUnlockedOldestEvent)
 {
     TemporaryDirectory temporary{"eligible"};

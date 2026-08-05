@@ -818,12 +818,14 @@ class EventConfigApplier final : public paperbreak::config::IConfigApplier
         const paperbreak::config::EdgeConfig& candidate,
         const std::vector<std::string>& changed_paths) override
     {
-        relevant_ = std::ranges::any_of(changed_paths, [](const std::string_view path) {
+        event_relevant_ = std::ranges::any_of(changed_paths, [](const std::string_view path) {
             return path == "/event" || path.starts_with("/event/") || path == "/algorithm" ||
                    path.starts_with("/algorithm/") || path == "/plantIo" ||
                    path.starts_with("/plantIo/");
         });
-        if (relevant_)
+        storage_relevant_ =
+            std::ranges::find(changed_paths, "/storage/watermarks") != changed_paths.end();
+        if (event_relevant_ || storage_relevant_)
         {
             previous_ = current;
             candidate_ = candidate;
@@ -833,7 +835,7 @@ class EventConfigApplier final : public paperbreak::config::IConfigApplier
     [[nodiscard]] paperbreak::Result<void> apply_and_readback(
         const paperbreak::config::EdgeConfig&) override
     {
-        if (!relevant_)
+        if (!event_relevant_ && !storage_relevant_)
             return paperbreak::Result<void>::success();
         if (!candidate_)
         {
@@ -841,11 +843,19 @@ class EventConfigApplier final : public paperbreak::config::IConfigApplier
                 paperbreak::make_error("SYS_CONFIG_APPLY_FAILED", paperbreak::Severity::error,
                                        "事件配置没有完成预应用", "event", "event.config.apply"));
         }
-        auto runtime = runtime_->reconfigure(*candidate_);
-        if (!runtime)
-            return runtime;
-        return storage_policy_->set_retention_age(
-            std::chrono::days{candidate_->event.retention_days});
+        if (event_relevant_)
+        {
+            auto runtime = runtime_->reconfigure(*candidate_);
+            if (!runtime)
+                return runtime;
+            auto retention = storage_policy_->set_retention_age(
+                std::chrono::days{candidate_->event.retention_days});
+            if (!retention)
+                return retention;
+        }
+        if (storage_relevant_)
+            return apply_storage_limits(*candidate_);
+        return paperbreak::Result<void>::success();
     }
     [[nodiscard]] paperbreak::Result<void> commit(const paperbreak::config::EdgeConfig&) override
     {
@@ -856,30 +866,49 @@ class EventConfigApplier final : public paperbreak::config::IConfigApplier
         const paperbreak::config::EdgeConfig& previous) noexcept override
     {
         const auto rollback_configuration = previous_.value_or(previous);
-        auto result = relevant_ ? runtime_->reconfigure(rollback_configuration)
-                                : paperbreak::Result<void>::success();
-        if (relevant_)
+        auto result = event_relevant_ ? runtime_->reconfigure(rollback_configuration)
+                                      : paperbreak::Result<void>::success();
+        if (event_relevant_)
         {
             auto retention = storage_policy_->set_retention_age(
                 std::chrono::days{rollback_configuration.event.retention_days});
             if (result && !retention)
                 result = std::move(retention);
         }
+        if (storage_relevant_)
+        {
+            auto limits = apply_storage_limits(rollback_configuration);
+            if (result && !limits)
+                result = std::move(limits);
+        }
         reset();
         return result;
     }
 
   private:
+    paperbreak::Result<void> apply_storage_limits(
+        const paperbreak::config::EdgeConfig& configuration) const
+    {
+        constexpr std::uint64_t gibibyte = 1024ULL * 1024ULL * 1024ULL;
+        return storage_policy_->reconfigure_limits(
+            {.warning_available_bytes = configuration.storage.warning_free_space_gib * gibibyte,
+             .critical_available_bytes = configuration.storage.critical_free_space_gib * gibibyte,
+             .stop_save_available_bytes = configuration.storage.stop_free_space_gib * gibibyte},
+            configuration.storage.maximum_event_storage_gib * gibibyte);
+    }
+
     void reset() noexcept
     {
-        relevant_ = false;
+        event_relevant_ = false;
+        storage_relevant_ = false;
         previous_.reset();
         candidate_.reset();
     }
 
     std::shared_ptr<paperbreak::service::EventRuntime> runtime_;
     std::shared_ptr<paperbreak::storage::StoragePolicyManager> storage_policy_;
-    bool relevant_{};
+    bool event_relevant_{};
+    bool storage_relevant_{};
     std::optional<paperbreak::config::EdgeConfig> previous_;
     std::optional<paperbreak::config::EdgeConfig> candidate_;
 };

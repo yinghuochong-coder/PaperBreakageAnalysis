@@ -326,6 +326,27 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 响应仍保留 `saved=true`，同时返回 `applied=false` 和结构化 `applyError`，客户端不得把保存值显示为
 实际值。
 
+### 存储配置与实际生效值
+
+`storage.getConfig` 只允许已认证本机用户；`storage.updateConfig` 要求提升后的本机管理员，
+服务停止写入阶段拒绝更新。两项命令均不接受二进制负载。
+
+- `storage.getConfig`：payload 为空。返回完整保存配置 `storage`、实际生效配置
+  `effectiveStorage`、`storedConfigRevision`、`effectiveConfigRevision` 和
+  `pendingRestartPaths`。
+- `storage.updateConfig`：payload 必须且只能包含无符号 `expectedConfigRevision` 和完整
+  `storage` 对象。对象包含 `eventRoot`、`cacheRoot`、`rollingCacheEnabled`、
+  `maximumCacheStorageGiB`、`rollingCacheWriteLimitMiBps`、
+  `rollingCacheIoTimeoutMs`、`warningFreeSpaceGiB`、`criticalFreeSpaceGiB`、
+  `stopFreeSpaceGiB` 和 `maximumEventStorageGiB`，未知或缺失字段由 schema 拒绝。
+  服务复用配置仓储的乐观修订、审计、原子替换与失败回滚。根目录和四项 NVMe 参数进入
+  `pendingRestartPaths`，重启前 `effectiveStorage` 保留旧值；三项磁盘水位和事件容量上限
+  事务式热应用到运行时。响应同时返回 `applied`，客户端必须以 `effectiveStorage` 和
+  `pendingRestartPaths` 展示实际生效状态，不能把保存成功等同于已经应用。
+
+控制端存储页的实际水位、容量、NVMe 状态、队列、恢复、索引和租约数据继续来自有界
+`system.getMetrics` 快照；配置读取响应不重复或伪造运行指标。
+
 ### 算法配置、实际状态与当前图像测试
 
 `algorithm.getConfig` 要求已认证本机用户；`algorithm.updateConfig` 和
