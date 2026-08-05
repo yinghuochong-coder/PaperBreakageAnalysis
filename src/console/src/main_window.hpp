@@ -7,6 +7,7 @@
 #include "paperbreak/console/operations_client.hpp"
 #include "paperbreak/console/preview_client.hpp"
 #include "paperbreak/console/storage_client.hpp"
+#include "paperbreak/console/uplink_client.hpp"
 #include "theme_controller.hpp"
 
 #include <QMainWindow>
@@ -64,6 +65,7 @@ struct EventUiActions final
     std::function<Result<void>(std::string)> manual_trigger;
     std::function<Result<void>(std::string, std::uint64_t, bool)> review;
     std::function<Result<void>(std::string, std::filesystem::path)> export_event;
+    std::function<Result<void>(std::string)> retry_upload;
 };
 
 struct AlgorithmUiActions final
@@ -80,6 +82,12 @@ struct StorageUiActions final
     std::function<Result<void>(StorageConfigurationValue)> update_configuration;
 };
 
+struct UplinkUiActions final
+{
+    std::function<void()> refresh;
+    std::function<Result<void>(UplinkConfigurationValue)> update_configuration;
+};
+
 class MainWindow final : public QMainWindow
 {
   public:
@@ -88,7 +96,7 @@ class MainWindow final : public QMainWindow
                         OperationsUiActions operations_actions = {},
                         AlgorithmUiActions algorithm_actions = {},
                         EventUiActions event_actions = {}, StorageUiActions storage_actions = {},
-                        QWidget* parent = nullptr);
+                        UplinkUiActions uplink_actions = {}, QWidget* parent = nullptr);
 
     void apply_snapshot(const ClientStateSnapshot& snapshot);
     void update_clock();
@@ -98,6 +106,7 @@ class MainWindow final : public QMainWindow
     void apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapshot);
     void apply_event_snapshot(const EventClientSnapshot& snapshot);
     void apply_storage_snapshot(const StorageClientSnapshot& snapshot);
+    void apply_uplink_snapshot(const UplinkClientSnapshot& snapshot);
     void request_diagnostics_export();
 
     [[nodiscard]] std::size_t page_count() const noexcept;
@@ -111,6 +120,7 @@ class MainWindow final : public QMainWindow
     [[nodiscard]] bool algorithm_page_ready() const noexcept;
     [[nodiscard]] bool event_pages_ready() const noexcept;
     [[nodiscard]] bool storage_page_ready() const noexcept;
+    [[nodiscard]] bool uplink_page_ready() const noexcept;
 
   private:
     void closeEvent(QCloseEvent* event) override;
@@ -124,6 +134,7 @@ class MainWindow final : public QMainWindow
     void show_event_result(const Result<void>& result);
     void show_event_config_result(const Result<void>& result);
     void show_storage_result(const Result<void>& result);
+    void show_uplink_result(const Result<void>& result);
     void update_alarm_details();
 
     QLabel* connection_banner_{};
@@ -140,6 +151,14 @@ class MainWindow final : public QMainWindow
     QLabel* overview_disk_value_{};
     QLabel* recent_alarms_value_{};
     QLabel* overview_sync_value_{};
+    std::array<QLabel*, 4U> overview_camera_states_{};
+    std::array<QLabel*, 4U> overview_camera_fps_{};
+    std::array<QLabel*, 4U> overview_camera_brightness_{};
+    std::array<QLabel*, 4U> overview_camera_last_frames_{};
+    QLabel* overview_detector_value_{};
+    QLabel* overview_candidate_value_{};
+    QLabel* overview_uplink_value_{};
+    QLabel* overview_upload_value_{};
     std::array<QLabel*, 4U> preview_images_{};
     std::array<QLabel*, 4U> preview_overlays_{};
     QLabel* preview_status_{};
@@ -172,6 +191,7 @@ class MainWindow final : public QMainWindow
     AlgorithmUiActions algorithm_actions_;
     EventUiActions event_actions_;
     StorageUiActions storage_actions_;
+    UplinkUiActions uplink_actions_;
     CameraClientSnapshot camera_snapshot_;
     std::string camera_editor_id_;
     std::uint64_t camera_editor_revision_{};
@@ -261,6 +281,16 @@ class MainWindow final : public QMainWindow
     QPushButton* storage_save_{};
     QLabel* storage_status_{};
     QTableWidget* storage_metrics_{};
+    UplinkClientSnapshot uplink_snapshot_;
+    QCheckBox* uplink_enabled_{};
+    QLineEdit* uplink_server_url_{};
+    QSpinBox* uplink_heartbeat_seconds_{};
+    QSpinBox* uplink_chunk_kib_{};
+    QSpinBox* uplink_io_timeout_ms_{};
+    QSpinBox* uplink_upload_limit_mibps_{};
+    QWidget* uplink_editor_{};
+    QPushButton* uplink_save_{};
+    QLabel* uplink_status_{};
     QListWidget* navigation_{};
     QStackedWidget* pages_{};
     QComboBox* theme_selector_{};

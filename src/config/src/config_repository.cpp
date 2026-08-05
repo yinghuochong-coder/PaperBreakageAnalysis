@@ -49,11 +49,7 @@ void restore_restart_section(EdgeConfig& target, const EdgeConfig& effective,
         target.storage.rolling_cache_io_timeout_ms = effective.storage.rolling_cache_io_timeout_ms;
     }
     else if (path == "/uplink/transport")
-    {
-        target.uplink.server_url = effective.uplink.server_url;
-        target.uplink.credential_reference = effective.uplink.credential_reference;
-        target.uplink.certificate_reference = effective.uplink.certificate_reference;
-    }
+        target.uplink = effective.uplink;
     else if (path == "/plantIo")
         target.plant_io = effective.plant_io;
     else if (path == "/logging/runtime")

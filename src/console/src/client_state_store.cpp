@@ -462,7 +462,7 @@ void ClientStateStore::synchronize_metrics(const std::uint64_t generation)
     }
     auto request = client_->send_request(
         "system.getMetrics",
-        R"({"prefixes":["process.cpu.","system.memory.","disk.event."],"limit":64})", {},
+        R"({"prefixes":["process.cpu.","system.memory.","disk.event.","uplink."],"limit":64})", {},
         [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
             metrics_completed(std::move(handle), std::move(result));
         },

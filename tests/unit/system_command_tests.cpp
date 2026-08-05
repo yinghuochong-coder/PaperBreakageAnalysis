@@ -310,6 +310,55 @@ TEST(SystemCommand, ReadsAndUpdatesCompleteStorageConfigurationWithRestartSemant
     EXPECT_EQ(invalid.error().business_code, "SYS_CONFIG_INVALID");
 }
 
+TEST(SystemCommand, ReadsAndUpdatesCompleteUplinkConfigurationWithRestartSemantics)
+{
+    CommandFixture fixture;
+    auto read = fixture.commands.handle(fixture.request("uplink.getConfig"), reader, {});
+    ASSERT_TRUE(read) << read.error().message;
+    const Json initial = Json::parse(read.value().payload_json);
+    EXPECT_EQ(initial["storedConfigRevision"], 1U);
+    EXPECT_FALSE(initial["uplink"]["enabled"].get<bool>());
+    EXPECT_EQ(initial["uplink"]["chunkBytes"], 1048576U);
+
+    Json uplink = initial["uplink"];
+    uplink["enabled"] = true;
+    uplink["serverUrl"] = "http://192.0.2.20:18080";
+    uplink["heartbeatSeconds"] = 7U;
+    uplink["chunkBytes"] = 524288U;
+    uplink["ioTimeoutMs"] = 12000U;
+    uplink["uploadLimitMiBps"] = 40U;
+    auto denied = fixture.commands.handle(
+        fixture.request("uplink.updateConfig",
+                        Json{{"expectedConfigRevision", 1U}, {"uplink", uplink}}.dump()),
+        reader, {});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
+
+    auto updated = fixture.commands.handle(
+        fixture.request("uplink.updateConfig",
+                        Json{{"expectedConfigRevision", 1U}, {"uplink", uplink}}.dump()),
+        administrator, {});
+    ASSERT_TRUE(updated) << updated.error().message;
+    const Json result = Json::parse(updated.value().payload_json);
+    EXPECT_EQ(result["storedConfigRevision"], 2U);
+    EXPECT_EQ(result["effectiveConfigRevision"], 1U);
+    EXPECT_FALSE(result["applied"].get<bool>());
+    EXPECT_EQ(result["pendingRestartPaths"], Json::array({"/uplink/transport"}));
+    EXPECT_TRUE(result["uplink"]["enabled"].get<bool>());
+    EXPECT_FALSE(result["effectiveUplink"]["enabled"].get<bool>());
+
+    auto conflict = fixture.commands.handle(
+        fixture.request("uplink.updateConfig",
+                        Json{{"expectedConfigRevision", 1U}, {"uplink", uplink}}.dump()),
+        administrator, {});
+    ASSERT_FALSE(conflict);
+    EXPECT_EQ(conflict.error().business_code, "SYS_CONFIG_VERSION_CONFLICT");
+    auto invalid = fixture.commands.handle(fixture.request("uplink.getConfig", R"({"extra":true})"),
+                                           reader, {});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
+}
+
 TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
 {
     using namespace std::chrono_literals;

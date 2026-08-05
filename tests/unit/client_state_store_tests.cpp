@@ -7,6 +7,7 @@
 #include "paperbreak/console/preview_client.hpp"
 #include "paperbreak/console/storage_client.hpp"
 #include "paperbreak/console/tray_status_model.hpp"
+#include "paperbreak/console/uplink_client.hpp"
 #include "paperbreak/ipc/server.hpp"
 
 #include <QCoreApplication>
@@ -82,6 +83,10 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
         }
         if (request.command == "system.getMetrics")
         {
+            const auto query = nlohmann::json::parse(request.payload_json);
+            const auto prefixes = query.value("prefixes", std::vector<std::string>{});
+            uplink_prefix_requested.store(std::ranges::find(prefixes, "uplink.") != prefixes.end(),
+                                          std::memory_order_relaxed);
             const std::uint64_t request_number =
                 metrics_requests_.fetch_add(1U, std::memory_order_relaxed) + 1U;
             if (request_number <= malformed_metrics_responses_)
@@ -123,6 +128,9 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
     bool malformed_locations_{};
     std::atomic_uint64_t metrics_requests_{};
     std::atomic_uint64_t alarm_requests_{};
+
+  public:
+    std::atomic_bool uplink_prefix_requested{};
 };
 
 class CameraHandler final : public paperbreak::ipc::IRequestHandler
@@ -279,9 +287,16 @@ class EventClientHandler final : public paperbreak::ipc::IRequestHandler
                  .binary = {}});
         }
         if (request.command == "event.confirm" || request.command == "event.reject" ||
-            request.command == "event.manualTrigger")
+            request.command == "event.manualTrigger" || request.command == "event.retryUpload")
+        {
+            if (request.command == "event.retryUpload")
+            {
+                std::scoped_lock lock{mutex};
+                last_retry_payload = request.payload_json;
+            }
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json = R"({"accepted":true})", .binary = {}});
+        }
         if (request.command == "event.updateConfig")
         {
             {
@@ -303,6 +318,7 @@ class EventClientHandler final : public paperbreak::ipc::IRequestHandler
     std::mutex mutex;
     std::string last_list_payload;
     std::string last_update_payload;
+    std::string last_retry_payload;
     std::atomic_bool reject_config_update{};
     std::filesystem::path export_source;
 };
@@ -475,6 +491,54 @@ class StorageClientHandler final : public paperbreak::ipc::IRequestHandler
     std::atomic_bool reject_update{};
 };
 
+class UplinkClientHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage& request, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        const nlohmann::json uplink{
+            {"enabled", false},          {"serverUrl", "http://127.0.0.1:18080"},
+            {"heartbeatSeconds", 5U},    {"chunkBytes", 1048576U},
+            {"ioTimeoutMs", 10000U},     {"uploadLimitMiBps", 20U},
+            {"credentialReference", ""}, {"certificateReference", ""}};
+        if (request.command == "uplink.getConfig")
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = nlohmann::json{{"uplink", uplink},
+                                                {"effectiveUplink", uplink},
+                                                {"storedConfigRevision", 4U},
+                                                {"effectiveConfigRevision", 4U},
+                                                {"pendingRestartPaths", nlohmann::json::array()}}
+                                     .dump(),
+                 .binary = {}});
+        if (request.command == "uplink.updateConfig")
+        {
+            const auto payload = nlohmann::json::parse(request.payload_json);
+            {
+                std::scoped_lock lock{mutex};
+                last_update_payload = payload;
+            }
+            auto saved = payload.at("uplink");
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = nlohmann::json{{"uplink", saved},
+                                                {"effectiveUplink", uplink},
+                                                {"storedConfigRevision", 5U},
+                                                {"effectiveConfigRevision", 4U},
+                                                {"pendingRestartPaths",
+                                                 nlohmann::json::array({"/uplink/transport"})}}
+                                     .dump(),
+                 .binary = {}});
+        }
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+            paperbreak::make_error("IPC_REQUEST_INVALID", paperbreak::Severity::error, "unexpected",
+                                   "test", "uplinkClient.handle"));
+    }
+
+    std::mutex mutex;
+    nlohmann::json last_update_payload;
+};
+
 class PreviewSubscriptionHandler final : public paperbreak::ipc::IRequestHandler
 {
   public:
@@ -623,6 +687,7 @@ TEST(ClientStateStore, SynchronizesMarksStaleAndRefreshesAfterReconnect)
     EXPECT_DOUBLE_EQ(latest.metrics->event_disk_free_gib.value(), 512.25);
     EXPECT_EQ(latest.metrics->uplink_state.value(), "Connected");
     EXPECT_EQ(latest.metrics->pending_upload_tasks.value(), 3U);
+    EXPECT_TRUE(first_handler->uplink_prefix_requested.load(std::memory_order_relaxed));
     ASSERT_EQ(latest.alarms->recent.size(), 1U);
     EXPECT_EQ(latest.alarms->recent.front().message, "事件盘空间偏低");
     EXPECT_EQ(latest.alarms->highest_severity, "Warning");
@@ -986,6 +1051,61 @@ TEST(StorageClient, SynchronizesCompleteConfigurationAndPreservesRestartReadback
     stop_server(server);
 }
 
+TEST(UplinkClient, SynchronizesCompleteConfigurationAndPreservesRestartReadback)
+{
+    const std::string name = state_name();
+    auto handler = std::make_shared<UplinkClientHandler>();
+    paperbreak::ipc::IpcServer server(handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name));
+    ASSERT_TRUE(server.start());
+
+    paperbreak::console::UplinkClientSnapshot latest;
+    paperbreak::console::UplinkClient client([&](const auto& snapshot) { latest = snapshot; },
+                                             client_options(name));
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until([&] { return !latest.stale; }));
+    EXPECT_EQ(latest.stored_config_revision, 4U);
+    EXPECT_EQ(latest.configuration.server_url, "http://127.0.0.1:18080");
+    EXPECT_EQ(latest.configuration.chunk_bytes, 1048576U);
+    EXPECT_EQ(latest.configuration, latest.effective_configuration);
+
+    auto changed = latest.configuration;
+    changed.enabled = true;
+    changed.server_url = "http://192.0.2.30:18080";
+    changed.heartbeat_seconds = 9U;
+    changed.chunk_bytes = 524288U;
+    changed.io_timeout_ms = 15000U;
+    changed.upload_limit_mibps = 50U;
+    ASSERT_TRUE(client.update_configuration(changed));
+    auto busy = client.update_configuration(changed);
+    ASSERT_FALSE(busy);
+    EXPECT_EQ(busy.error().business_code, "IPC_BUSY");
+    ASSERT_TRUE(wait_until([&] { return !latest.operation_pending; }));
+    {
+        std::scoped_lock lock{handler->mutex};
+        ASSERT_TRUE(handler->last_update_payload.is_object());
+        EXPECT_EQ(handler->last_update_payload["expectedConfigRevision"], 4U);
+        const auto& uplink = handler->last_update_payload["uplink"];
+        EXPECT_EQ(uplink.size(), 8U);
+        EXPECT_TRUE(uplink["enabled"].get<bool>());
+        EXPECT_EQ(uplink["serverUrl"], "http://192.0.2.30:18080");
+        EXPECT_EQ(uplink["chunkBytes"], 524288U);
+        EXPECT_EQ(uplink["uploadLimitMiBps"], 50U);
+    }
+    EXPECT_EQ(latest.stored_config_revision, 5U);
+    EXPECT_EQ(latest.effective_config_revision, 4U);
+    EXPECT_TRUE(latest.configuration.enabled);
+    EXPECT_FALSE(latest.effective_configuration.enabled);
+    EXPECT_EQ(latest.pending_restart_paths, std::vector<std::string>({"/uplink/transport"}));
+
+    client.stop();
+    EXPECT_TRUE(latest.stale);
+    auto disconnected = client.update_configuration(changed);
+    ASSERT_FALSE(disconnected);
+    EXPECT_EQ(disconnected.error().business_code, "IPC_NOT_CONNECTED");
+    stop_server(server);
+}
+
 TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
 {
     const std::string name = state_name();
@@ -1137,6 +1257,16 @@ TEST(EventClient, QueriesDetailsReviewsAndExportsVerifiedArchive)
     ASSERT_FALSE(busy);
     EXPECT_EQ(busy.error().business_code, "IPC_BUSY");
     ASSERT_TRUE(wait_until([&] { return !latest.operation_pending; }));
+
+    ASSERT_TRUE(client.retry_upload("event-1"));
+    ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{handler->mutex};
+        return !latest.operation_pending && !handler->last_retry_payload.empty();
+    }));
+    {
+        std::scoped_lock lock{handler->mutex};
+        EXPECT_EQ(nlohmann::json::parse(handler->last_retry_payload)["eventId"], "event-1");
+    }
 
     static std::atomic_uint64_t file_sequence{};
     const auto base =

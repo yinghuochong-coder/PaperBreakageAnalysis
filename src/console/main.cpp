@@ -6,6 +6,7 @@
 #include "paperbreak/console/navigation_model.hpp"
 #include "paperbreak/console/operations_client.hpp"
 #include "paperbreak/console/preview_client.hpp"
+#include "paperbreak/console/uplink_client.hpp"
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/service/windows/scm.hpp"
 #include "src/main_window.hpp"
@@ -98,6 +99,7 @@ int main(int argc, char* argv[])
     std::unique_ptr<paperbreak::console::AlgorithmClient> algorithm_client;
     std::unique_ptr<paperbreak::console::EventClient> event_client;
     std::unique_ptr<paperbreak::console::StorageClient> storage_client;
+    std::unique_ptr<paperbreak::console::UplinkClient> uplink_client;
     paperbreak::console::MainWindow main_window(
         [&preview_client](const bool paused) {
             if (preview_client)
@@ -271,6 +273,14 @@ int main(int argc, char* argv[])
                  return paperbreak::Result<void>::failure(paperbreak::make_error(
                      "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "事件客户端尚未初始化",
                      "console", "console.event.export", true));
+             },
+         .retry_upload =
+             [&event_client](std::string event_id) {
+                 if (event_client)
+                     return event_client->retry_upload(std::move(event_id));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "事件客户端尚未初始化",
+                     "console", "console.event.retryUpload", true));
              }},
         {.refresh =
              [&storage_client] {
@@ -284,6 +294,19 @@ int main(int argc, char* argv[])
                  return paperbreak::Result<void>::failure(paperbreak::make_error(
                      "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "存储客户端尚未初始化",
                      "console", "console.storage.updateConfig", true));
+             }},
+        {.refresh =
+             [&uplink_client] {
+                 if (uplink_client)
+                     uplink_client->refresh();
+             },
+         .update_configuration =
+             [&uplink_client](paperbreak::console::UplinkConfigurationValue value) {
+                 if (uplink_client)
+                     return uplink_client->update_configuration(std::move(value));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "上位机客户端尚未初始化",
+                     "console", "console.uplink.updateConfig", true));
              }});
     preview_client = std::make_unique<paperbreak::console::PreviewClient>(
         [&main_window](const paperbreak::console::PreviewSnapshot& snapshot) {
@@ -316,6 +339,10 @@ int main(int argc, char* argv[])
         storage_client = std::make_unique<paperbreak::console::StorageClient>(
             [&main_window](const paperbreak::console::StorageClientSnapshot& snapshot) {
                 main_window.apply_storage_snapshot(snapshot);
+            });
+        uplink_client = std::make_unique<paperbreak::console::UplinkClient>(
+            [&main_window](const paperbreak::console::UplinkClientSnapshot& snapshot) {
+                main_window.apply_uplink_snapshot(snapshot);
             });
     }
     paperbreak::console::ClientStateSnapshot latest_snapshot;
@@ -444,6 +471,8 @@ int main(int argc, char* argv[])
         static_cast<void>(event_client->start());
     if (!smoke_test)
         static_cast<void>(storage_client->start());
+    if (!smoke_test)
+        static_cast<void>(uplink_client->start());
 
     bool smoke_ok = true;
     if (smoke_test)
@@ -527,6 +556,14 @@ int main(int argc, char* argv[])
         storage_smoke.configuration.cache_root = "data/cache";
         storage_smoke.effective_configuration = storage_smoke.configuration;
         main_window.apply_storage_snapshot(storage_smoke);
+        paperbreak::console::UplinkClientSnapshot uplink_smoke;
+        uplink_smoke.connection.state = paperbreak::ipc::ClientConnectionState::connected;
+        uplink_smoke.stale = false;
+        uplink_smoke.stored_config_revision = 1U;
+        uplink_smoke.effective_config_revision = 1U;
+        uplink_smoke.configuration.server_url = "http://127.0.0.1:18080";
+        uplink_smoke.effective_configuration = uplink_smoke.configuration;
+        main_window.apply_uplink_snapshot(uplink_smoke);
         paperbreak::console::AlgorithmClientSnapshot algorithm_smoke;
         algorithm_smoke.connection.state = paperbreak::ipc::ClientConnectionState::connected;
         algorithm_smoke.stale = false;
@@ -593,9 +630,9 @@ int main(int argc, char* argv[])
                    main_window.camera_configuration_ready() && empty_configuration_kept_discovery &&
                    restart_state_disabled_controls && main_window.operations_pages_ready() &&
                    main_window.algorithm_page_ready() && main_window.event_pages_ready() &&
-                   main_window.storage_page_ready() && event_configuration_editable &&
-                   local_time_displayed && diagnostic_enabled_when_connected &&
-                   diagnostic_disabled_when_disconnected &&
+                   main_window.storage_page_ready() && main_window.uplink_page_ready() &&
+                   event_configuration_editable && local_time_displayed &&
+                   diagnostic_enabled_when_connected && diagnostic_disabled_when_disconnected &&
                    theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
                    selected_light && selected_dark && dark_theme_persisted && selected_system &&
                    main_window.select_page(11U) && main_window.select_page(0U);
@@ -642,6 +679,10 @@ int main(int argc, char* argv[])
         if (storage_client)
             storage_client->refresh();
     });
+    QObject::connect(&refresh_timer, &QTimer::timeout, [&uplink_client] {
+        if (uplink_client)
+            uplink_client->refresh();
+    });
     QTimer clock_timer;
     QObject::connect(&clock_timer, &QTimer::timeout, &main_window,
                      [&main_window] { main_window.update_clock(); });
@@ -675,6 +716,16 @@ int main(int argc, char* argv[])
     {
         event_client->stop();
         event_client.reset();
+    }
+    if (storage_client)
+    {
+        storage_client->stop();
+        storage_client.reset();
+    }
+    if (uplink_client)
+    {
+        uplink_client->stop();
+        uplink_client.reset();
     }
     if (restart_task.joinable())
     {

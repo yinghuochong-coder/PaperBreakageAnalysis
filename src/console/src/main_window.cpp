@@ -126,14 +126,15 @@ QWidget* make_status_item(QWidget* parent, const QString& title, QLabel*& value)
     return item;
 }
 
-QGroupBox* make_camera_card(QWidget* parent, const QString& camera_id)
+QGroupBox* make_camera_card(QWidget* parent, const QString& camera_id, QLabel*& state, QLabel*& fps,
+                            QLabel*& brightness, QLabel*& last_frame)
 {
     QGroupBox* card = make_child<QGroupBox>(parent, camera_id);
     card->setProperty("role", "cameraCard");
     auto* layout = make_layout<QGridLayout>(card);
     layout->setContentsMargins(14, 18, 14, 14);
     const std::array<std::pair<QString, QString>, 4> rows{
-        std::pair{QStringLiteral("连接状态"), QStringLiteral("待 M4-05 接入")},
+        std::pair{QStringLiteral("连接状态"), QStringLiteral("正在同步")},
         std::pair{QStringLiteral("实际帧率"), QStringLiteral("—")},
         std::pair{QStringLiteral("图像亮度"), QStringLiteral("—")},
         std::pair{QStringLiteral("最近一帧"), QStringLiteral("—")},
@@ -146,6 +147,8 @@ QGroupBox* make_camera_card(QWidget* parent, const QString& camera_id)
         value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         layout->addWidget(name, row, 0);
         layout->addWidget(value, row, 1);
+        const std::array<QLabel**, 4U> outputs{&state, &fps, &brightness, &last_frame};
+        *outputs[static_cast<std::size_t>(row)] = value;
     }
     return card;
 }
@@ -294,24 +297,24 @@ QString placeholder_message(const ConsolePageId id)
     switch (id)
     {
     case ConsolePageId::preview:
-        return QStringLiteral("导航骨架已建立。预览订阅与单路/四宫格显示将在 M4-03、M4-04 接入。");
+        return QStringLiteral("预览状态正在同步。");
     case ConsolePageId::camera_configuration:
-        return QStringLiteral("导航骨架已建立。相机查询、配置与实际值回显将在 M4-05 接入。");
+        return QStringLiteral("相机配置正在同步。");
     case ConsolePageId::algorithm_configuration:
-        return QStringLiteral("导航骨架已建立。正式算法配置将在 M6 接入。");
+        return QStringLiteral("算法配置正在同步。");
     case ConsolePageId::event_configuration:
-        return QStringLiteral("导航骨架已建立。事件链与事件配置将在 M5 接入。");
+        return QStringLiteral("事件配置正在同步。");
     case ConsolePageId::storage_configuration:
         return QStringLiteral("存储配置正在从后台服务同步。");
     case ConsolePageId::uplink_configuration:
-        return QStringLiteral("导航骨架已建立。上位机连接与上传配置将在 M8 接入。");
+        return QStringLiteral("上位机配置正在同步。");
     case ConsolePageId::device_status:
     case ConsolePageId::alarms:
     case ConsolePageId::logs:
     case ConsolePageId::maintenance:
-        return QStringLiteral("导航骨架已建立。完整状态、报警、日志与诊断功能将在 M4-06 接入。");
+        return QStringLiteral("运维状态正在同步。");
     case ConsolePageId::events:
-        return QStringLiteral("导航骨架已建立。事件查询与复核将在 M5 接入。");
+        return QStringLiteral("事件记录正在同步。");
     case ConsolePageId::overview:
         break;
     }
@@ -324,12 +327,12 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                        CameraUiActions camera_actions, ThemeUiActions theme_actions,
                        OperationsUiActions operations_actions, AlgorithmUiActions algorithm_actions,
                        EventUiActions event_actions, StorageUiActions storage_actions,
-                       QWidget* parent)
+                       UplinkUiActions uplink_actions, QWidget* parent)
     : QMainWindow(parent), preview_pause_changed_(std::move(preview_pause_changed)),
       camera_actions_(std::move(camera_actions)), theme_actions_(std::move(theme_actions)),
       operations_actions_(std::move(operations_actions)),
       algorithm_actions_(std::move(algorithm_actions)), event_actions_(std::move(event_actions)),
-      storage_actions_(std::move(storage_actions))
+      storage_actions_(std::move(storage_actions)), uplink_actions_(std::move(uplink_actions))
 {
     setObjectName(QStringLiteral("main-window"));
     setWindowTitle(QStringLiteral("PaperBreakEdge 断纸分析控制台"));
@@ -432,7 +435,11 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
     for (int index = 0; index < 4; ++index)
     {
         camera_grid->addWidget(
-            make_camera_card(cameras, QStringLiteral("CAM%1").arg(index + 1, 2, 10, QChar{'0'})),
+            make_camera_card(cameras, QStringLiteral("CAM%1").arg(index + 1, 2, 10, QChar{'0'}),
+                             overview_camera_states_[static_cast<std::size_t>(index)],
+                             overview_camera_fps_[static_cast<std::size_t>(index)],
+                             overview_camera_brightness_[static_cast<std::size_t>(index)],
+                             overview_camera_last_frames_[static_cast<std::size_t>(index)]),
             index / 2, index % 2);
     }
     overview_layout->addWidget(cameras);
@@ -456,15 +463,18 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
 
     QGroupBox* detection = make_child<QGroupBox>(summary, QStringLiteral("检测状态"));
     auto* detection_layout = make_layout<QVBoxLayout>(detection);
-    detection_layout->addWidget(
-        make_child<QLabel>(detection, QStringLiteral("正式检测器：待 M6 接入")));
-    detection_layout->addWidget(make_child<QLabel>(detection, QStringLiteral("当前候选事件：—")));
+    overview_detector_value_ = make_child<QLabel>(detection, QStringLiteral("检测器：正在同步"));
+    overview_candidate_value_ =
+        make_child<QLabel>(detection, QStringLiteral("累计候选事件：正在同步"));
+    detection_layout->addWidget(overview_detector_value_);
+    detection_layout->addWidget(overview_candidate_value_);
 
     QGroupBox* upload = make_child<QGroupBox>(summary, QStringLiteral("上位机与上传"));
     auto* upload_layout = make_layout<QVBoxLayout>(upload);
-    upload_layout->addWidget(make_child<QLabel>(upload, QStringLiteral("上位机连接：待 M8 接入")));
-    upload_layout->addWidget(
-        make_child<QLabel>(upload, QStringLiteral("待上传事件：待 M5/M8 接入")));
+    overview_uplink_value_ = make_child<QLabel>(upload, QStringLiteral("上位机连接：正在同步"));
+    overview_upload_value_ = make_child<QLabel>(upload, QStringLiteral("待上传任务：正在同步"));
+    upload_layout->addWidget(overview_uplink_value_);
+    upload_layout->addWidget(overview_upload_value_);
 
     summary_layout->addWidget(resources, 1);
     summary_layout->addWidget(detection, 1);
@@ -981,6 +991,87 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             pages_->addWidget(page);
             continue;
         }
+        if (descriptor.id == ConsolePageId::uplink_configuration)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-uplink-configuration"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            layout->setSpacing(12);
+            auto* heading = make_child<QLabel>(page, QStringLiteral("上位机连接与上传传输"));
+            heading->setProperty("role", "pageTitle");
+            layout->addWidget(heading);
+            auto* notice = make_child<QLabel>(
+                page, QStringLiteral(
+                          "Uplink v1 使用隔离 VLAN 内的明文 HTTP/WebSocket，不提供 TLS 或应用鉴权。"
+                          "本页参数保存后需要重启后台服务，正在运行的连接不会被即时替换。"));
+            notice->setObjectName(QStringLiteral("uplink-restart-notice"));
+            notice->setWordWrap(true);
+            notice->setProperty("role", "warning");
+            layout->addWidget(notice);
+
+            uplink_editor_ = make_child<QWidget>(page);
+            uplink_editor_->setObjectName(QStringLiteral("uplink-editor"));
+            auto* form = make_layout<QFormLayout>(uplink_editor_);
+            uplink_enabled_ = make_child<QCheckBox>(uplink_editor_, QStringLiteral("启用 Uplink"));
+            uplink_enabled_->setObjectName(QStringLiteral("uplink-enabled"));
+            uplink_server_url_ = make_child<QLineEdit>(uplink_editor_);
+            uplink_server_url_->setObjectName(QStringLiteral("uplink-server-url"));
+            uplink_server_url_->setMaxLength(2048);
+            uplink_server_url_->setPlaceholderText(QStringLiteral("http://192.0.2.10:18080"));
+            uplink_heartbeat_seconds_ = make_child<QSpinBox>(uplink_editor_);
+            uplink_heartbeat_seconds_->setRange(1, 3600);
+            uplink_chunk_kib_ = make_child<QSpinBox>(uplink_editor_);
+            uplink_chunk_kib_->setRange(64, 4096);
+            uplink_io_timeout_ms_ = make_child<QSpinBox>(uplink_editor_);
+            uplink_io_timeout_ms_->setRange(100, 60000);
+            uplink_upload_limit_mibps_ = make_child<QSpinBox>(uplink_editor_);
+            uplink_upload_limit_mibps_->setRange(1, 1024);
+            form->addRow(QStringLiteral("运行状态（需重启）"), uplink_enabled_);
+            form->addRow(QStringLiteral("上位机 HTTP 基址（需重启）"), uplink_server_url_);
+            form->addRow(QStringLiteral("心跳间隔 (s，需重启)"), uplink_heartbeat_seconds_);
+            form->addRow(QStringLiteral("上传分块 (KiB，需重启)"), uplink_chunk_kib_);
+            form->addRow(QStringLiteral("网络 I/O 截止 (ms，需重启)"), uplink_io_timeout_ms_);
+            form->addRow(QStringLiteral("上传限速 (MiB/s，需重启)"), uplink_upload_limit_mibps_);
+            uplink_editor_->setEnabled(false);
+            layout->addWidget(uplink_editor_);
+
+            uplink_save_ = make_child<QPushButton>(page, QStringLiteral("保存上位机配置"));
+            uplink_save_->setObjectName(QStringLiteral("uplink-config-save"));
+            uplink_save_->setEnabled(false);
+            QObject::connect(uplink_save_, &QPushButton::clicked, this, [this] {
+                if (!uplink_actions_.update_configuration)
+                    return;
+                const QString url = uplink_server_url_->text().trimmed();
+                if (uplink_enabled_->isChecked() && !url.startsWith(QStringLiteral("http://")))
+                {
+                    QMessageBox::warning(this, QStringLiteral("上位机地址无效"),
+                                         QStringLiteral("启用 Uplink 时基址必须以 http:// 开头。"));
+                    return;
+                }
+                show_uplink_result(uplink_actions_.update_configuration(
+                    {.enabled = uplink_enabled_->isChecked(),
+                     .server_url = url.toStdString(),
+                     .heartbeat_seconds =
+                         static_cast<std::uint32_t>(uplink_heartbeat_seconds_->value()),
+                     .chunk_bytes = static_cast<std::uint32_t>(uplink_chunk_kib_->value()) * 1024U,
+                     .io_timeout_ms = static_cast<std::uint32_t>(uplink_io_timeout_ms_->value()),
+                     .upload_limit_mibps =
+                         static_cast<std::uint32_t>(uplink_upload_limit_mibps_->value()),
+                     .credential_reference = uplink_snapshot_.configuration.credential_reference,
+                     .certificate_reference =
+                         uplink_snapshot_.configuration.certificate_reference}));
+            });
+            layout->addWidget(uplink_save_);
+            uplink_status_ = make_child<QLabel>(page, QStringLiteral("正在读取上位机配置"));
+            uplink_status_->setObjectName(QStringLiteral("uplink-config-status"));
+            uplink_status_->setWordWrap(true);
+            uplink_status_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            layout->addWidget(uplink_status_);
+            layout->addStretch(1);
+            pages_->addWidget(page);
+            continue;
+        }
         if (descriptor.id == ConsolePageId::storage_configuration)
         {
             QWidget* page = make_child<QWidget>(pages_);
@@ -1219,7 +1310,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                 make_child<QPushButton>(actions, QStringLiteral("打开事件目录"));
             event_retry_upload_ = make_child<QPushButton>(actions, QStringLiteral("重试上传"));
             event_retry_upload_->setEnabled(false);
-            event_retry_upload_->setToolTip(QStringLiteral("上传队列将在 M8 接入，当前不可用"));
+            event_retry_upload_->setToolTip(
+                QStringLiteral("将所选事件的既有上传任务恢复为待处理，不创建重复任务"));
             const auto review = [this](const bool confirmed) {
                 if (event_actions_.review && event_snapshot_.detail)
                     show_event_result(event_actions_.review(
@@ -1248,6 +1340,11 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                         QDesktopServices::openUrl(QUrl::fromLocalFile(QString::fromStdWString(
                             event_snapshot_.detail->committed_directory.wstring()))));
             });
+            QObject::connect(event_retry_upload_, &QPushButton::clicked, this, [this] {
+                if (event_actions_.retry_upload && event_snapshot_.detail)
+                    show_event_result(
+                        event_actions_.retry_upload(event_snapshot_.detail->event.event_id));
+            });
             action_layout->addWidget(event_confirm_);
             action_layout->addWidget(event_reject_);
             action_layout->addWidget(event_export_);
@@ -1271,8 +1368,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             heading->setProperty("role", "pageTitle");
             layout->addWidget(heading);
             auto* hint = make_child<QLabel>(
-                page,
-                QStringLiteral("指标来自后台服务有界快照；尚未实现的 M5/M6/M8 来源显示为不可用。"));
+                page, QStringLiteral(
+                          "指标来自后台服务有界快照；未初始化或设备不支持的来源显示为不可用。"));
             hint->setProperty("role", "muted");
             hint->setWordWrap(true);
             layout->addWidget(hint);
@@ -1607,6 +1704,16 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
         selected_serial = QString::fromStdString(
             camera_snapshot_.discovered_devices[discovered_devices_->currentRow()].serial);
     camera_snapshot_ = snapshot;
+    for (std::size_t index = 0; index < overview_camera_states_.size(); ++index)
+    {
+        const std::string id = "CAM0" + std::to_string(index + 1U);
+        const auto found = std::ranges::find_if(
+            snapshot.cameras, [&id](const auto& camera) { return camera.id == id; });
+        const QString state = found == snapshot.cameras.end()
+                                  ? QStringLiteral("未配置")
+                                  : QString::fromStdString(found->state);
+        overview_camera_states_[index]->setText(stale_value(state, snapshot.stale));
+    }
     if (!camera_configuration_value_ || !camera_selector_ || !discovered_devices_)
         return;
 
@@ -1882,6 +1989,14 @@ void MainWindow::show_storage_result(const Result<void>& result)
                                           QString::fromStdString(result.error().business_code)));
 }
 
+void MainWindow::show_uplink_result(const Result<void>& result)
+{
+    if (!result && uplink_status_)
+        uplink_status_->setText(QStringLiteral("保存失败：%1（%2）")
+                                    .arg(QString::fromStdString(result.error().message),
+                                         QString::fromStdString(result.error().business_code)));
+}
+
 void MainWindow::request_diagnostics_export()
 {
     if (!operations_actions_.export_diagnostics)
@@ -1953,6 +2068,32 @@ void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
                        stale_value(metric.available ? QStringLiteral("可用")
                                                     : QStringLiteral("未初始化/不可用"),
                                    snapshot.metrics_stale));
+    }
+    for (std::size_t camera = 0; camera < overview_camera_fps_.size(); ++camera)
+    {
+        const std::string prefix = "camera.CAM0" + std::to_string(camera + 1U) + '.';
+        const auto find_metric = [&](const std::string_view suffix) {
+            return std::ranges::find_if(snapshot.metrics, [&](const auto& metric) {
+                return metric.name == prefix + std::string{suffix};
+            });
+        };
+        const auto fps = find_metric("actual_fps");
+        const auto brightness = find_metric("brightness");
+        const auto last_frame = find_metric("last_frame_epoch_ms");
+        overview_camera_fps_[camera]->setText(
+            fps != snapshot.metrics.end() && fps->available
+                ? stale_value(QStringLiteral("%1 fps").arg(QString::fromStdString(fps->value)),
+                              snapshot.metrics_stale)
+                : QStringLiteral("不可用"));
+        overview_camera_brightness_[camera]->setText(
+            brightness != snapshot.metrics.end() && brightness->available
+                ? stale_value(QString::fromStdString(brightness->value), snapshot.metrics_stale)
+                : QStringLiteral("不可用"));
+        overview_camera_last_frames_[camera]->setText(
+            last_frame != snapshot.metrics.end() && last_frame->available
+                ? stale_value(local_epoch_milliseconds_text(last_frame->value),
+                              snapshot.metrics_stale)
+                : QStringLiteral("不可用"));
     }
     metrics_table_->resizeColumnsToContents();
 
@@ -2055,6 +2196,26 @@ void MainWindow::apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapsho
         algorithm_snapshot_.stored_config_revision != snapshot.stored_config_revision ||
         algorithm_snapshot_.stale;
     algorithm_snapshot_ = snapshot;
+    if (overview_detector_value_ && overview_candidate_value_)
+    {
+        if (snapshot.stale)
+        {
+            overview_detector_value_->setText(QStringLiteral("检测器：不可用（已过期）"));
+            overview_candidate_value_->setText(QStringLiteral("累计候选事件：不可用（已过期）"));
+        }
+        else
+        {
+            const QString detector = snapshot.runtime.display_name.empty()
+                                         ? QString::fromStdString(snapshot.runtime.state)
+                                         : QString::fromStdString(snapshot.runtime.display_name);
+            overview_detector_value_->setText(
+                QStringLiteral("检测器：%1 · %2")
+                    .arg(detector, QString::fromStdString(snapshot.runtime.state)));
+            overview_candidate_value_->setText(QStringLiteral("累计候选事件：%1 · 已确认 %2")
+                                                   .arg(snapshot.runtime.metrics.candidates_created)
+                                                   .arg(snapshot.runtime.metrics.confirmed_events));
+        }
+    }
     if (!algorithm_editor_ || !algorithm_runtime_status_ || !algorithm_metrics_)
         return;
 
@@ -2330,6 +2491,56 @@ void MainWindow::apply_storage_snapshot(const StorageClientSnapshot& snapshot)
     }
 }
 
+void MainWindow::apply_uplink_snapshot(const UplinkClientSnapshot& snapshot)
+{
+    const bool configuration_changed =
+        uplink_snapshot_.stored_config_revision != snapshot.stored_config_revision ||
+        uplink_snapshot_.stale;
+    uplink_snapshot_ = snapshot;
+    if (!uplink_editor_ || !uplink_status_ || !uplink_save_)
+        return;
+    if (configuration_changed && !snapshot.stale)
+    {
+        const auto& value = snapshot.configuration;
+        uplink_enabled_->setChecked(value.enabled);
+        uplink_server_url_->setText(QString::fromStdString(value.server_url));
+        uplink_heartbeat_seconds_->setValue(static_cast<int>(value.heartbeat_seconds));
+        uplink_chunk_kib_->setValue(static_cast<int>(value.chunk_bytes / 1024U));
+        uplink_io_timeout_ms_->setValue(static_cast<int>(value.io_timeout_ms));
+        uplink_upload_limit_mibps_->setValue(static_cast<int>(value.upload_limit_mibps));
+    }
+    const bool editable = snapshot.connection.state == ipc::ClientConnectionState::connected &&
+                          !snapshot.stale && !snapshot.operation_pending;
+    uplink_editor_->setEnabled(editable);
+    uplink_save_->setEnabled(editable);
+    if (snapshot.operation_pending)
+        uplink_status_->setText(QStringLiteral("正在保存上位机配置"));
+    else if (snapshot.error)
+        uplink_status_->setText(QStringLiteral("上位机配置失败：%1（%2）")
+                                    .arg(QString::fromStdString(snapshot.error->message),
+                                         QString::fromStdString(snapshot.error->business_code)));
+    else if (snapshot.stale)
+        uplink_status_->setText(QStringLiteral("上位机配置尚未从后台服务同步，旧值不可用于保存"));
+    else
+    {
+        const bool restart_required =
+            std::ranges::find(snapshot.pending_restart_paths, "/uplink/transport") !=
+            snapshot.pending_restart_paths.end();
+        uplink_status_->setText(
+            QStringLiteral("保存配置修订 %1；当前有效修订 %2。%3\n"
+                           "实际运行配置：%4；上位机 %5；分块 %6 KiB；限速 %7 MiB/s")
+                .arg(snapshot.stored_config_revision)
+                .arg(snapshot.effective_config_revision)
+                .arg(restart_required ? QStringLiteral("保存值需重启后台服务后生效")
+                                      : QStringLiteral("保存值与当前有效配置一致"),
+                     snapshot.effective_configuration.enabled ? QStringLiteral("已启用")
+                                                              : QStringLiteral("未启用"),
+                     QString::fromStdString(snapshot.effective_configuration.server_url))
+                .arg(snapshot.effective_configuration.chunk_bytes / 1024U)
+                .arg(snapshot.effective_configuration.upload_limit_mibps));
+    }
+}
+
 void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
 {
     const bool configuration_changed =
@@ -2374,7 +2585,7 @@ void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
         event_config_status_->setText(QStringLiteral("事件配置尚未从后台服务同步，暂不能保存"));
     else
         event_config_status_->setText(
-            QStringLiteral("配置版本 %1；预览视频当前%2；上传运行时将在 M8 接入")
+            QStringLiteral("配置版本 %1；预览视频当前%2；上传策略由持久化上传队列执行")
                 .arg(snapshot.stored_config_revision)
                 .arg(snapshot.preview_video_generation_available ? QStringLiteral("可用")
                                                                  : QStringLiteral("不可用")));
@@ -2432,7 +2643,9 @@ void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
     event_reject_->setEnabled(candidate);
     event_export_->setEnabled(has_detail && !snapshot.operation_pending);
     event_open_directory_->setEnabled(has_detail && !snapshot.operation_pending);
-    event_retry_upload_->setEnabled(false);
+    event_retry_upload_->setEnabled(has_detail && !snapshot.operation_pending &&
+                                    snapshot.connection.state ==
+                                        ipc::ClientConnectionState::connected);
     if (snapshot.operation_pending)
         event_status_->setText(
             QStringLiteral("正在执行 %1").arg(QString::fromStdString(snapshot.operation)));
@@ -2475,10 +2688,22 @@ void MainWindow::apply_snapshot(const ClientStateSnapshot& snapshot)
         if (snapshot.metrics->pending_upload_tasks)
             uplink += QStringLiteral(" · 待传 %1").arg(*snapshot.metrics->pending_upload_tasks);
         uplink_value_->setText(stale_value(uplink, snapshot.metrics_stale));
+        overview_uplink_value_->setText(
+            stale_value(QStringLiteral("上位机连接：%1")
+                            .arg(QString::fromStdString(*snapshot.metrics->uplink_state)),
+                        snapshot.metrics_stale));
+        overview_upload_value_->setText(
+            snapshot.metrics->pending_upload_tasks
+                ? stale_value(
+                      QStringLiteral("待上传任务：%1").arg(*snapshot.metrics->pending_upload_tasks),
+                      snapshot.metrics_stale)
+                : QStringLiteral("待上传任务：不可用"));
     }
     else
     {
         uplink_value_->setText(QStringLiteral("未启用/不可用"));
+        overview_uplink_value_->setText(QStringLiteral("上位机连接：未启用/不可用"));
+        overview_upload_value_->setText(QStringLiteral("待上传任务：不可用"));
     }
     if (camera_snapshot_.stale)
         camera_count_value_->setText(QStringLiteral("不可用（已过期）"));
@@ -2645,7 +2870,7 @@ bool MainWindow::event_pages_ready() const noexcept
            event_upload_policy_ && event_filter_start_ && event_filter_end_ &&
            event_filter_state_ && event_filter_camera_ && event_table_ && event_thumbnail_ &&
            event_manifest_ && event_confirm_ && event_reject_ && event_export_ &&
-           event_open_directory_ && event_retry_upload_ && !event_retry_upload_->isEnabled();
+           event_open_directory_ && event_retry_upload_;
 }
 
 bool MainWindow::storage_page_ready() const noexcept
@@ -2657,6 +2882,14 @@ bool MainWindow::storage_page_ready() const noexcept
            storage_save_ && storage_status_ && storage_metrics_ &&
            has_readable_table_header(storage_metrics_) &&
            findChild<QLabel*>(QStringLiteral("storage-restart-notice"));
+}
+
+bool MainWindow::uplink_page_ready() const noexcept
+{
+    return uplink_editor_ && uplink_enabled_ && uplink_server_url_ && uplink_heartbeat_seconds_ &&
+           uplink_chunk_kib_ && uplink_io_timeout_ms_ && uplink_upload_limit_mibps_ &&
+           uplink_save_ && uplink_status_ &&
+           findChild<QLabel*>(QStringLiteral("uplink-restart-notice"));
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

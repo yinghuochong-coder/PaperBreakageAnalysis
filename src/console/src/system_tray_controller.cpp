@@ -49,7 +49,7 @@ SystemTrayController::SystemTrayController(TrayCallbacks callbacks)
     auto double_click_open = callbacks.open_console;
     auto* open_action = menu_.addAction(QStringLiteral("打开控制台"));
     status_action_ = menu_.addAction(QStringLiteral("显示当前状态：正在同步"));
-    preview_action_ = menu_.addAction(QStringLiteral("暂停/恢复预览（待 M4-03）"));
+    preview_action_ = menu_.addAction(QStringLiteral("请在实时预览页暂停/恢复"));
     restart_action_ = menu_.addAction(QStringLiteral("重启后台服务"));
     event_directory_action_ = menu_.addAction(QStringLiteral("打开事件目录"));
     diagnostics_action_ = menu_.addAction(QStringLiteral("导出脱敏诊断包"));

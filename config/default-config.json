@@ -21,7 +21,7 @@
       "offsetY": 0,
       "width": 1
     },
-    "type": "mock"
+    "type": "classical-vision"
   },
   "cameras": [
     {
@@ -46,7 +46,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 13,
+  "configRevision": 18,
   "configSchemaVersion": 2,
   "event": {
     "generatePreviewVideo": true,
@@ -74,7 +74,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-05T02:24:02.534Z",
+  "modifiedAt": "2026-08-05T09:00:14.813Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",
@@ -92,10 +92,10 @@
   "storage": {
     "cacheRoot": "data/cache",
     "criticalFreeSpaceGiB": 60,
-    "eventRoot": "data/事件 数据",
-    "maximumCacheStorageGiB": 1000,
+    "eventRoot": "data/event_root",
+    "maximumCacheStorageGiB": 1,
     "maximumEventStorageGiB": 1000,
-    "rollingCacheEnabled": false,
+    "rollingCacheEnabled": true,
     "rollingCacheIoTimeoutMs": 10000,
     "rollingCacheWriteLimitMiBps": 600,
     "stopFreeSpaceGiB": 20,
@@ -110,10 +110,10 @@
     "certificateReference": "",
     "chunkBytes": 1048576,
     "credentialReference": "",
-    "enabled": false,
+    "enabled": true,
     "heartbeatSeconds": 5,
     "ioTimeoutMs": 10000,
-    "uploadLimitMiBps": 20,
-    "serverUrl": ""
+    "serverUrl": "http://192.168.11.102:18080",
+    "uploadLimitMiBps": 800
   }
 }

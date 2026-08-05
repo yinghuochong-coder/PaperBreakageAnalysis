@@ -351,6 +351,18 @@ Json storage_config_json(const config::StorageConfig& value)
             {"maximumEventStorageGiB", value.maximum_event_storage_gib}};
 }
 
+Json uplink_config_json(const config::UplinkConfig& value)
+{
+    return {{"enabled", value.enabled},
+            {"serverUrl", value.server_url},
+            {"heartbeatSeconds", value.heartbeat_seconds},
+            {"chunkBytes", value.chunk_bytes},
+            {"ioTimeoutMs", value.io_timeout_ms},
+            {"uploadLimitMiBps", value.upload_limit_mibps},
+            {"credentialReference", value.credential_reference},
+            {"certificateReference", value.certificate_reference}};
+}
+
 Json algorithm_config_json(const config::AlgorithmConfig& value)
 {
     return {{"enabled", value.enabled},
@@ -1506,6 +1518,80 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
     if (!payload)
     {
         return Result<ipc::CommandResponse>::failure(payload.error());
+    }
+
+    if (request.command.starts_with("uplink."))
+    {
+        if (!peer.local || !peer.authenticated)
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_UNAUTHORIZED", Severity::error,
+                              "上位机配置读取只允许已认证本机用户", "ipc.uplink.dispatch"));
+        const bool write_command = request.command == "uplink.updateConfig";
+        if (write_command && !peer.administrator)
+            return Result<ipc::CommandResponse>::failure(
+                command_error("IPC_UNAUTHORIZED", Severity::error,
+                              "上位机配置修改要求提升后的本机管理员身份", "ipc.uplink.dispatch"));
+        if (write_command && stop_token.stop_requested())
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_SERVICE_STOPPING", Severity::warning,
+                              "服务正在停止，拒绝上位机配置修改", "ipc.uplink.dispatch", true));
+
+        if (request.command == "uplink.getConfig")
+        {
+            if (!payload.value().empty())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "uplink.getConfig payload 必须为空", "ipc.uplink.getConfig"));
+            auto snapshot = repository_.snapshot();
+            if (!snapshot)
+                return Result<ipc::CommandResponse>::failure(snapshot.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{{"uplink", uplink_config_json(snapshot.value().stored->uplink)},
+                          {"effectiveUplink",
+                           uplink_config_json(snapshot.value().effective->uplink)},
+                          {"storedConfigRevision", snapshot.value().stored_config_revision},
+                          {"effectiveConfigRevision", snapshot.value().effective_config_revision},
+                          {"pendingRestartPaths", snapshot.value().pending_restart_paths}}
+                         .dump(),
+                 .binary = {}});
+        }
+        if (request.command == "uplink.updateConfig")
+        {
+            if (!has_only_fields(payload.value(), {"expectedConfigRevision", "uplink"}) ||
+                !payload.value().contains("expectedConfigRevision") ||
+                !payload.value()["expectedConfigRevision"].is_number_unsigned() ||
+                !payload.value().contains("uplink") || !payload.value()["uplink"].is_object())
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error,
+                    "uplink.updateConfig 需要 expectedConfigRevision 和完整 uplink 对象",
+                    "ipc.uplink.updateConfig"));
+            auto current = repository_.snapshot();
+            if (!current)
+                return Result<ipc::CommandResponse>::failure(current.error());
+            Json document = Json::parse(config::serialize_config(*current.value().stored));
+            document["uplink"] = payload.value()["uplink"];
+            auto updated = repository_.update(
+                document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
+                {.source = config_source,
+                 .actor = peer.actor_sid,
+                 .correlation_id = request.request_id});
+            if (!updated)
+                return Result<ipc::CommandResponse>::failure(updated.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{
+                         {"uplink", uplink_config_json(updated.value().stored->uplink)},
+                         {"effectiveUplink", uplink_config_json(updated.value().effective->uplink)},
+                         {"storedConfigRevision", updated.value().stored_config_revision},
+                         {"effectiveConfigRevision", updated.value().effective_config_revision},
+                         {"applied", updated.value().pending_restart_paths.empty()},
+                         {"pendingRestartPaths", updated.value().pending_restart_paths}}
+                         .dump(),
+                 .binary = {}});
+        }
+        return Result<ipc::CommandResponse>::failure(command_error(
+            "IPC_COMMAND_UNKNOWN", Severity::error, "未知 uplink 命令", "ipc.uplink.dispatch"));
     }
 
     if (request.command.starts_with("storage."))

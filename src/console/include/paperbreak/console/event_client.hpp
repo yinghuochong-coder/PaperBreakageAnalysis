@@ -104,6 +104,7 @@ class EventClient final
                                       bool confirmed);
     [[nodiscard]] Result<void> export_event(std::string event_id,
                                             std::filesystem::path destination);
+    [[nodiscard]] Result<void> retry_upload(std::string event_id);
     [[nodiscard]] const EventClientSnapshot& snapshot() const noexcept;
 
   private:

@@ -378,6 +378,11 @@ Result<void> EventClient::export_event(std::string event_id, std::filesystem::pa
                           std::move(destination));
 }
 
+Result<void> EventClient::retry_upload(std::string event_id)
+{
+    return send_operation("event.retryUpload", Json{{"eventId", std::move(event_id)}}.dump());
+}
+
 Result<void> EventClient::send_operation(std::string command, std::string payload_json,
                                          std::filesystem::path destination)
 {
