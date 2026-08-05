@@ -9,7 +9,7 @@
   "algorithm": { "enabled": false, "type": "mock", "roi": { "width": 1, "height": 1, "offsetX": 0, "offsetY": 0 }, "candidateThreshold": 0.6, "confirmationThreshold": 0.8, "consecutiveFrames": 3, "cooldownMs": 1000, "modelReference": "", "modelVersion": "", "device": "cpu", "debugOverlay": false },
   "event": { "preEventSeconds": 10, "postEventSeconds": 10, "maxEventSeconds": 60, "mergeGapSeconds": 3, "keyFrameCount": 7, "saveRaw": true, "generatePreviewVideo": false, "uploadPolicy": "confirmed", "retentionDays": 30 },
   "storage": { "eventRoot": "数据/事件 文件", "cacheRoot": "data/cache", "rollingCacheEnabled": false, "maximumCacheStorageGiB": 1000, "rollingCacheWriteLimitMiBps": 600, "rollingCacheIoTimeoutMs": 10000, "warningFreeSpaceGiB": 200, "criticalFreeSpaceGiB": 100, "stopFreeSpaceGiB": 20, "maximumEventStorageGiB": 1000 },
-  "uplink": { "enabled": false, "serverUrl": "", "heartbeatSeconds": 5, "credentialReference": "", "certificateReference": "" },
+  "uplink": { "enabled": false, "serverUrl": "", "heartbeatSeconds": 5, "chunkBytes": 1048576, "ioTimeoutMs": 10000, "uploadLimitMiBps": 20, "credentialReference": "", "certificateReference": "" },
   "plantIo": { "enabled": false, "adapterType": "disabled", "endpoint": "", "credentialReference": "", "pollIntervalMs": 1000 },
   "logging": { "level": "info", "directory": "data/logs", "retentionDays": 30, "maximumFileSizeMiB": 10, "maximumFilesPerDay": 5, "queueCapacity": 8192 },
   "health": { "sampleIntervalMs": 1000, "cpuWarningPercent": 85.0, "memoryWarningPercent": 85.0, "droppedFrameWarningRatio": 0.01, "heartbeatStaleSeconds": 30 }

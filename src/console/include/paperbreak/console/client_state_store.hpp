@@ -35,6 +35,8 @@ struct SystemMetricsSummary final
     std::optional<double> process_cpu_percent;
     std::optional<double> system_memory_used_percent;
     std::optional<double> event_disk_free_gib;
+    std::optional<std::string> uplink_state;
+    std::optional<std::uint64_t> pending_upload_tasks;
     std::uint64_t generation{};
 };
 

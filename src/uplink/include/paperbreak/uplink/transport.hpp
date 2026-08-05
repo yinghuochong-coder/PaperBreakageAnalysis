@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
+#include <stop_token>
 #include <string>
 
 namespace paperbreak::uplink
@@ -39,6 +41,7 @@ struct TransportAcknowledgement final
     std::string correlation_id;
     std::string acknowledged_at;
     std::uint32_t delivery_count{1U};
+    std::string checkpoint_json{"{}"};
 };
 
 struct EventMetadataRequest final
@@ -55,6 +58,9 @@ struct UploadFileRequest final
     std::string machine_id;
     UploadCreateRequest description;
     std::string source_path;
+    std::optional<EventMetadataRequest> event_metadata;
+    std::string checkpoint_json{"{}"};
+    std::stop_token stop_token;
 };
 
 using CommandHandler = std::function<void(const MessageEnvelope& command)>;

@@ -18,6 +18,9 @@
 #include "paperbreak/storage/metadata_database.hpp"
 #include "paperbreak/storage/nvme_cache.hpp"
 #include "paperbreak/storage/storage_policy.hpp"
+#include "paperbreak/uplink/qt_transport.hpp"
+#include "paperbreak/uplink/runtime.hpp"
+#include "paperbreak/uplink/upload_scheduler.hpp"
 
 #include <QCoreApplication>
 
@@ -29,6 +32,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -472,6 +476,61 @@ class EventLifecycleComponent final : public paperbreak::service::ILifecycleComp
 
   private:
     std::shared_ptr<paperbreak::service::EventRuntime> runtime_;
+};
+
+class UplinkLifecycleComponent final : public paperbreak::service::ILifecycleComponent
+{
+  public:
+    UplinkLifecycleComponent(
+        std::shared_ptr<paperbreak::uplink::UplinkRuntime> runtime,
+        std::shared_ptr<paperbreak::uplink::PersistentUploadScheduler> scheduler)
+        : runtime_(std::move(runtime)), scheduler_(std::move(scheduler))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "uplink";
+    }
+
+    [[nodiscard]] paperbreak::service::ShutdownPhase shutdown_phase() const noexcept override
+    {
+        return paperbreak::service::ShutdownPhase::uplink;
+    }
+
+    [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
+    {
+        auto runtime = runtime_->start();
+        if (!runtime)
+            return runtime;
+        auto scheduler = scheduler_->start();
+        if (!scheduler)
+        {
+            runtime_->request_stop();
+            static_cast<void>(
+                runtime_->join(std::chrono::steady_clock::now() + std::chrono::seconds{5}));
+        }
+        return scheduler;
+    }
+
+    [[nodiscard]] paperbreak::Result<void> request_stop(paperbreak::service::StopReason) override
+    {
+        scheduler_->request_stop();
+        runtime_->request_stop();
+        return paperbreak::Result<void>::success();
+    }
+
+    [[nodiscard]] paperbreak::Result<void> join(
+        const std::chrono::steady_clock::time_point deadline) override
+    {
+        auto scheduler = scheduler_->join(deadline);
+        auto runtime = runtime_->join(deadline);
+        return scheduler ? runtime : scheduler;
+    }
+
+  private:
+    std::shared_ptr<paperbreak::uplink::UplinkRuntime> runtime_;
+    std::shared_ptr<paperbreak::uplink::PersistentUploadScheduler> scheduler_;
 };
 
 class NvmeLifecycleComponent final : public paperbreak::service::ILifecycleComponent
@@ -1016,8 +1075,11 @@ class EventMetricSource final : public paperbreak::monitoring::IMetricSource
   public:
     EventMetricSource(std::weak_ptr<paperbreak::service::EventRuntime> runtime,
                       std::weak_ptr<paperbreak::storage::StoragePolicyManager> storage,
-                      std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme)
-        : runtime_(std::move(runtime)), storage_(std::move(storage)), nvme_(std::move(nvme))
+                      std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme,
+                      std::weak_ptr<paperbreak::uplink::UplinkRuntime> uplink,
+                      std::weak_ptr<paperbreak::storage::EventMetadataDatabase> database)
+        : runtime_(std::move(runtime)), storage_(std::move(storage)), nvme_(std::move(nvme)),
+          uplink_(std::move(uplink)), database_(std::move(database))
     {
     }
 
@@ -1038,6 +1100,16 @@ class EventMetricSource final : public paperbreak::monitoring::IMetricSource
         const auto nvme = nvme_.lock();
         const auto cache =
             nvme ? nvme->snapshot() : paperbreak::storage::NvmeRollingCacheSnapshot{};
+        const auto uplink = uplink_.lock();
+        const auto uplink_state =
+            uplink ? uplink->snapshot() : paperbreak::uplink::UplinkRuntimeSnapshot{};
+        const auto database = database_.lock();
+        auto upload_queue =
+            database
+                ? database->upload_queue_stats()
+                : paperbreak::Result<paperbreak::storage::UploadQueueStats>::failure(
+                      paperbreak::make_error("DATABASE_NOT_READY", paperbreak::Severity::warning,
+                                             "上传数据库未初始化", "uplink", "uplink.metrics"));
         return paperbreak::Result<std::vector<Point>>::success(
             {{.name = "system.nvme_write_bytes_per_second",
               .value = cache.write_bytes_per_second,
@@ -1104,13 +1176,15 @@ class EventMetricSource final : public paperbreak::monitoring::IMetricSource
               .unit = "count",
               .available = nvme != nullptr},
              {.name = "uplink.state",
-              .value = std::string{"not-initialized"},
+              .value = uplink ? std::string{paperbreak::uplink::uplink_runtime_state_name(
+                                    uplink_state.state)}
+                              : std::string{"not-initialized"},
               .unit = "state",
-              .available = false},
-             {.name = "uplink.last_heartbeat_epoch_ms",
-              .value = std::uint64_t{0U},
-              .unit = "unix_milliseconds",
-              .available = false},
+              .available = uplink != nullptr},
+             {.name = "uplink.last_heartbeat",
+              .value = uplink_state.last_heartbeat_at,
+              .unit = "rfc3339",
+              .available = uplink != nullptr && !uplink_state.last_heartbeat_at.empty()},
              {.name = "event.current_count",
               .value = events.events_committed,
               .unit = "count",
@@ -1132,15 +1206,22 @@ class EventMetricSource final : public paperbreak::monitoring::IMetricSource
               .unit = "state",
               .available = storage != nullptr},
              {.name = "uplink.pending_upload_tasks",
-              .value = std::uint64_t{0U},
+              .value = upload_queue ? static_cast<std::uint64_t>(upload_queue.value().active_jobs)
+                                    : std::uint64_t{0U},
               .unit = "count",
-              .available = false}});
+              .available = uplink != nullptr && static_cast<bool>(upload_queue)},
+             {.name = "uplink.pending_upload_bytes",
+              .value = upload_queue ? upload_queue.value().active_bytes : std::uint64_t{0U},
+              .unit = "bytes",
+              .available = uplink != nullptr && static_cast<bool>(upload_queue)}});
     }
 
   private:
     std::weak_ptr<paperbreak::service::EventRuntime> runtime_;
     std::weak_ptr<paperbreak::storage::StoragePolicyManager> storage_;
     std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme_;
+    std::weak_ptr<paperbreak::uplink::UplinkRuntime> uplink_;
+    std::weak_ptr<paperbreak::storage::EventMetadataDatabase> database_;
 };
 
 class CameraMetricSource final : public paperbreak::monitoring::IMetricSource
@@ -1439,6 +1520,128 @@ void print_error(const paperbreak::Error& error)
     std::cerr << '\n';
 }
 
+std::string portable_relative_path(const std::filesystem::path& path)
+{
+    const auto value = path.generic_u8string();
+    return {reinterpret_cast<const char*>(value.data()), value.size()};
+}
+
+paperbreak::Result<std::string> read_upload_manifest(const std::filesystem::path& path)
+{
+    constexpr std::uintmax_t maximum_manifest_bytes = 8U * 1024U * 1024U;
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error || size == 0U || size > maximum_manifest_bytes)
+        return paperbreak::Result<std::string>::failure(paperbreak::make_error(
+            "UPLOAD_SOURCE_MISSING", paperbreak::Severity::error,
+            "事件 manifest 不存在或超过上传上限", "uplink", "uplink.enqueue.manifest"));
+    std::ifstream stream{path, std::ios::binary};
+    std::string contents(static_cast<std::size_t>(size), '\0');
+    if (!stream || !stream.read(contents.data(), static_cast<std::streamsize>(contents.size())))
+        return paperbreak::Result<std::string>::failure(
+            paperbreak::make_error("UPLOAD_SOURCE_MISSING", paperbreak::Severity::error,
+                                   "无法读取事件 manifest", "uplink", "uplink.enqueue.manifest"));
+    return paperbreak::Result<std::string>::success(std::move(contents));
+}
+
+paperbreak::Result<void> enqueue_committed_event_uploads(
+    paperbreak::uplink::PersistentUploadScheduler& scheduler,
+    const paperbreak::storage::EventMetadataRecord& record, const std::filesystem::path& event_root,
+    const std::string_view machine_id, const std::string_view upload_policy)
+{
+    if (upload_policy == "never" ||
+        (upload_policy == "confirmed" && record.event_state != "Confirmed"))
+        return paperbreak::Result<void>::success();
+    auto manifest = read_upload_manifest(event_root / record.relative_directory / "manifest.json");
+    if (!manifest)
+        return paperbreak::Result<void>::failure(manifest.error());
+    auto document = nlohmann::json::parse(manifest.value(), nullptr, false);
+    if (!document.is_object() || !document.contains("fileSizes") ||
+        !document.at("fileSizes").is_object() || !document.contains("fileChecksums") ||
+        !document.at("fileChecksums").is_object())
+        return paperbreak::Result<void>::failure(paperbreak::make_error(
+            "UPLOAD_JOB_INVALID", paperbreak::Severity::error,
+            "事件 manifest 缺少文件大小或校验对象", "uplink", "uplink.enqueue.manifest"));
+    const std::string event_json = nlohmann::json{
+        {"state", record.event_state},
+        {"candidateTimeUtcMs", record.candidate_time_utc_ms},
+        {"confirmedTimeUtcMs", record.confirmed_time_utc_ms},
+        {"cameraIds", record.camera_ids},
+        {"triggerCameraId", record.trigger_camera_id},
+        {"triggerFrameNumber", record.trigger_frame_number},
+        {"triggerReason", record.trigger_reason},
+        {"confidence",
+         record.confidence}}.dump();
+    const auto created_at = std::max<std::int64_t>(0, record.candidate_time_utc_ms);
+    const std::string key_prefix = std::string{machine_id} + ":" + record.event_id + ":";
+    auto alarm = scheduler.enqueue({.idempotency_key = key_prefix + "alarm",
+                                    .event_id = record.event_id,
+                                    .kind = paperbreak::storage::UploadJobKind::alarm_metadata,
+                                    .logical_id = "alarm",
+                                    .payload_json = event_json,
+                                    .upload_bytes = std::max<std::uint64_t>(1U, event_json.size()),
+                                    .created_at_utc_ms = created_at});
+    if (!alarm)
+        return paperbreak::Result<void>::failure(alarm.error());
+
+    const auto manifest_path = record.relative_directory / "manifest.json";
+    auto manifest_job = scheduler.enqueue({.idempotency_key = key_prefix + "manifest",
+                                           .event_id = record.event_id,
+                                           .kind = paperbreak::storage::UploadJobKind::manifest,
+                                           .logical_id = "manifest",
+                                           .relative_path = portable_relative_path(manifest_path),
+                                           .payload_json = event_json,
+                                           .upload_bytes = manifest.value().size(),
+                                           .created_at_utc_ms = created_at});
+    if (!manifest_job)
+        return paperbreak::Result<void>::failure(manifest_job.error());
+
+    std::uint32_t key_frame_index = 0U;
+    std::uint32_t replay_index = 0U;
+    std::uint32_t raw_index = 0U;
+    for (const auto& [relative_text, size_value] : document.at("fileSizes").items())
+    {
+        if (!size_value.is_number_unsigned() ||
+            !document.at("fileChecksums").contains(relative_text) ||
+            !document.at("fileChecksums").at(relative_text).is_string())
+            return paperbreak::Result<void>::failure(paperbreak::make_error(
+                "UPLOAD_JOB_INVALID", paperbreak::Severity::error, "事件 manifest 文件上传字段无效",
+                "uplink", "uplink.enqueue.files"));
+        const std::filesystem::path relative = path_from_utf8(relative_text);
+        const bool key_frame = relative_text.starts_with("keyframes/");
+        const bool replay = relative.extension() == ".mp4";
+        auto kind = paperbreak::storage::UploadJobKind::raw_file;
+        std::string logical_id;
+        if (key_frame)
+        {
+            kind = paperbreak::storage::UploadJobKind::key_frame;
+            logical_id = "keyframe-" + std::to_string(key_frame_index++);
+        }
+        else if (replay)
+        {
+            kind = paperbreak::storage::UploadJobKind::low_rate_replay;
+            logical_id = "replay-" + std::to_string(replay_index++);
+        }
+        else
+        {
+            logical_id = "raw-" + std::to_string(raw_index++);
+        }
+        auto queued = scheduler.enqueue(
+            {.idempotency_key = key_prefix + logical_id,
+             .event_id = record.event_id,
+             .kind = kind,
+             .logical_id = logical_id,
+             .relative_path = portable_relative_path(record.relative_directory / relative),
+             .payload_json = event_json,
+             .checksum = document.at("fileChecksums").at(relative_text).get<std::string>(),
+             .upload_bytes = size_value.get<std::uint64_t>(),
+             .created_at_utc_ms = created_at});
+        if (!queued)
+            return paperbreak::Result<void>::failure(queued.error());
+    }
+    return paperbreak::Result<void>::success();
+}
+
 paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>
 create_hosted_service(const std::filesystem::path& config_path, const bool validate_config)
 {
@@ -1600,37 +1803,144 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         }
         nvme_cache = std::move(cache_result).value();
     }
+    std::shared_ptr<paperbreak::uplink::IUplinkTransport> uplink_transport;
+    std::shared_ptr<paperbreak::uplink::PersistentUploadScheduler> upload_scheduler;
+    if (loaded.value().effective->uplink.enabled)
+    {
+        auto transport_result = paperbreak::uplink::QtUplinkTransport::create(
+            {.server_url = loaded.value().effective->uplink.server_url,
+             .io_timeout =
+                 std::chrono::milliseconds{loaded.value().effective->uplink.io_timeout_ms},
+             .chunk_bytes = loaded.value().effective->uplink.chunk_bytes,
+             .upload_limit_bytes_per_second =
+                 loaded.value().effective->uplink.upload_limit_mibps * 1024ULL * 1024ULL});
+        if (!transport_result)
+        {
+            static_cast<void>(logging->shutdown());
+            return paperbreak::
+                Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(
+                    transport_result.error());
+        }
+        uplink_transport = std::shared_ptr<paperbreak::uplink::IUplinkTransport>{
+            std::move(transport_result).value()};
+        auto executor = paperbreak::uplink::make_chunked_upload_executor(
+            uplink_transport, {.event_root = event_root,
+                               .machine_id = loaded.value().effective->system.machine_id,
+                               .chunk_bytes = loaded.value().effective->uplink.chunk_bytes});
+        if (!executor)
+        {
+            static_cast<void>(logging->shutdown());
+            return paperbreak::
+                Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(
+                    executor.error());
+        }
+        auto scheduler_result = paperbreak::uplink::PersistentUploadScheduler::create(
+            event_database, {}, std::move(executor).value());
+        if (!scheduler_result)
+        {
+            static_cast<void>(logging->shutdown());
+            return paperbreak::
+                Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(
+                    scheduler_result.error());
+        }
+        upload_scheduler = std::shared_ptr<paperbreak::uplink::PersistentUploadScheduler>{
+            std::move(scheduler_result).value()};
+        std::size_t offset = 0U;
+        while (true)
+        {
+            auto page = event_database->query_events({.offset = offset, .limit = 200U});
+            if (!page)
+            {
+                static_cast<void>(logging->shutdown());
+                return paperbreak::
+                    Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(
+                        page.error());
+            }
+            for (const auto& event : page.value().events)
+            {
+                if (event.storage_state != "Present")
+                    continue;
+                auto queued =
+                    enqueue_committed_event_uploads(*upload_scheduler, event, event_root,
+                                                    loaded.value().effective->system.machine_id,
+                                                    loaded.value().effective->event.upload_policy);
+                if (!queued)
+                {
+                    static_cast<void>(logging->shutdown());
+                    return paperbreak::Result<std::unique_ptr<
+                        paperbreak::service::windows::IHostedService>>::failure(queued.error());
+                }
+            }
+            offset += page.value().events.size();
+            if (offset >= page.value().total || page.value().events.empty())
+                break;
+        }
+    }
+    const std::weak_ptr<paperbreak::uplink::PersistentUploadScheduler> weak_upload_scheduler =
+        upload_scheduler;
+    const auto enqueue_event_for_upload =
+        [weak_upload_scheduler, event_root,
+         machine_id = loaded.value().effective->system.machine_id, configuration, weak_event_alarms,
+         weak_event_logging](const paperbreak::storage::EventMetadataRecord& event) {
+            const auto scheduler = weak_upload_scheduler.lock();
+            if (!scheduler || event.storage_state != "Present")
+                return;
+            auto snapshot = configuration->repository.snapshot();
+            auto queued = snapshot ? enqueue_committed_event_uploads(
+                                         *scheduler, event, event_root, machine_id,
+                                         snapshot.value().effective->event.upload_policy)
+                                   : paperbreak::Result<void>::failure(snapshot.error());
+            if (queued)
+                return;
+            if (auto alarm_registry = weak_event_alarms.lock())
+            {
+                static_cast<void>(alarm_registry->raise_alarm({.code = queued.error().business_code,
+                                                               .severity = queued.error().severity,
+                                                               .source = "uplink",
+                                                               .message = queued.error().message,
+                                                               .details = queued.error().details}));
+            }
+            if (auto log_runtime = weak_event_logging.lock())
+            {
+                static_cast<void>(log_runtime->log(
+                    paperbreak::logging::Category::uplink, paperbreak::logging::Level::error,
+                    queued.error().business_code + ": " + queued.error().message));
+            }
+        };
     auto event_runtime_result = paperbreak::service::EventRuntime::create(
         {.configuration = *loaded.value().effective,
          .event_root = event_root,
          .database = event_database,
          .storage_policy = storage_policy,
          .nvme_cache = nvme_cache,
-         .error_observer = [weak_event_alarms, weak_event_logging](const paperbreak::Error& error) {
-             const bool algorithm_error = error.business_code.starts_with("ALGORITHM_");
-             const bool algorithm_alarm = error.business_code == "ALGORITHM_QUEUE_BACKLOG" ||
-                                          error.business_code == "ALGORITHM_DEGRADED";
-             if (auto alarm_registry = weak_event_alarms.lock();
-                 (!algorithm_error || algorithm_alarm) && alarm_registry)
-             {
-                 static_cast<void>(alarm_registry->raise_alarm(
-                     {.code = error.business_code,
-                      .severity = error.severity,
-                      .source = error.source_id.value_or(algorithm_error ? "algorithm" : "event"),
-                      .message = error.message,
-                      .details = error.details}));
-             }
-             if (auto log_runtime = weak_event_logging.lock())
-             {
-                 static_cast<void>(log_runtime->log(algorithm_error
-                                                        ? paperbreak::logging::Category::algorithm
-                                                        : paperbreak::logging::Category::event,
-                                                    error.severity == paperbreak::Severity::critical
-                                                        ? paperbreak::logging::Level::critical
-                                                        : paperbreak::logging::Level::error,
-                                                    error.business_code + ": " + error.message));
-             }
-         }});
+         .error_observer =
+             [weak_event_alarms, weak_event_logging](const paperbreak::Error& error) {
+                 const bool algorithm_error = error.business_code.starts_with("ALGORITHM_");
+                 const bool algorithm_alarm = error.business_code == "ALGORITHM_QUEUE_BACKLOG" ||
+                                              error.business_code == "ALGORITHM_DEGRADED";
+                 if (auto alarm_registry = weak_event_alarms.lock();
+                     (!algorithm_error || algorithm_alarm) && alarm_registry)
+                 {
+                     static_cast<void>(alarm_registry->raise_alarm(
+                         {.code = error.business_code,
+                          .severity = error.severity,
+                          .source =
+                              error.source_id.value_or(algorithm_error ? "algorithm" : "event"),
+                          .message = error.message,
+                          .details = error.details}));
+                 }
+                 if (auto log_runtime = weak_event_logging.lock())
+                 {
+                     static_cast<void>(
+                         log_runtime->log(algorithm_error ? paperbreak::logging::Category::algorithm
+                                                          : paperbreak::logging::Category::event,
+                                          error.severity == paperbreak::Severity::critical
+                                              ? paperbreak::logging::Level::critical
+                                              : paperbreak::logging::Level::error,
+                                          error.business_code + ": " + error.message));
+                 }
+             },
+         .committed_observer = enqueue_event_for_upload});
     if (!event_runtime_result)
     {
         static_cast<void>(logging->shutdown());
@@ -1688,7 +1998,52 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         delivery_options);
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
         configuration->repository, status, metrics, alarms, logging, config_path.parent_path(),
-        preview, cameras, event_runtime, event_database, event_inspector);
+        preview, cameras, event_runtime, event_database, event_inspector, enqueue_event_for_upload);
+    std::shared_ptr<paperbreak::uplink::UplinkRuntime> uplink_runtime;
+    if (uplink_transport && upload_scheduler)
+    {
+        const auto machine_id = loaded.value().effective->system.machine_id;
+        const auto production_line_id = loaded.value().effective->system.production_line_id;
+        paperbreak::uplink::UplinkRuntimeConfig runtime_config{
+            .session_hello = {
+                .request_id = "session-" + machine_id,
+                .machine_id = machine_id,
+                .production_line_id = production_line_id,
+                .software_version = std::string{paperbreak::version_info().application_version},
+                .supported_protocol_versions = {paperbreak::uplink::protocol_version},
+                .capabilities = {"system.requestStatus", "config.replace", "event.review",
+                                 "event.retryUpload", "camera.discover", "camera.bind",
+                                 "camera.connect", "camera.disconnect", "camera.start",
+                                 "camera.stop", "camera.updateConfig", "camera.captureSnapshot",
+                                 "camera.softwareTrigger"}}};
+        auto runtime_result = paperbreak::uplink::UplinkRuntime::create(
+            uplink_transport, std::move(runtime_config),
+            [status, event_database] {
+                const auto service = status->snapshot();
+                auto uploads = event_database->upload_queue_stats();
+                if (!uploads)
+                    return paperbreak::Result<std::string>::failure(uploads.error());
+                return paperbreak::Result<std::string>::success(nlohmann::json{
+                    {"serviceState", paperbreak::service::service_state_name(service.state)},
+                    {"acceptingWrites", service.accepting_writes},
+                    {"pendingUploadJobs", uploads.value().active_jobs},
+                    {"pendingUploadBytes",
+                     uploads.value().active_bytes}}.dump());
+            },
+            [commands](const paperbreak::uplink::RemoteCommand& command,
+                       const std::stop_token stop_token) {
+                return commands->handle_uplink_command(command, stop_token);
+            });
+        if (!runtime_result)
+        {
+            static_cast<void>(logging->shutdown());
+            return paperbreak::
+                Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(
+                    runtime_result.error());
+        }
+        uplink_runtime =
+            std::shared_ptr<paperbreak::uplink::UplinkRuntime>{std::move(runtime_result).value()};
+    }
     auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(commands);
     if (preview_publisher)
         preview_publisher->set_server(ipc_server);
@@ -1711,7 +2066,8 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         paperbreak::platform::make_windows_system_metric_source(std::move(disk_paths)),
         std::make_shared<IpcMetricSource>(ipc_server),
         std::make_shared<DatabaseMetricSource>(event_database),
-        std::make_shared<EventMetricSource>(event_runtime, storage_policy, nvme_cache),
+        std::make_shared<EventMetricSource>(event_runtime, storage_policy, nvme_cache,
+                                            uplink_runtime, event_database),
         std::make_shared<CameraMetricSource>(configuration, cameras),
         std::make_shared<AlgorithmMetricSource>(event_runtime)};
     for (const auto& source : sources)
@@ -1785,6 +2141,9 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     components.push_back(
         std::make_unique<StorageMaintenanceLifecycleComponent>(storage_policy, alarms, nvme_cache));
     components.push_back(std::make_unique<IpcLifecycleComponent>(ipc_server));
+    if (uplink_runtime && upload_scheduler)
+        components.push_back(
+            std::make_unique<UplinkLifecycleComponent>(uplink_runtime, upload_scheduler));
     components.push_back(std::make_unique<MonitoringLifecycleComponent>(monitor));
     return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
         success(std::make_unique<HostedRuntime>(std::move(components), std::move(status)));

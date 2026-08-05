@@ -133,13 +133,26 @@
     },
     "uplink": {
       "type": "object", "additionalProperties": false,
-      "required": ["enabled", "serverUrl", "heartbeatSeconds", "credentialReference", "certificateReference"],
+      "required": ["enabled", "serverUrl", "heartbeatSeconds", "chunkBytes", "ioTimeoutMs", "uploadLimitMiBps", "credentialReference", "certificateReference"],
       "properties": {
         "enabled": { "type": "boolean" }, "serverUrl": { "type": "string", "maxLength": 2048 },
         "heartbeatSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "chunkBytes": { "type": "integer", "minimum": 65536, "maximum": 4194304 },
+        "ioTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 60000 },
+        "uploadLimitMiBps": { "type": "integer", "minimum": 1, "maximum": 1024 },
         "credentialReference": { "type": "string", "maxLength": 256 },
         "certificateReference": { "type": "string", "maxLength": 256 }
-      }
+      },
+      "allOf": [{
+        "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+        "then": {
+          "properties": {
+            "serverUrl": { "pattern": "^http://" },
+            "credentialReference": { "maxLength": 0 },
+            "certificateReference": { "maxLength": 0 }
+          }
+        }
+      }]
     },
     "plantIo": {
       "type": "object", "additionalProperties": false,
@@ -176,5 +189,3 @@
     }
   }
 }
-
-

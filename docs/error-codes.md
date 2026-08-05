@@ -231,6 +231,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
 | --- | --- | ---: | --- |
 | `UPLINK_DISCONNECTED` | Warning | 是 | 上位机连接不可用；上传任务持久排队，本地业务继续 |
+| `UPLINK_TIMEOUT` | Warning | 是 | 单次 HTTP/WebSocket I/O 超过配置截止时间；取消当前等待并退避 |
 | `UPLINK_PROTOCOL_ERROR` | Error | 视协商 | 上位机响应或消息不符合已批准协议；保留受限响应摘要 |
 | `UPLINK_PROTOCOL_VERSION_UNSUPPORTED` | Error | 否 | 对端没有共同的 Uplink 协议版本；拒绝建立会话并报告双方版本 |
 | `UPLINK_SERVER_BUSY` | Warning | 是 | 设备、活动上传、存储任务或设备命令队列达到有界容量；按服务端提示退避 |
@@ -240,6 +241,9 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `UPLINK_COMMAND_CONFLICT` | Error | 否 | 相同 `commandId` 携带不同类型、正文、截止时间或确认状态；保留原结果并拒绝冲突内容 |
 | `UPLOAD_ENQUEUE_FAILED` | Critical | 是 | 已提交事件无法建立持久上传任务；事件保持本地并报警 |
 | `UPLOAD_JOB_CONFLICT` | Error | 否 | 相同上传幂等键携带不同事件、资源、路径、摘要或负载；保留原任务并拒绝覆盖 |
+| `UPLOAD_JOB_INVALID` | Error | 否 | 持久任务缺少事件、逻辑文件、受限相对路径或 manifest 字段；拒绝执行并保留诊断 |
+| `UPLOAD_SOURCE_MISSING` | Error | 否 | 声明的本地普通文件或 manifest 不存在；不创建空上传，等待人工处理 |
+| `UPLOAD_SOURCE_CHANGED` | Error | 否 | 本地文件长度或整文件 SHA-256 与持久任务不一致；拒绝上传已变化内容 |
 | `UPLOAD_TRANSFER_INTERRUPTED` | Warning | 是 | 服务或执行器停止时任务仍在途；保留 checkpoint 并在重启后恢复领取 |
 | `UPLOAD_TRANSFER_FAILED` | Error | 是 | 受限传输尝试失败；保持 checkpoint 并按策略退避 |
 | `UPLOAD_CHECKSUM_MISMATCH` | Error | 是 | 服务端或本地分块校验不一致；重传受影响内容且有上限 |

@@ -145,6 +145,9 @@ struct UplinkConfig final
     bool enabled{};
     std::string server_url;
     std::uint32_t heartbeat_seconds{5U};
+    std::uint32_t chunk_bytes{1024U * 1024U};
+    std::uint32_t io_timeout_ms{10000U};
+    std::uint32_t upload_limit_mibps{20U};
     std::string credential_reference;
     std::string certificate_reference;
     bool operator==(const UplinkConfig&) const = default;

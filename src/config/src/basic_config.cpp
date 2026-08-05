@@ -778,15 +778,21 @@ Result<EdgeConfig> parse_storage(const Json& root, const std::filesystem::path& 
 Result<EdgeConfig> parse_uplink(const Json& root, EdgeConfig result)
 {
     const Json& uplink = root.at("uplink");
-    if (auto fields = exact_fields(uplink, "/uplink",
-                                   {"enabled", "serverUrl", "heartbeatSeconds",
-                                    "credentialReference", "certificateReference"});
+    if (auto fields =
+            exact_fields(uplink, "/uplink",
+                         {"enabled", "serverUrl", "heartbeatSeconds", "chunkBytes", "ioTimeoutMs",
+                          "uploadLimitMiBps", "credentialReference", "certificateReference"});
         !fields)
         return Result<EdgeConfig>::failure(fields.error());
     auto uplink_enabled = bool_field(uplink, "enabled", "/uplink");
     auto server_url = string_field(uplink, "serverUrl", "/uplink", 2048U, true);
     auto heartbeat =
         unsigned_field<std::uint32_t>(uplink, "heartbeatSeconds", "/uplink", 1U, 3600U);
+    auto chunk_bytes = unsigned_field<std::uint32_t>(uplink, "chunkBytes", "/uplink", 64U * 1024U,
+                                                     4U * 1024U * 1024U);
+    auto io_timeout = unsigned_field<std::uint32_t>(uplink, "ioTimeoutMs", "/uplink", 100U, 60000U);
+    auto upload_limit =
+        unsigned_field<std::uint32_t>(uplink, "uploadLimitMiBps", "/uplink", 1U, 1024U);
     auto credential = string_field(uplink, "credentialReference", "/uplink", 256U, true);
     auto certificate = string_field(uplink, "certificateReference", "/uplink", 256U, true);
     if (!uplink_enabled)
@@ -795,18 +801,30 @@ Result<EdgeConfig> parse_uplink(const Json& root, EdgeConfig result)
         return Result<EdgeConfig>::failure(server_url.error());
     if (!heartbeat)
         return Result<EdgeConfig>::failure(heartbeat.error());
+    if (!chunk_bytes)
+        return Result<EdgeConfig>::failure(chunk_bytes.error());
+    if (!io_timeout)
+        return Result<EdgeConfig>::failure(io_timeout.error());
+    if (!upload_limit)
+        return Result<EdgeConfig>::failure(upload_limit.error());
     if (!credential)
         return Result<EdgeConfig>::failure(credential.error());
     if (!certificate)
         return Result<EdgeConfig>::failure(certificate.error());
-    if (uplink_enabled.value() &&
-        (!server_url.value().starts_with("https://") || credential.value().empty()))
+    if (uplink_enabled.value() && !server_url.value().starts_with("http://"))
         return Result<EdgeConfig>::failure(
-            invalid_config("启用 uplink 时必须使用 HTTPS 和 credentialReference",
-                           "config.validateDependency", "/uplink", "uplink-security"));
+            invalid_config("Uplink v1 启用时必须使用明文 http:// 基址", "config.validateDependency",
+                           "/uplink", "uplink-security"));
+    if (uplink_enabled.value() && (!credential.value().empty() || !certificate.value().empty()))
+        return Result<EdgeConfig>::failure(
+            invalid_config("Uplink v1 不使用 credentialReference 或 certificateReference",
+                           "config.validateDependency", "/uplink", "uplink-unsupported-auth"));
     result.uplink = {.enabled = uplink_enabled.value(),
                      .server_url = std::move(server_url).value(),
                      .heartbeat_seconds = heartbeat.value(),
+                     .chunk_bytes = chunk_bytes.value(),
+                     .io_timeout_ms = io_timeout.value(),
+                     .upload_limit_mibps = upload_limit.value(),
                      .credential_reference = std::move(credential).value(),
                      .certificate_reference = std::move(certificate).value()};
 
@@ -1089,6 +1107,9 @@ std::string serialize_config(const EdgeConfig& config)
                   {{"enabled", config.uplink.enabled},
                    {"serverUrl", config.uplink.server_url},
                    {"heartbeatSeconds", config.uplink.heartbeat_seconds},
+                   {"chunkBytes", config.uplink.chunk_bytes},
+                   {"ioTimeoutMs", config.uplink.io_timeout_ms},
+                   {"uploadLimitMiBps", config.uplink.upload_limit_mibps},
                    {"credentialReference", config.uplink.credential_reference},
                    {"certificateReference", config.uplink.certificate_reference}}},
                  {"plantIo",
@@ -1193,12 +1214,8 @@ std::vector<std::string> changed_config_paths(const EdgeConfig& current,
         current.storage.stop_free_space_gib != candidate.storage.stop_free_space_gib ||
         current.storage.maximum_event_storage_gib != candidate.storage.maximum_event_storage_gib)
         paths.emplace_back("/storage/watermarks");
-    if (current.uplink.server_url != candidate.uplink.server_url ||
-        current.uplink.credential_reference != candidate.uplink.credential_reference ||
-        current.uplink.certificate_reference != candidate.uplink.certificate_reference)
-        paths.emplace_back("/uplink/transport");
     if (current.uplink != candidate.uplink)
-        paths.emplace_back("/uplink/runtime");
+        paths.emplace_back("/uplink/transport");
     if (current.plant_io != candidate.plant_io)
         paths.emplace_back("/plantIo");
     if (current.logging.directory != candidate.logging.directory ||

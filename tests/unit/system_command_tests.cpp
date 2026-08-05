@@ -477,17 +477,20 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
     ASSERT_TRUE(created_inspector);
     std::shared_ptr<paperbreak::storage::EventInspector> inspector{
         std::move(created_inspector).value()};
-    paperbreak::service::SystemCommandService commands{fixture.repository,
-                                                       fixture.status,
-                                                       {},
-                                                       {},
-                                                       {},
-                                                       fixture.config_path.parent_path(),
-                                                       {},
-                                                       {},
-                                                       {},
-                                                       database,
-                                                       inspector};
+    std::size_t reviewed_events = 0U;
+    paperbreak::service::SystemCommandService commands{
+        fixture.repository,
+        fixture.status,
+        {},
+        {},
+        {},
+        fixture.config_path.parent_path(),
+        {},
+        {},
+        {},
+        database,
+        inspector,
+        [&reviewed_events](const auto&) { ++reviewed_events; }};
 
     auto list = commands.handle(
         fixture.request("event.list",
@@ -528,6 +531,7 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
     const Json confirmed_json = Json::parse(confirmed.value().payload_json);
     EXPECT_EQ(confirmed_json["event"]["eventState"], "Confirmed");
     EXPECT_EQ(confirmed_json["event"]["reviewRevision"], 2U);
+    EXPECT_EQ(reviewed_events, 1U);
     auto conflicting =
         commands.handle(fixture.request("event.reject", review_payload), administrator, {});
     ASSERT_FALSE(conflicting);

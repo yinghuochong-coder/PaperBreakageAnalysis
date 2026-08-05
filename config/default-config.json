@@ -108,9 +108,12 @@
   },
   "uplink": {
     "certificateReference": "",
+    "chunkBytes": 1048576,
     "credentialReference": "",
     "enabled": false,
     "heartbeatSeconds": 5,
+    "ioTimeoutMs": 10000,
+    "uploadLimitMiBps": 20,
     "serverUrl": ""
   }
 }

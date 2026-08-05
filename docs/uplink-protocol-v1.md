@@ -2,7 +2,7 @@
 
 ## 1. 状态与范围
 
-Uplink v1 是纸机断纸分析边缘工控机与上位机之间的参考协议，协议版本为整数 `1`。本协议冻结会话、状态/报警/命令、低帧率预览、事件元数据和事件文件断点上传。本仓库的 `PaperBreakUplinkSimulator` 是参考服务端，不是完整上位机业务系统；M8-01 已提供传输无关的 `IUplinkTransport` 和测试 Mock，M8-02 已提供边缘端心跳、状态、退避和命令编排，真实 HTTP/WebSocket 边缘适配器及可靠上传仍属于 M8-03～M8-04。
+Uplink v1 是纸机断纸分析边缘工控机与上位机之间的参考协议，协议版本为整数 `1`。本协议冻结会话、状态/报警/命令、低帧率预览、事件元数据和事件文件断点上传。本仓库的 `PaperBreakUplinkSimulator` 是参考服务端，不是完整上位机业务系统；M8-01～M8-03 提供传输边界、运行时和持久调度，M8-04 的 `paperbreak_uplink_transport` 提供生产服务使用的 Qt REST/WebSocket 适配器和分块上传执行器。
 
 协议正式采用明文 `http://` 与 `ws://`，无 TLS、无应用鉴权，参考服务端默认监听 `0.0.0.0:18080`。这意味着能够访问端口的主机可窃听数据、伪造设备或命令并实施中间人攻击。只能部署在隔离 VLAN 中，并使用主机防火墙、交换机 ACL 和物理访问控制限制来源。不得把 SHA-256 文件校验描述为身份认证或抗中间人保护。
 
@@ -71,7 +71,9 @@ M8-02 边缘运行时只允许单一工作线程调用同步传输。传输命�
 
 命令结果缓存默认保留最近 1024、最大 4096 个 `commandId`，同时受默认 16 MiB、最大 64 MiB 字节上限约束，按 FIFO 淘汰最旧结果。相同 ID 和相同规范化内容重放原业务结果，`duplicate=true` 且不再次执行；相同 ID 与不同内容返回 `UPLINK_COMMAND_CONFLICT`。缓存只在当前边缘进程内有效，不替代上位机对未确认命令的持久重放。`command.result` 的 `result` 或 `error` 均为不超过 1 MiB 的 JSON 对象；现有服务命令若产生本机二进制附件，结果只报告 `binaryOmitted=true` 和字节数，二进制文件上传由 M8-03/M8-04 的可靠文件路径处理。
 
-M8-03 的可靠上传任务保存在边缘 SQLite schema v4，不经命令结果缓存。任务按报警元数据、关键帧、manifest、低码率回放、原始文件的顺序领取，同时受未完成条数、未完成声明字节和全部历史条数上限约束；永久失败和人工处理仍占未完成预算，历史满载只淘汰最旧已完成行。同一幂等键及相同内容只保留一行；冲突内容返回 `UPLOAD_JOB_CONFLICT`。可重试失败按带抖动且有最大间隔的指数退避重新到期，达到最大尝试次数转人工处理；永久拒绝直接转 `PermanentFailed`。重启时遗留在途任务保留 ID 与 checkpoint 后恢复，不重复建立事件。M8-03 的执行器接口不定义分块、断点续传和端到端校验，这些仍由 M8-04 完成。
+可靠上传任务保存在边缘 SQLite schema v4，不经命令结果缓存。任务按报警元数据、关键帧、manifest、低码率回放、原始文件的顺序领取，同时受未完成条数、未完成声明字节和全部历史条数上限约束；永久失败和人工处理仍占未完成预算，历史满载只淘汰最旧已完成行。同一幂等键及相同内容只保留一行；冲突内容返回 `UPLOAD_JOB_CONFLICT`。可重试失败按带抖动且有最大间隔的指数退避重新到期，达到最大尝试次数转人工处理；永久拒绝直接转 `PermanentFailed`。重启时遗留在途任务保留 ID 与 checkpoint 后恢复，不重复建立事件。
+
+M8-04 执行器在网络操作前流式核对本地长度和整文件 SHA-256，创建或恢复逻辑上传后总是读取服务端 `receivedChunks`，只发送缺失块。每块携带独立 SHA-256；服务端完成确认前，边缘任务不得转为 `Completed`。失败 checkpoint 保存有界的 `uploadId`、已确认块索引和摘要，重试时仍以服务端状态为事实源。重复创建、重复块和重复 complete 都按同一幂等对象返回成功。适配器串行 HTTP 操作，预校验读盘与网络分块阶段默认均限速 20 MiB/s，所有 I/O 有截止时间且可由停止令牌或 `disconnect()` 取消。
 
 ## 5. JPEG 预览二进制帧
 
@@ -91,6 +93,6 @@ JSON 头上限 64 KiB，JPEG 上限 2 MiB，每设备最多接收 5 fps。预览
 
 场景文件使用 `schemaVersion: 1`，每个设备可设置 `rejectConnections`、`disconnectWebSockets`、`responseDelayMs`、`failNextRequests`、`duplicateAcknowledgements`、`replayCommands`、`forceChecksumMismatch` 和 `disconnectAfterChunk`。GUI 和无界面模式使用同一个 `FaultProfile` 模型。
 
-## 7. 已知迁移点
+## 7. Edge 配置约束
 
-现有 edge config v2 在启用 uplink 时仍校验 HTTPS URL。M8-00～M8-02 不实现真实边缘传输适配器，也不改动该公开配置行为；在 M8-04 适配器接入时，必须把配置 schema、解析校验和默认配置同步迁移到 `http://`/`ws://`，不得只修改其中一处。
+M8-04 已同步迁移 edge config v2 schema、解析校验、序列化和默认配置：启用 uplink 时只接受 `http://` 基址，会话流只接受服务端返回的 `ws://` URL，凭据与证书引用必须为空。配置同时定义 64 KiB～4 MiB 分块、100～60000 ms 单次 I/O 截止和 1～1024 MiB/s 上传上限；这些传输设置变更需要重启服务。

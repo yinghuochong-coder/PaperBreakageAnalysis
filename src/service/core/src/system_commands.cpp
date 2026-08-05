@@ -1310,12 +1310,14 @@ SystemCommandService::SystemCommandService(
     std::shared_ptr<camera::CameraControlRuntime> cameras,
     std::shared_ptr<EventRuntime> event_runtime,
     std::shared_ptr<storage::EventMetadataDatabase> event_database,
-    std::shared_ptr<storage::EventInspector> event_inspector)
+    std::shared_ptr<storage::EventInspector> event_inspector,
+    std::function<void(const storage::EventMetadataRecord&)> event_review_observer)
     : repository_(repository), status_(std::move(status)), metrics_(std::move(metrics)),
       alarms_(std::move(alarms)), logging_(std::move(logging)),
       config_directory_(std::move(config_directory)), preview_(std::move(preview)),
       cameras_(std::move(cameras)), event_runtime_(std::move(event_runtime)),
-      event_database_(std::move(event_database)), event_inspector_(std::move(event_inspector))
+      event_database_(std::move(event_database)), event_inspector_(std::move(event_inspector)),
+      event_review_observer_(std::move(event_review_observer))
 {
 }
 
@@ -1880,6 +1882,8 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                 current_utc_milliseconds(), peer.actor_sid);
             if (!reviewed)
                 return Result<ipc::CommandResponse>::failure(reviewed.error());
+            if (event_review_observer_)
+                event_review_observer_(reviewed.value().event);
             return Result<ipc::CommandResponse>::success(
                 {.payload_json = Json{{"event", event_record_json(reviewed.value().event)},
                                       {"duplicate", reviewed.value().duplicate}}

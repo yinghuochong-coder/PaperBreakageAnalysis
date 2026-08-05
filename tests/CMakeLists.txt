@@ -33,6 +33,7 @@ add_executable(PaperBreakTests
     unit/uplink_mock_transport_tests.cpp
     unit/uplink_runtime_tests.cpp
     unit/uplink_upload_scheduler_tests.cpp
+    unit/uplink_transport_tests.cpp
     unit/uplink_simulator_tests.cpp
     unit/windows_control_tests.cpp
     unit/windows_scm_tests.cpp
@@ -58,6 +59,7 @@ target_link_libraries(PaperBreakTests
         paperbreak_storage
         paperbreak_uplink
         paperbreak_uplink_mock
+        paperbreak_uplink_transport
         paperbreak_uplink_simulator_core
         paperbreak_windows_service
         paperbreak_compiler_options
@@ -285,7 +287,7 @@ else()
 endif()
 string(APPEND path_scan_inputs "|${path_scan_mvs_root}|${path_scan_mvs_runtime}")
 set(required_install_files
-    "${CMAKE_INSTALL_BINDIR}/MvCameraControl.dll|${CMAKE_INSTALL_BINDIR}/MVGigEVisionSDK.dll")
+    "${CMAKE_INSTALL_BINDIR}/MvCameraControl.dll|${CMAKE_INSTALL_BINDIR}/MVGigEVisionSDK.dll|${CMAKE_INSTALL_BINDIR}/Qt6WebSockets$<$<CONFIG:Debug>:d>.dll")
 add_test(NAME install_tree_no_sdk_path_leaks
     COMMAND "${CMAKE_COMMAND}"
         "-DBUILD_DIR=${PROJECT_BINARY_DIR}"
@@ -293,7 +295,7 @@ add_test(NAME install_tree_no_sdk_path_leaks
         "-DCONFIG=$<CONFIG>"
         "-DFORBIDDEN_PATHS=${path_scan_inputs}"
         "-DREQUIRED_FILES=${required_install_files}"
-        "-DFORBIDDEN_FILES=${CMAKE_INSTALL_BINDIR}/PaperBreakUplinkSimulator.exe|${CMAKE_INSTALL_BINDIR}/Qt6HttpServer.dll|${CMAKE_INSTALL_BINDIR}/Qt6WebSockets.dll"
+        "-DFORBIDDEN_FILES=${CMAKE_INSTALL_BINDIR}/PaperBreakUplinkSimulator.exe|${CMAKE_INSTALL_BINDIR}/Qt6HttpServer.dll"
         "-DSERVICE_RELATIVE=${CMAKE_INSTALL_BINDIR}/PaperBreakEdgeService.exe"
         "-DCONSOLE_RELATIVE=${CMAKE_INSTALL_BINDIR}/PaperBreakEdgeConsole.exe"
         -P "${PROJECT_SOURCE_DIR}/cmake/InstallAndScan.cmake")

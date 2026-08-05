@@ -128,12 +128,17 @@ Result<SystemMetricsSummary> parse_metrics(const ipc::ResponseMessage& response,
         {
             continue;
         }
+        const std::string& name = metric["name"].get_ref<const std::string&>();
+        if (name == "uplink.state" && metric["value"].is_string())
+        {
+            summary.uplink_state = metric["value"].get<std::string>();
+            continue;
+        }
         const auto value = numeric_metric(metric["value"]);
         if (!value.has_value())
         {
             continue;
         }
-        const std::string& name = metric["name"].get_ref<const std::string&>();
         if (name == "process.cpu.percent")
         {
             summary.process_cpu_percent = value;
@@ -145,6 +150,10 @@ Result<SystemMetricsSummary> parse_metrics(const ipc::ResponseMessage& response,
         else if (name == "disk.event.free_gib")
         {
             summary.event_disk_free_gib = value;
+        }
+        else if (name == "uplink.pending_upload_tasks" && *value >= 0.0)
+        {
+            summary.pending_upload_tasks = static_cast<std::uint64_t>(*value);
         }
     }
     return Result<SystemMetricsSummary>::success(std::move(summary));

@@ -12,6 +12,7 @@ target_link_libraries(PaperBreakEdgeService
         paperbreak_ipc
         paperbreak_platform_windows
         paperbreak_service_core
+        paperbreak_uplink_transport
         paperbreak_windows_service
         paperbreak_compiler_options
         Qt6::Core

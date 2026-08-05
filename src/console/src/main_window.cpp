@@ -2469,7 +2469,17 @@ void MainWindow::apply_snapshot(const ClientStateSnapshot& snapshot)
         machine_value_->setText(QStringLiteral("不可用"));
     }
 
-    uplink_value_->setText(QStringLiteral("待 M8 接入"));
+    if (snapshot.metrics && snapshot.metrics->uplink_state)
+    {
+        QString uplink = QString::fromStdString(*snapshot.metrics->uplink_state);
+        if (snapshot.metrics->pending_upload_tasks)
+            uplink += QStringLiteral(" · 待传 %1").arg(*snapshot.metrics->pending_upload_tasks);
+        uplink_value_->setText(stale_value(uplink, snapshot.metrics_stale));
+    }
+    else
+    {
+        uplink_value_->setText(QStringLiteral("未启用/不可用"));
+    }
     if (camera_snapshot_.stale)
         camera_count_value_->setText(QStringLiteral("不可用（已过期）"));
 

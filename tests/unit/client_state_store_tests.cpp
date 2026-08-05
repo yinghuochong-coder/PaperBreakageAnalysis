@@ -91,7 +91,7 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
             }
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json =
-                     R"({"sampledAt":"2026-08-03T01:00:00.000Z","metrics":[{"name":"process.cpu.percent","value":12.5,"unit":"percent","available":true},{"name":"system.memory.used_percent","value":48.0,"unit":"percent","available":true},{"name":"disk.event.free_gib","value":512.25,"unit":"GiB","available":true}],"truncated":false})",
+                     R"({"sampledAt":"2026-08-03T01:00:00.000Z","metrics":[{"name":"process.cpu.percent","value":12.5,"unit":"percent","available":true},{"name":"system.memory.used_percent","value":48.0,"unit":"percent","available":true},{"name":"disk.event.free_gib","value":512.25,"unit":"GiB","available":true},{"name":"uplink.state","value":"Connected","unit":"state","available":true},{"name":"uplink.pending_upload_tasks","value":3,"unit":"count","available":true}],"truncated":false})",
                  .binary = {}});
         }
         if (request.command == "alarm.list")
@@ -621,6 +621,8 @@ TEST(ClientStateStore, SynchronizesMarksStaleAndRefreshesAfterReconnect)
     EXPECT_DOUBLE_EQ(latest.metrics->process_cpu_percent.value(), 12.5);
     EXPECT_DOUBLE_EQ(latest.metrics->system_memory_used_percent.value(), 48.0);
     EXPECT_DOUBLE_EQ(latest.metrics->event_disk_free_gib.value(), 512.25);
+    EXPECT_EQ(latest.metrics->uplink_state.value(), "Connected");
+    EXPECT_EQ(latest.metrics->pending_upload_tasks.value(), 3U);
     ASSERT_EQ(latest.alarms->recent.size(), 1U);
     EXPECT_EQ(latest.alarms->recent.front().message, "事件盘空间偏低");
     EXPECT_EQ(latest.alarms->highest_severity, "Warning");

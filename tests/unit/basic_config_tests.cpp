@@ -213,6 +213,29 @@ TEST(BasicConfig, RejectsCrossFieldAndPathViolations)
     EXPECT_FALSE(paperbreak::config::validate_basic_config(path));
 }
 
+TEST(BasicConfig, AcceptsOnlyBoundedPlaintextUplinkV1Configuration)
+{
+    const TemporaryDirectory directory;
+    auto enabled = replace_once(valid_config(), "\"enabled\": false, \"serverUrl\": \"\"",
+                                "\"enabled\": true, \"serverUrl\": \"http://127.0.0.1:18080\"");
+    auto parsed = paperbreak::config::parse_config(enabled, directory.path());
+    ASSERT_TRUE(parsed) << parsed.error().message;
+    EXPECT_EQ(parsed.value().uplink.chunk_bytes, 1024U * 1024U);
+    EXPECT_EQ(parsed.value().uplink.io_timeout_ms, 10000U);
+    EXPECT_EQ(parsed.value().uplink.upload_limit_mibps, 20U);
+    const auto serialized = paperbreak::config::serialize_config(parsed.value());
+    EXPECT_NE(serialized.find("\"uploadLimitMiBps\": 20"), std::string::npos);
+
+    const auto https = replace_once(enabled, "http://127.0.0.1:18080", "https://127.0.0.1:18080");
+    EXPECT_FALSE(paperbreak::config::parse_config(https, directory.path()));
+    const auto credential = replace_once(enabled, "\"credentialReference\": \"\"",
+                                         "\"credentialReference\": \"legacy-secret\"");
+    EXPECT_FALSE(paperbreak::config::parse_config(credential, directory.path()));
+    const auto oversized_chunk =
+        replace_once(enabled, "\"chunkBytes\": 1048576", "\"chunkBytes\": 4194305");
+    EXPECT_FALSE(paperbreak::config::parse_config(oversized_chunk, directory.path()));
+}
+
 TEST(BasicConfig, ValidatesAndSerializesVersionTwoNvmeSettings)
 {
     const TemporaryDirectory directory;
