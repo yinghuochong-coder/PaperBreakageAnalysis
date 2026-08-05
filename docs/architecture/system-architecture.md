@@ -193,7 +193,7 @@ Qt 桌面客户端只承担：
 | `paperbreak_event` | 候选状态机、窗口冻结、合并、关键帧策略、事件模型 | common、camera 帧视图、algorithm 接口 | MVS、具体数据库/网络 |
 | `paperbreak_event_codec` | 关键帧 JPEG 图像编解码适配 | event、批准的 OpenCV core/imgproc/imgcodecs | MVS、UI、SQLite、网络；公开接口不得暴露 OpenCV 类型 |
 | `paperbreak_storage` | 事件事务、SQLite、迁移、NVMe 块、保留策略 | common、event、SQLite、可选 zstd | UI、MVS、上传协议 |
-| `paperbreak_uplink` | `IUplinkTransport`、Uplink v1 DTO/校验、上传调度领域接口 | common、event 接口 | Qt Widgets、MVS |
+| `paperbreak_uplink` | `IUplinkTransport`、Uplink v1 DTO/校验、单线程心跳/状态/命令编排和上传调度领域接口 | common、event 接口 | Qt Widgets、MVS、服务业务实现 |
 | `paperbreak_uplink_mock` | 离线/慢速/失败脚本化传输 | uplink | 生产凭据 |
 | `paperbreak_uplink_transport` | Uplink v1 明文 REST/WebSocket/HTTP 边缘适配器（M8-04） | uplink、Qt Network 或批准网络库 | 相机、UI |
 | `paperbreak_uplink_simulator_core` | Uplink v1 参考服务端、SQLite 工作区、命令与故障模型 | uplink、Qt HttpServer/WebSockets、SQLite | 生产服务、MVS |
@@ -719,6 +719,14 @@ M7-04 在 NVMe 写线程启动前执行 v1 恢复扫描。扫描同时受 100000
 | Stop-save | 禁止新增大文件，持续检测和 Critical 报警；不谎报事件已保存 |
 
 默认禁止自动删除未上传或人工锁定事件。删除采用数据库状态转换、文件操作和后续对账，不在采集线程执行。
+
+### 12.6 上位机心跳与命令编排
+
+M8-02 的 `UplinkRuntime` 位于传输接口一侧，不依赖 IPC、相机、存储或 Qt 网络类型。一个工作线程独占会话建立、心跳、状态和命令结果发送；同步传输调用不得出现在相机采集回调。服务端命令回调只写入固定容量队列，默认 64、最大 4096 条，同时受默认 8 MiB、最大 64 MiB 字节上限约束；任一上限满载都拒绝最新命令并计数。`request_stop()` 先关闭命令入口、触发停止令牌并调用 `disconnect()` 唤醒传输 I/O；`join()` 接收统一关闭截止时间。M8-04 的正式适配器必须为每次网络 I/O 设置上限并让 `disconnect()` 可取消等待。
+
+连接失败、心跳失败、状态失败或传输侧断开都进入同一有上限指数退避，成功会话后重置退避。会话必须协商协议 v1、相同 `machineId` 和 1～3600 秒心跳间隔。连接成功立即上报状态，以后每个心跳周期同时发送心跳和新状态快照；状态提供器只返回不超过 1 MiB 的 JSON 对象。
+
+远程命令由 `SystemCommandService` 映射到既有用例 dispatcher，复用字段白名单、配置 schema、乐观修订、相机能力回读、事件复核和停止门禁。配置写入上下文按入口区分 `local_ipc`/`uplink`；远程变更还要求协议人工确认和可用的 `audit` 日志，明文网络可达性不作为认证。命令结果按 `commandId` 保存在默认 1024、最大 4096 条且默认 16 MiB、最大 64 MiB 的进程内 FIFO 去重缓存；相同内容重放，不同内容冲突拒绝。M8-02 不增加 SQLite schema，跨重启上传任务和文件传输分别留给 M8-03/M8-04。
 
 ## 13. 启动与关闭
 

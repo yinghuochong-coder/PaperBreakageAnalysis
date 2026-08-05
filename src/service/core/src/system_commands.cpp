@@ -1319,14 +1319,186 @@ SystemCommandService::SystemCommandService(
 {
 }
 
+Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMessage& request,
+                                                          const ipc::PeerIdentity& peer,
+                                                          const std::stop_token stop_token)
+{
+    return handle_with_source(request, peer, stop_token, config::ConfigChangeSource::local_ipc);
+}
+
+Result<std::string> SystemCommandService::handle_uplink_command(
+    const uplink::RemoteCommand& command, const std::stop_token stop_token)
+{
+    auto command_id = uplink::validate_identifier(command.command_id, "commandId", 128U);
+    auto command_type = uplink::validate_identifier(command.command_type, "commandType", 128U);
+    if (!command_id)
+        return Result<std::string>::failure(command_id.error());
+    if (!command_type)
+        return Result<std::string>::failure(command_type.error());
+
+    const bool mutating = command.command_type != "system.requestStatus";
+    if (mutating && !command.operator_confirmed)
+        return Result<std::string>::failure(
+            command_error("UPLINK_COMMAND_NOT_CONFIRMED", Severity::error,
+                          "远程变更命令缺少操作员确认", "uplink.command.confirmation"));
+    if (mutating && stop_token.stop_requested())
+        return Result<std::string>::failure(command_error("SYS_SERVICE_STOPPING", Severity::warning,
+                                                          "服务正在停止，拒绝远程变更命令",
+                                                          "uplink.command.dispatch", true));
+    if (mutating && !logging_)
+        return Result<std::string>::failure(command_error("SYS_NOT_SUPPORTED", Severity::error,
+                                                          "远程变更命令要求已装配审计日志",
+                                                          "uplink.command.audit"));
+    if (mutating)
+    {
+        auto audited = logging_->log(logging::Category::audit, logging::Level::info,
+                                     "Uplink command requested type=" + command.command_type +
+                                         " commandId=" + command.command_id);
+        if (!audited)
+            return Result<std::string>::failure(audited.error());
+    }
+
+    const auto audit_outcome = [&](const bool success, const std::string_view code) {
+        if (!mutating || !logging_)
+            return;
+        static_cast<void>(logging_->log(
+            logging::Category::audit, success ? logging::Level::info : logging::Level::warning,
+            "Uplink command completed type=" + command.command_type +
+                " commandId=" + command.command_id + " success=" + (success ? "true" : "false") +
+                " code=" + std::string{code}));
+    };
+
+    Json body = Json::parse(command.body_json, nullptr, false);
+    if (body.is_discarded() || !body.is_object() ||
+        command.body_json.size() > uplink::maximum_json_message_bytes)
+    {
+        auto error = command_error("UPLINK_PROTOCOL_ERROR", Severity::error,
+                                   "远程命令 body 必须是有界 JSON 对象", "uplink.command.body");
+        audit_outcome(false, error.business_code);
+        return Result<std::string>::failure(std::move(error));
+    }
+
+    if (command.command_type == "service.restart")
+    {
+        auto error =
+            command_error("SYS_NOT_SUPPORTED", Severity::warning, "当前会话未提供远程服务重启能力",
+                          "uplink.command.serviceRestart");
+        audit_outcome(false, error.business_code);
+        return Result<std::string>::failure(std::move(error));
+    }
+    if (command.command_type == "config.replace")
+    {
+        if (!has_only_fields(body, {"expectedConfigRevision", "config"}) ||
+            !body.contains("expectedConfigRevision") ||
+            !body["expectedConfigRevision"].is_number_unsigned() || !body.contains("config") ||
+            !body["config"].is_object())
+        {
+            auto error =
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "config.replace 需要 expectedConfigRevision 和完整 config 对象",
+                              "uplink.command.configReplace");
+            audit_outcome(false, error.business_code);
+            return Result<std::string>::failure(std::move(error));
+        }
+        auto updated = repository_.update(body["config"].dump(),
+                                          body["expectedConfigRevision"].get<std::uint64_t>(),
+                                          {.source = config::ConfigChangeSource::uplink,
+                                           .actor = "uplink:" + command.command_id,
+                                           .correlation_id = command.command_id});
+        if (!updated)
+        {
+            audit_outcome(false, updated.error().business_code);
+            return Result<std::string>::failure(updated.error());
+        }
+        audit_outcome(true, "OK");
+        return Result<std::string>::success(config_summary(updated.value()).dump());
+    }
+
+    std::string mapped_command;
+    if (command.command_type == "system.requestStatus")
+        mapped_command = "system.getStatus";
+    else if (command.command_type == "event.retryUpload")
+        mapped_command = "event.retryUpload";
+    else if (command.command_type == "event.review")
+    {
+        if (!has_only_fields(body, {"eventId", "expectedReviewRevision", "decision"}) ||
+            !body.contains("decision") || !body["decision"].is_string())
+        {
+            auto error =
+                command_error("IPC_REQUEST_INVALID", Severity::error,
+                              "event.review 需要 eventId、expectedReviewRevision 和 decision",
+                              "uplink.command.eventReview");
+            audit_outcome(false, error.business_code);
+            return Result<std::string>::failure(std::move(error));
+        }
+        const std::string decision = body["decision"].get<std::string>();
+        if (decision != "confirmed" && decision != "rejected")
+        {
+            auto error = command_error("IPC_REQUEST_INVALID", Severity::error,
+                                       "event.review decision 必须是 confirmed 或 rejected",
+                                       "uplink.command.eventReview");
+            audit_outcome(false, error.business_code);
+            return Result<std::string>::failure(std::move(error));
+        }
+        mapped_command = decision == "confirmed" ? "event.confirm" : "event.reject";
+        body.erase("decision");
+    }
+    else if (constexpr std::array<std::string_view, 9U> camera_commands{
+                 "camera.discover", "camera.bind", "camera.connect", "camera.disconnect",
+                 "camera.start", "camera.stop", "camera.updateConfig", "camera.captureSnapshot",
+                 "camera.softwareTrigger"};
+             std::ranges::find(camera_commands, command.command_type) != camera_commands.end())
+        mapped_command = command.command_type;
+    else
+    {
+        auto error = command_error("SYS_NOT_SUPPORTED", Severity::warning,
+                                   "不支持的 Uplink 命令类型", "uplink.command.dispatch");
+        audit_outcome(false, error.business_code);
+        return Result<std::string>::failure(std::move(error));
+    }
+
+    ipc::RequestMessage request{.request_id = command.command_id,
+                                .command = std::move(mapped_command),
+                                .timestamp = current_utc_timestamp(),
+                                .payload_json = body.dump(),
+                                .binary = {}};
+    const ipc::PeerIdentity peer{.actor_sid = "uplink:" + command.command_id,
+                                 .connection_id = 0U,
+                                 .local = true,
+                                 .authenticated = true,
+                                 .administrator = true};
+    auto handled =
+        handle_with_source(request, peer, stop_token, config::ConfigChangeSource::uplink);
+    if (!handled)
+    {
+        audit_outcome(false, handled.error().business_code);
+        return Result<std::string>::failure(handled.error());
+    }
+    Json response = Json::parse(handled.value().payload_json, nullptr, false);
+    if (response.is_discarded() || !response.is_object())
+    {
+        auto error = command_error("SYS_INTERNAL_ERROR", Severity::error, "服务命令返回了无效 JSON",
+                                   "uplink.command.response");
+        audit_outcome(false, error.business_code);
+        return Result<std::string>::failure(std::move(error));
+    }
+    if (!handled.value().binary.empty())
+    {
+        response["binaryOmitted"] = true;
+        response["binaryBytes"] = handled.value().binary.size();
+    }
+    audit_outcome(true, "OK");
+    return Result<std::string>::success(response.dump());
+}
+
 #if defined(_MSC_VER)
 // The dispatcher holds temporaries for mutually exclusive, bounded command branches. Its
 // analyzed frame is small relative to the fixed Windows worker-thread stack.
 #pragma warning(suppress : 6262)
 #endif
-Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMessage& request,
-                                                          const ipc::PeerIdentity& peer,
-                                                          const std::stop_token stop_token)
+Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
+    const ipc::RequestMessage& request, const ipc::PeerIdentity& peer,
+    const std::stop_token stop_token, const config::ConfigChangeSource config_source)
 {
     auto payload = request_payload(request);
     if (!payload)
@@ -1387,7 +1559,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
             document["storage"] = payload.value()["storage"];
             auto updated = repository_.update(
                 document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
-                {.source = config::ConfigChangeSource::local_ipc,
+                {.source = config_source,
                  .actor = peer.actor_sid,
                  .correlation_id = request.request_id});
             if (!updated)
@@ -1461,7 +1633,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
             document["algorithm"] = payload.value()["algorithm"];
             auto updated = repository_.update(
                 document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
-                {.source = config::ConfigChangeSource::local_ipc,
+                {.source = config_source,
                  .actor = peer.actor_sid,
                  .correlation_id = request.request_id});
             if (!updated)
@@ -1549,7 +1721,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
             document["event"] = payload.value()["event"];
             auto updated = repository_.update(
                 document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
-                {.source = config::ConfigChangeSource::local_ipc,
+                {.source = config_source,
                  .actor = peer.actor_sid,
                  .correlation_id = request.request_id});
             if (!updated)
@@ -1909,7 +2081,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
                       });
             auto saved = repository_.update(
                 document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
-                {.source = config::ConfigChangeSource::local_ipc,
+                {.source = config_source,
                  .actor = peer.actor_sid,
                  .correlation_id = request.request_id});
             if (!saved)
@@ -2036,7 +2208,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
 
             auto saved = repository_.update(
                 document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
-                {.source = config::ConfigChangeSource::local_ipc,
+                {.source = config_source,
                  .actor = peer.actor_sid,
                  .correlation_id = request.request_id});
             if (!saved)
@@ -2265,7 +2437,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
     }
 
     config::ConfigChangeContext context;
-    context.source = config::ConfigChangeSource::local_ipc;
+    context.source = config_source;
     context.actor = peer.actor_sid;
     context.correlation_id = request.request_id;
     const std::uint64_t revision = unsigned_revision ? revision_value.get<std::uint64_t>()

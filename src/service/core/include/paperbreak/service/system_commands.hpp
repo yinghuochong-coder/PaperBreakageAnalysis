@@ -10,6 +10,7 @@
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/storage/event_inspector.hpp"
 #include "paperbreak/storage/metadata_database.hpp"
+#include "paperbreak/uplink/runtime.hpp"
 
 #include <atomic>
 #include <filesystem>
@@ -61,7 +62,16 @@ class SystemCommandService final : public ipc::IRequestHandler
                                                       const ipc::PeerIdentity& peer,
                                                       std::stop_token stop_token) override;
 
+    /// Executes one validated Uplink v1 command through the same service-side dispatcher used by
+    /// local IPC. Mutating commands require operator confirmation and an available audit logger.
+    [[nodiscard]] Result<std::string> handle_uplink_command(const uplink::RemoteCommand& command,
+                                                            std::stop_token stop_token);
+
   private:
+    [[nodiscard]] Result<ipc::CommandResponse> handle_with_source(
+        const ipc::RequestMessage& request, const ipc::PeerIdentity& peer,
+        std::stop_token stop_token, config::ConfigChangeSource config_source);
+
     config::ConfigRepository& repository_;
     std::shared_ptr<ServiceStatusStore> status_;
     std::shared_ptr<monitoring::MetricRegistry> metrics_;

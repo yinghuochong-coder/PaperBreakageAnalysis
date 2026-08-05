@@ -1257,3 +1257,130 @@ TEST(SystemCommand, ExportsBoundedZipWithRedactedConfigurationAndRecentDiagnosti
     ASSERT_FALSE(denied);
     EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
 }
+
+TEST(SystemCommand, UplinkCommandsReuseStatusValidationAndRequireAuditForMutations)
+{
+    CommandFixture fixture;
+    paperbreak::uplink::RemoteCommand status_command{.command_id = "remote-status-1",
+                                                     .command_type = "system.requestStatus",
+                                                     .deadline = "2999-01-01T00:00:00.000Z",
+                                                     .operator_confirmed = false,
+                                                     .body_json = "{}"};
+    auto status = fixture.commands.handle_uplink_command(status_command, {});
+    ASSERT_TRUE(status);
+    EXPECT_EQ(Json::parse(status.value())["serviceState"], "running");
+
+    const auto snapshot = fixture.repository.snapshot();
+    ASSERT_TRUE(snapshot);
+    Json candidate = Json::parse(paperbreak::config::serialize_config(*snapshot.value().stored));
+    candidate["preview"]["fps"] = 4.0;
+    paperbreak::uplink::RemoteCommand replace{
+        .command_id = "remote-config-1",
+        .command_type = "config.replace",
+        .deadline = "2999-01-01T00:00:00.000Z",
+        .operator_confirmed = true,
+        .body_json = Json{{"expectedConfigRevision", 1U}, {"config", candidate}}.dump()};
+    auto no_audit = fixture.commands.handle_uplink_command(replace, {});
+    ASSERT_FALSE(no_audit);
+    EXPECT_EQ(no_audit.error().business_code, "SYS_NOT_SUPPORTED");
+    ASSERT_TRUE(fixture.repository.snapshot());
+    EXPECT_EQ(fixture.repository.snapshot().value().stored_config_revision, 1U);
+}
+
+TEST(SystemCommand, UplinkConfigReplaceUsesUplinkAuditSourceAndExistingSchemaChecks)
+{
+    CommandFixture fixture;
+    paperbreak::logging::LoggingConfig log_config;
+    log_config.directory = fixture.temp.path / "uplink-audit";
+    auto created = paperbreak::logging::LoggingRuntime::create(log_config);
+    ASSERT_TRUE(created);
+    std::shared_ptr<paperbreak::logging::LoggingRuntime> logging{std::move(created).value()};
+    paperbreak::service::SystemCommandService commands{
+        fixture.repository, fixture.status, {}, {}, logging, fixture.config_path.parent_path()};
+
+    const auto before = fixture.repository.snapshot();
+    ASSERT_TRUE(before);
+    Json candidate = Json::parse(paperbreak::config::serialize_config(*before.value().stored));
+    candidate["preview"]["fps"] = 4.0;
+    paperbreak::uplink::RemoteCommand replace{
+        .command_id = "remote-config-2",
+        .command_type = "config.replace",
+        .deadline = "2999-01-01T00:00:00.000Z",
+        .operator_confirmed = true,
+        .body_json = Json{{"expectedConfigRevision", 1U}, {"config", candidate}}.dump()};
+    auto updated = commands.handle_uplink_command(replace, {});
+    ASSERT_TRUE(updated);
+    EXPECT_EQ(Json::parse(updated.value())["storedConfigRevision"], 2U);
+    ASSERT_EQ(fixture.audit.records.size(), 1U);
+    EXPECT_EQ(fixture.audit.records.front().source, paperbreak::config::ConfigChangeSource::uplink);
+    EXPECT_EQ(fixture.audit.records.front().actor, "uplink:remote-config-2");
+    EXPECT_EQ(fixture.audit.records.front().correlation_id, "remote-config-2");
+
+    candidate["preview"]["fps"] = 1000.0;
+    candidate["configRevision"] = 2U;
+    paperbreak::uplink::RemoteCommand invalid{
+        .command_id = "remote-config-invalid",
+        .command_type = "config.replace",
+        .deadline = "2999-01-01T00:00:00.000Z",
+        .operator_confirmed = true,
+        .body_json = Json{{"expectedConfigRevision", 2U}, {"config", candidate}}.dump()};
+    auto rejected = commands.handle_uplink_command(invalid, {});
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().business_code, "SYS_CONFIG_INVALID");
+    ASSERT_TRUE(fixture.repository.snapshot());
+    EXPECT_EQ(fixture.repository.snapshot().value().stored_config_revision, 2U);
+
+    ASSERT_TRUE(logging->shutdown());
+    const auto audit_logs =
+        logging->tail({.categories = {paperbreak::logging::Category::audit}, .limit = 20U});
+    EXPECT_GE(audit_logs.records.size(), 4U);
+    EXPECT_NE(std::ranges::find_if(audit_logs.records,
+                                   [](const auto& record) {
+                                       return record.message.find("remote-config-2 success=true") !=
+                                              std::string::npos;
+                                   }),
+              audit_logs.records.end());
+    EXPECT_NE(std::ranges::find_if(audit_logs.records,
+                                   [](const auto& record) {
+                                       return record.message.find(
+                                                  "remote-config-invalid success=false") !=
+                                              std::string::npos;
+                                   }),
+              audit_logs.records.end());
+}
+
+TEST(SystemCommand, UplinkEventAndCameraMappingsKeepExistingValidationAndConfirmation)
+{
+    CommandFixture fixture;
+    paperbreak::logging::LoggingConfig log_config;
+    log_config.directory = fixture.temp.path / "uplink-command-audit";
+    auto created = paperbreak::logging::LoggingRuntime::create(log_config);
+    ASSERT_TRUE(created);
+    std::shared_ptr<paperbreak::logging::LoggingRuntime> logging{std::move(created).value()};
+    paperbreak::service::SystemCommandService commands{
+        fixture.repository, fixture.status, {}, {}, logging, fixture.config_path.parent_path()};
+    paperbreak::uplink::RemoteCommand unconfirmed{.command_id = "remote-camera-1",
+                                                  .command_type = "camera.start",
+                                                  .deadline = "2999-01-01T00:00:00.000Z",
+                                                  .operator_confirmed = false,
+                                                  .body_json = R"({"cameraId":"CAM01"})"};
+    auto denied = commands.handle_uplink_command(unconfirmed, {});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().business_code, "UPLINK_COMMAND_NOT_CONFIRMED");
+
+    unconfirmed.operator_confirmed = true;
+    auto camera = commands.handle_uplink_command(unconfirmed, {});
+    ASSERT_FALSE(camera);
+    EXPECT_EQ(camera.error().business_code, "SYS_NOT_SUPPORTED");
+
+    paperbreak::uplink::RemoteCommand review{
+        .command_id = "remote-review-1",
+        .command_type = "event.review",
+        .deadline = "2999-01-01T00:00:00.000Z",
+        .operator_confirmed = true,
+        .body_json = R"({"eventId":"event-1","expectedReviewRevision":1,"decision":"invalid"})"};
+    auto invalid_review = commands.handle_uplink_command(review, {});
+    ASSERT_FALSE(invalid_review);
+    EXPECT_EQ(invalid_review.error().business_code, "IPC_REQUEST_INVALID");
+    ASSERT_TRUE(logging->shutdown());
+}

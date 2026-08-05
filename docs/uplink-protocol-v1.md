@@ -2,7 +2,7 @@
 
 ## 1. 状态与范围
 
-Uplink v1 是纸机断纸分析边缘工控机与上位机之间的参考协议，协议版本为整数 `1`。本协议冻结会话、状态/报警/命令、低帧率预览、事件元数据和事件文件断点上传。本仓库的 `PaperBreakUplinkSimulator` 是参考服务端，不是完整上位机业务系统；M8-01 已提供传输无关的 `IUplinkTransport` 和测试 Mock，真实 HTTP/WebSocket 边缘适配器及可靠上传仍属于 M8-02～M8-04。
+Uplink v1 是纸机断纸分析边缘工控机与上位机之间的参考协议，协议版本为整数 `1`。本协议冻结会话、状态/报警/命令、低帧率预览、事件元数据和事件文件断点上传。本仓库的 `PaperBreakUplinkSimulator` 是参考服务端，不是完整上位机业务系统；M8-01 已提供传输无关的 `IUplinkTransport` 和测试 Mock，M8-02 已提供边缘端心跳、状态、退避和命令编排，真实 HTTP/WebSocket 边缘适配器及可靠上传仍属于 M8-03～M8-04。
 
 协议正式采用明文 `http://` 与 `ws://`，无 TLS、无应用鉴权，参考服务端默认监听 `0.0.0.0:18080`。这意味着能够访问端口的主机可窃听数据、伪造设备或命令并实施中间人攻击。只能部署在隔离 VLAN 中，并使用主机防火墙、交换机 ACL 和物理访问控制限制来源。不得把 SHA-256 文件校验描述为身份认证或抗中间人保护。
 
@@ -65,6 +65,12 @@ Uplink v1 是纸机断纸分析边缘工控机与上位机之间的参考协议�
 
 v1 命令集合：`system.requestStatus`、`config.replace`、`event.review`、`event.retryUpload`、`camera.discover`、`camera.bind`、`camera.connect`、`camera.disconnect`、`camera.start`、`camera.stop`、`camera.updateConfig`、`camera.captureSnapshot`、`camera.softwareTrigger`、`service.restart`。边缘端仅执行握手 `capabilities` 声明的命令；未声明 `service.restart` 时返回稳定的“不支持”，不要求为此增加 SCM 控制路径。参考 GUI 对除状态刷新外的命令执行二次确认。
 
+M8-02 边缘运行时只允许单一工作线程调用同步传输。传输命令回调只尝试写入默认 64、最大 4096 条且默认 8 MiB、最大 64 MiB 的双重有界队列；任一上限满载都拒绝最新命令并累计 `UPLINK_SERVER_BUSY` 语义指标，不能阻塞网络回调。连接成功后立即发送一次 `status`，随后按协商的 1～3600 秒间隔依次发送 `heartbeat` 和 `status`。连接、心跳或状态发送失败后，从默认 1 秒开始指数退避，最大 1 分钟；具体运行时配置不得超过 1 小时。
+
+边缘端严格校验命令字段、协议版本、当前 `machineId`、RFC 3339 截止时间和握手能力。除 `system.requestStatus` 外，命令还必须具有 `operatorConfirmed=true` 且审计日志已装配。命令映射进入与本机 IPC 相同的 `SystemCommandService` dispatcher，配置替换使用同一 schema、修订冲突和原子存储逻辑，并把审计来源记录为 `uplink`。`event.retryUpload` 在 M8-03 前稳定返回不支持；`service.restart` 未声明能力时不增加 SCM 旁路。
+
+命令结果缓存默认保留最近 1024、最大 4096 个 `commandId`，同时受默认 16 MiB、最大 64 MiB 字节上限约束，按 FIFO 淘汰最旧结果。相同 ID 和相同规范化内容重放原业务结果，`duplicate=true` 且不再次执行；相同 ID 与不同内容返回 `UPLINK_COMMAND_CONFLICT`。缓存只在当前边缘进程内有效，不替代上位机对未确认命令的持久重放。`command.result` 的 `result` 或 `error` 均为不超过 1 MiB 的 JSON 对象；现有服务命令若产生本机二进制附件，结果只报告 `binaryOmitted=true` 和字节数，二进制文件上传由 M8-03/M8-04 的可靠文件路径处理。
+
 ## 5. JPEG 预览二进制帧
 
 二进制消息由以下三段连续组成：
@@ -85,4 +91,4 @@ JSON 头上限 64 KiB，JPEG 上限 2 MiB，每设备最多接收 5 fps。预览
 
 ## 7. 已知迁移点
 
-现有 edge config v2 在启用 uplink 时仍校验 HTTPS URL。M8-00/M8-01 不实现真实边缘传输适配器，也不改动该公开配置行为；在 M8-04 适配器接入时，必须把配置 schema、解析校验和默认配置同步迁移到 `http://`/`ws://`，不得只修改其中一处。
+现有 edge config v2 在启用 uplink 时仍校验 HTTPS URL。M8-00～M8-02 不实现真实边缘传输适配器，也不改动该公开配置行为；在 M8-04 适配器接入时，必须把配置 schema、解析校验和默认配置同步迁移到 `http://`/`ws://`，不得只修改其中一处。

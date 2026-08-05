@@ -235,6 +235,9 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `UPLINK_PROTOCOL_VERSION_UNSUPPORTED` | Error | 否 | 对端没有共同的 Uplink 协议版本；拒绝建立会话并报告双方版本 |
 | `UPLINK_SERVER_BUSY` | Warning | 是 | 设备、活动上传、存储任务或设备命令队列达到有界容量；按服务端提示退避 |
 | `UPLINK_AUTH_FAILED` | Error | 否 | 认证/证书拒绝；不得记录凭据，不以紧循环重试 |
+| `UPLINK_COMMAND_NOT_CONFIRMED` | Error | 否 | 除状态查询外的远程命令缺少 `operatorConfirmed=true`；不进入服务命令 dispatcher |
+| `UPLINK_COMMAND_EXPIRED` | Warning | 否 | 远程命令的 RFC 3339 截止时间已过；缓存并返回拒绝结果，不执行副作用 |
+| `UPLINK_COMMAND_CONFLICT` | Error | 否 | 相同 `commandId` 携带不同类型、正文、截止时间或确认状态；保留原结果并拒绝冲突内容 |
 | `UPLOAD_ENQUEUE_FAILED` | Critical | 是 | 已提交事件无法建立持久上传任务；事件保持本地并报警 |
 | `UPLOAD_TRANSFER_FAILED` | Error | 是 | 受限传输尝试失败；保持 checkpoint 并按策略退避 |
 | `UPLOAD_CHECKSUM_MISMATCH` | Error | 是 | 服务端或本地分块校验不一致；重传受影响内容且有上限 |

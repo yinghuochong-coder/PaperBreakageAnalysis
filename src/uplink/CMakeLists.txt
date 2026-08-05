@@ -1,6 +1,7 @@
 add_library(paperbreak_uplink STATIC
     src/module.cpp
-    src/protocol.cpp)
+    src/protocol.cpp
+    src/runtime.cpp)
 target_link_libraries(paperbreak_uplink
     PUBLIC paperbreak_common paperbreak_compiler_options
     PRIVATE paperbreak_event nlohmann_json::nlohmann_json)
