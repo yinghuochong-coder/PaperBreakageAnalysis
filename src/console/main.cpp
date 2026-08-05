@@ -1,4 +1,5 @@
 #include "paperbreak/common/version.hpp"
+#include "paperbreak/console/algorithm_client.hpp"
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/event_client.hpp"
@@ -94,6 +95,7 @@ int main(int argc, char* argv[])
     std::unique_ptr<paperbreak::console::PreviewClient> preview_client;
     std::unique_ptr<paperbreak::console::CameraClient> camera_client;
     std::unique_ptr<paperbreak::console::OperationsClient> operations_client;
+    std::unique_ptr<paperbreak::console::AlgorithmClient> algorithm_client;
     std::unique_ptr<paperbreak::console::EventClient> event_client;
     paperbreak::console::MainWindow main_window(
         [&preview_client](const bool paused) {
@@ -187,6 +189,35 @@ int main(int argc, char* argv[])
                      "console", "console.operations.alarmExport", true));
              }},
         {.refresh =
+             [&algorithm_client] {
+                 if (algorithm_client)
+                     algorithm_client->refresh();
+             },
+         .select_camera =
+             [&algorithm_client](std::string camera_id) {
+                 if (algorithm_client)
+                     return algorithm_client->select_camera(std::move(camera_id));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "算法客户端尚未初始化",
+                     "console", "console.algorithm.selectCamera", true));
+             },
+         .update_configuration =
+             [&algorithm_client](paperbreak::console::AlgorithmConfigurationValue value) {
+                 if (algorithm_client)
+                     return algorithm_client->update_configuration(std::move(value));
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "算法客户端尚未初始化",
+                     "console", "console.algorithm.updateConfig", true));
+             },
+         .test_current_frame =
+             [&algorithm_client] {
+                 if (algorithm_client)
+                     return algorithm_client->test_current_frame();
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "算法客户端尚未初始化",
+                     "console", "console.algorithm.testCurrentFrame", true));
+             }},
+        {.refresh =
              [&event_client] {
                  if (event_client)
                      event_client->refresh();
@@ -259,6 +290,10 @@ int main(int argc, char* argv[])
         operations_client = std::make_unique<paperbreak::console::OperationsClient>(
             [&main_window](const paperbreak::console::OperationsSnapshot& snapshot) {
                 main_window.apply_operations_snapshot(snapshot);
+            });
+        algorithm_client = std::make_unique<paperbreak::console::AlgorithmClient>(
+            [&main_window](const paperbreak::console::AlgorithmClientSnapshot& snapshot) {
+                main_window.apply_algorithm_snapshot(snapshot);
             });
         event_client = std::make_unique<paperbreak::console::EventClient>(
             [&main_window](const paperbreak::console::EventClientSnapshot& snapshot) {
@@ -386,6 +421,8 @@ int main(int argc, char* argv[])
     if (!smoke_test)
         static_cast<void>(operations_client->start());
     if (!smoke_test)
+        static_cast<void>(algorithm_client->start());
+    if (!smoke_test)
         static_cast<void>(event_client->start());
 
     bool smoke_ok = true;
@@ -459,14 +496,27 @@ int main(int argc, char* argv[])
         event_smoke.events_stale = false;
         event_smoke.stored_config_revision = 1U;
         main_window.apply_event_snapshot(event_smoke);
+        paperbreak::console::AlgorithmClientSnapshot algorithm_smoke;
+        algorithm_smoke.connection.state = paperbreak::ipc::ClientConnectionState::connected;
+        algorithm_smoke.stale = false;
+        algorithm_smoke.stored_config_revision = 1U;
+        algorithm_smoke.effective_config_revision = 1U;
+        algorithm_smoke.runtime.camera_id = "CAM01";
+        algorithm_smoke.runtime.state = "active";
+        algorithm_smoke.runtime.plugin_id = "classical-vision";
+        algorithm_smoke.runtime.display_name = "M6 Classical Vision Prototype";
+        algorithm_smoke.runtime.implementation_version = "1.0.0-prototype";
+        algorithm_smoke.runtime.detector_model_version = "none";
+        algorithm_smoke.runtime.prototype_only = true;
+        algorithm_smoke.runtime.has_current_frame = true;
+        main_window.apply_algorithm_snapshot(algorithm_smoke);
         auto* const event_upload_policy =
             main_window.findChild<QComboBox*>(QStringLiteral("event-upload-policy"));
         auto* const event_config_save =
             main_window.findChild<QPushButton*>(QStringLiteral("event-config-save"));
         const bool event_configuration_editable =
-            event_upload_policy &&
-            event_upload_policy->findData(QStringLiteral("never")) >= 0 && event_config_save &&
-            event_config_save->isEnabled();
+            event_upload_policy && event_upload_policy->findData(QStringLiteral("never")) >= 0 &&
+            event_config_save && event_config_save->isEnabled();
         auto* const metrics_table =
             main_window.findChild<QTableWidget*>(QStringLiteral("operations-metrics"));
         auto* const alarm_table =
@@ -511,8 +561,8 @@ int main(int argc, char* argv[])
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && empty_configuration_kept_discovery &&
                    restart_state_disabled_controls && main_window.operations_pages_ready() &&
-                   main_window.event_pages_ready() && event_configuration_editable &&
-                   local_time_displayed &&
+                   main_window.algorithm_page_ready() && main_window.event_pages_ready() &&
+                   event_configuration_editable && local_time_displayed &&
                    diagnostic_enabled_when_connected && diagnostic_disabled_when_disconnected &&
                    theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
                    selected_light && selected_dark && dark_theme_persisted && selected_system &&
@@ -548,6 +598,10 @@ int main(int argc, char* argv[])
         if (operations_client)
             operations_client->refresh();
     });
+    QObject::connect(&refresh_timer, &QTimer::timeout, [&algorithm_client] {
+        if (algorithm_client)
+            algorithm_client->refresh();
+    });
     QObject::connect(&refresh_timer, &QTimer::timeout, [&event_client] {
         if (event_client)
             event_client->refresh();
@@ -575,6 +629,11 @@ int main(int argc, char* argv[])
     {
         operations_client->stop();
         operations_client.reset();
+    }
+    if (algorithm_client)
+    {
+        algorithm_client->stop();
+        algorithm_client.reset();
     }
     if (event_client)
     {

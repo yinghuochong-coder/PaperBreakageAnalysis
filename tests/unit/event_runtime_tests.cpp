@@ -489,3 +489,73 @@ TEST(EventRuntimeIntegration, LoadsClassicalDetectorThroughSameRuntimeBoundary)
     runtime.value()->request_stop();
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }
+
+TEST(EventRuntimeIntegration, ExposesAppliedAlgorithmStateAndTestsLatestFrameInIsolation)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "classical-vision";
+    configuration.algorithm.roi = {.width = 4U, .height = 4U, .offset_x = 0U, .offset_y = 0U};
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration, .event_root = event_root, .database = shared_database});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+
+    auto initial = runtime.value()->algorithm_snapshot("CAM01");
+    ASSERT_TRUE(initial) << initial.error().message;
+    EXPECT_EQ(initial.value().state, AlgorithmRuntimeState::active);
+    EXPECT_EQ(initial.value().config_revision, 7U);
+    EXPECT_FALSE(initial.value().has_current_frame);
+    ASSERT_TRUE(initial.value().detector_info.has_value());
+    EXPECT_EQ(initial.value().detector_info->plugin_id, "classical-vision");
+    EXPECT_TRUE(initial.value().detector_info->prototype_only);
+
+    auto missing = runtime.value()->test_current_frame("CAM01");
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().business_code, "ALGORITHM_NOT_READY");
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms)));
+    for (std::size_t attempt = 0U;
+         attempt < 100U && runtime.value()->snapshot().processed_frames < 1U; ++attempt)
+        std::this_thread::sleep_for(2ms);
+    const auto candidates_before = runtime.value()->snapshot().candidates_created;
+
+    auto tested = runtime.value()->test_current_frame("CAM01");
+    ASSERT_TRUE(tested) << tested.error().message;
+    EXPECT_EQ(tested.value().detector_info.plugin_id, "classical-vision");
+    EXPECT_TRUE(tested.value().detector_info.prototype_only);
+    EXPECT_EQ(tested.value().detection.sequence_number, 1U);
+    EXPECT_EQ(tested.value().detection.camera_id, "CAM01");
+    EXPECT_FALSE(tested.value().detection.debug_metrics.empty());
+    EXPECT_EQ(tested.value().source_width, 4U);
+    EXPECT_EQ(tested.value().source_height, 4U);
+    EXPECT_FALSE(tested.value().preview_jpeg.empty());
+    EXPECT_EQ(runtime.value()->snapshot().candidates_created, candidates_before);
+
+    configuration.config_revision = 8U;
+    configuration.algorithm.enabled = false;
+    configuration.algorithm.type = "mock";
+    ASSERT_TRUE(runtime.value()->reconfigure(configuration));
+    auto disabled = runtime.value()->algorithm_snapshot("CAM01");
+    ASSERT_TRUE(disabled);
+    EXPECT_EQ(disabled.value().state, AlgorithmRuntimeState::disabled);
+    EXPECT_EQ(disabled.value().config_revision, 8U);
+    EXPECT_TRUE(disabled.value().has_current_frame);
+    EXPECT_FALSE(disabled.value().detector_info.has_value());
+    const auto disabled_candidates_before = runtime.value()->snapshot().candidates_created;
+    auto disabled_test = runtime.value()->test_current_frame("CAM01");
+    ASSERT_TRUE(disabled_test) << disabled_test.error().message;
+    EXPECT_EQ(disabled_test.value().detector_info.plugin_id, "mock-trigger");
+    EXPECT_FALSE(disabled_test.value().preview_jpeg.empty());
+    EXPECT_EQ(runtime.value()->snapshot().candidates_created, disabled_candidates_before);
+
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}

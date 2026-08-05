@@ -1092,7 +1092,19 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M6-04 UI 配置和结果叠加
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-04
+
+完成日期：2026-08-04
+
+执行记录：`.agent/plans/m6-04-ui-algorithm-configuration-visualization.md`
+
 实现算法启用、类型、ROI、阈值、连续帧、冷却、模型、版本、设备和调试可视化；支持测试当前图像，并展示实际应用状态和性能指标。
+
+完成证据（2026-08-04）：服务新增 `algorithm.getConfig/updateConfig/testCurrentFrame` 三项严格 IPC 命令，配置更新沿用乐观修订、审计、原子保存和事务式运行时重配置，响应同时给出保存/有效/运行时修订、检测器信息、实际状态及算法运行时汇总队列、处理耗时、失败、跳帧和候选结果指标。事件运行时按相机保留最近一张 RAII 内存帧；单帧测试在正式算法队列和候选状态机之外创建隔离检测器，生成不超过 8 MiB 的 JPEG，不写盘、不改变正式检测器指标且明确返回 `candidateCreated=false`。Qt 算法页覆盖启用、类型、ROI、两级阈值、连续帧、冷却、模型引用/版本、设备和调试开关，显示已保存/已下发/已应用、实际插件/模型/降级状态与性能表，并在测试图上叠加检测 ROI、候选类型和置信度；M6-00 原型警示始终可见。新增运行时、系统命令和 `AlgorithmClient` 三项端到端行为测试，Debug/Release `/W4 /WX` 全量构建及两套非硬件 CTest 均为 24/24，通用 unit 入口各 266 项，Qt 离屏 smoke、MSVC 静态分析、11 个任务 C++ 文件 clang-format 和 `git diff --check` 通过。全仓 `format-check` 仍被未修改的 `src/pipeline/include/paperbreak/pipeline/preview.hpp:6` 既有格式问题阻断。未执行实体相机、冻结数据集、目标工控机四路性能或人工 UI 点击验证；M6-00/DEC-006 仍 blocked，M6 退出门禁中的冻结数据集报告尚未满足，所有算法继续标记为原型，未进入 M7。
 
 退出门禁 M6：
 

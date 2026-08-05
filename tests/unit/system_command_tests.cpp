@@ -13,12 +13,15 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -97,6 +100,57 @@ struct CommandFixture final
     paperbreak::config::ConfigRepository repository;
     std::shared_ptr<paperbreak::service::ServiceStatusStore> status;
     paperbreak::service::SystemCommandService commands;
+};
+
+class AlgorithmRuntimeConfigApplier final : public paperbreak::config::IConfigApplier
+{
+  public:
+    explicit AlgorithmRuntimeConfigApplier(
+        std::shared_ptr<paperbreak::service::EventRuntime> runtime)
+        : runtime_(std::move(runtime))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "algorithm-test-runtime";
+    }
+
+    [[nodiscard]] paperbreak::Result<void> prepare(const paperbreak::config::EdgeConfig& current,
+                                                   const paperbreak::config::EdgeConfig& candidate,
+                                                   const std::vector<std::string>&) override
+    {
+        previous_ = current;
+        candidate_ = candidate;
+        return paperbreak::Result<void>::success();
+    }
+
+    [[nodiscard]] paperbreak::Result<void> apply_and_readback(
+        const paperbreak::config::EdgeConfig&) override
+    {
+        return runtime_->reconfigure(*candidate_);
+    }
+
+    [[nodiscard]] paperbreak::Result<void> commit(const paperbreak::config::EdgeConfig&) override
+    {
+        previous_.reset();
+        candidate_.reset();
+        return paperbreak::Result<void>::success();
+    }
+
+    [[nodiscard]] paperbreak::Result<void> rollback(
+        const paperbreak::config::EdgeConfig& previous) noexcept override
+    {
+        auto result = runtime_->reconfigure(previous_.value_or(previous));
+        previous_.reset();
+        candidate_.reset();
+        return result;
+    }
+
+  private:
+    std::shared_ptr<paperbreak::service::EventRuntime> runtime_;
+    std::optional<paperbreak::config::EdgeConfig> previous_;
+    std::optional<paperbreak::config::EdgeConfig> candidate_;
 };
 
 const paperbreak::ipc::PeerIdentity reader{
@@ -200,6 +254,151 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json version_json = Json::parse(version.value().payload_json);
     EXPECT_FALSE(version_json.at("applicationVersion").get<std::string>().empty());
     EXPECT_TRUE(version_json.at("dependencies").contains("qt"));
+}
+
+TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
+{
+    using namespace std::chrono_literals;
+    using namespace paperbreak;
+    CommandFixture fixture;
+    auto initial = fixture.repository.snapshot();
+    ASSERT_TRUE(initial);
+    Json document = Json::parse(config::serialize_config(*initial.value().stored));
+    document["cameras"] =
+        Json::array({{{"id", "CAM01"},
+                      {"enabled", true},
+                      {"serialNumber", "SIM-01"},
+                      {"location", "test"},
+                      {"exposureUs", 1000.0},
+                      {"gainDb", 0.0},
+                      {"frameRate", 10.0},
+                      {"roi", {{"width", 4}, {"height", 4}, {"offsetX", 0}, {"offsetY", 0}}},
+                      {"pixelFormat", "Mono8"},
+                      {"triggerMode", "Continuous"},
+                      {"triggerSource", "Off"},
+                      {"triggerDelayUs", 0},
+                      {"packetSizeBytes", 1500},
+                      {"interPacketDelayNs", 0}}});
+    document["acquisition"]["framePoolCapacity"] = 128U;
+    document["preview"]["enabled"] = false;
+    document["event"]["preEventSeconds"] = 1U;
+    document["event"]["postEventSeconds"] = 0U;
+    document["event"]["maxEventSeconds"] = 1U;
+    document["event"]["mergeGapSeconds"] = 0U;
+    auto prepared = fixture.repository.update(document.dump(), 1U,
+                                              {.source = config::ConfigChangeSource::local_ipc,
+                                               .actor = "test",
+                                               .correlation_id = "algorithm-prepare"});
+    ASSERT_TRUE(prepared) << prepared.error().message;
+    config::ConfigRepository restarted_repository{fixture.config_path, fixture.files,
+                                                  fixture.audit};
+    auto restarted = restarted_repository.load();
+    ASSERT_TRUE(restarted) << restarted.error().message;
+
+    const auto event_root = fixture.temp.path / "algorithm-events";
+    auto opened = storage::EventMetadataDatabase::open(
+        {.database_path = fixture.temp.path / "algorithm-db" / "events.db",
+         .event_root = event_root,
+         .backup_directory = fixture.temp.path / "algorithm-backup"});
+    ASSERT_TRUE(opened);
+    std::shared_ptr<storage::EventMetadataDatabase> database{std::move(opened).value()};
+    auto runtime = service::EventRuntime::create({.configuration = *prepared.value().stored,
+                                                  .event_root = event_root,
+                                                  .database = database});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+    AlgorithmRuntimeConfigApplier applier{runtime.value()};
+    ASSERT_TRUE(restarted_repository.register_applier(applier));
+    service::SystemCommandService commands{
+        restarted_repository, fixture.status, {}, {}, {}, fixture.config_path.parent_path(), {}, {},
+        runtime.value()};
+
+    auto observed = commands.handle(
+        fixture.request("algorithm.getConfig", R"({"cameraId":"CAM01"})"), reader, {});
+    ASSERT_TRUE(observed) << observed.error().message;
+    const Json observed_json = Json::parse(observed.value().payload_json);
+    EXPECT_EQ(observed_json["storedConfigRevision"], 2U);
+    EXPECT_EQ(observed_json["runtime"]["state"], "disabled");
+    EXPECT_FALSE(observed_json["runtime"]["hasCurrentFrame"].get<bool>());
+    EXPECT_TRUE(observed_json["runtime"]["detector"].is_null());
+
+    const Json algorithm{{"enabled", true},
+                         {"type", "classical-vision"},
+                         {"roi", {{"width", 4}, {"height", 4}, {"offsetX", 0}, {"offsetY", 0}}},
+                         {"candidateThreshold", 0.55},
+                         {"confirmationThreshold", 0.85},
+                         {"consecutiveFrames", 2},
+                         {"cooldownMs", 250},
+                         {"modelReference", ""},
+                         {"modelVersion", "prototype-config"},
+                         {"device", "cpu"},
+                         {"debugOverlay", true}};
+    const Json update{
+        {"cameraId", "CAM01"}, {"expectedConfigRevision", 2U}, {"algorithm", algorithm}};
+    auto denied =
+        commands.handle(fixture.request("algorithm.updateConfig", update.dump()), reader, {});
+    ASSERT_FALSE(denied);
+    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
+    auto updated = commands.handle(fixture.request("algorithm.updateConfig", update.dump()),
+                                   administrator, {});
+    ASSERT_TRUE(updated) << updated.error().message;
+    const Json updated_json = Json::parse(updated.value().payload_json);
+    EXPECT_EQ(updated_json["storedConfigRevision"], 3U);
+    EXPECT_EQ(updated_json["effectiveConfigRevision"], 3U);
+    EXPECT_EQ(updated_json["runtime"]["configRevision"], 3U);
+    EXPECT_EQ(updated_json["runtime"]["state"], "active");
+    EXPECT_EQ(updated_json["runtime"]["detector"]["pluginId"], "classical-vision");
+    EXPECT_TRUE(updated_json["runtime"]["detector"]["prototypeOnly"].get<bool>());
+
+    auto buffer = std::make_shared<camera::FrameBuffer>(16U);
+    std::ranges::fill(buffer->writable_bytes(), std::byte{0xff});
+    ASSERT_TRUE(buffer->set_size(16U));
+    auto current = camera::make_frame_view(
+        {.camera_id = "CAM01",
+         .camera_frame_number = 101U,
+         .sequence_number = 1U,
+         .received_monotonic_time = camera::MonotonicTime{100ms},
+         .received_wall_clock_time =
+             camera::WallClockTime{std::chrono::sys_days{std::chrono::year{2026} / 8 / 4}} + 100ms,
+         .geometry = {.width = 4U, .height = 4U, .stride = 4U},
+         .pixel_format = camera::PixelFormat::mono8,
+         .buffer = std::move(buffer)});
+    ASSERT_TRUE(current);
+    ASSERT_TRUE(runtime.value()->submit_frame(std::move(current).value()));
+    const auto candidates_before = runtime.value()->snapshot().candidates_created;
+
+    auto test_denied = commands.handle(
+        fixture.request("algorithm.testCurrentFrame", R"({"cameraId":"CAM01"})"), reader, {});
+    ASSERT_FALSE(test_denied);
+    EXPECT_EQ(test_denied.error().business_code, "IPC_UNAUTHORIZED");
+    auto tested =
+        commands.handle(fixture.request("algorithm.testCurrentFrame", R"({"cameraId":"CAM01"})"),
+                        administrator, {});
+    ASSERT_TRUE(tested) << tested.error().message;
+    const Json tested_json = Json::parse(tested.value().payload_json);
+    EXPECT_TRUE(tested_json["isolated"].get<bool>());
+    EXPECT_FALSE(tested_json["candidateCreated"].get<bool>());
+    EXPECT_EQ(tested_json["detector"]["pluginId"], "classical-vision");
+    EXPECT_EQ(tested_json["result"]["sequenceNumber"], 1U);
+    EXPECT_FALSE(tested_json["result"]["debugMetrics"].empty());
+    EXPECT_EQ(tested_json["previewFormat"], "jpeg");
+    EXPECT_EQ(tested_json["previewSourceWidth"], 4U);
+    EXPECT_EQ(tested_json["previewSourceHeight"], 4U);
+    EXPECT_EQ(tested_json["previewBytes"], tested.value().binary.size());
+    EXPECT_FALSE(tested.value().binary.empty());
+    EXPECT_EQ(runtime.value()->snapshot().candidates_created, candidates_before);
+
+    auto conflict = commands.handle(fixture.request("algorithm.updateConfig", update.dump()),
+                                    administrator, {});
+    ASSERT_FALSE(conflict);
+    EXPECT_EQ(conflict.error().business_code, "SYS_CONFIG_VERSION_CONFLICT");
+    auto invalid = commands.handle(
+        fixture.request("algorithm.getConfig", R"({"cameraId":"CAM01","extra":true})"), reader, {});
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
+
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }
 
 TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)

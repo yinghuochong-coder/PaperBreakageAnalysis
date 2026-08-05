@@ -13,8 +13,10 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace paperbreak::service
 {
@@ -75,6 +77,26 @@ struct EventRuntimeSnapshot final
     std::uint64_t event_failures{};
 };
 
+struct AlgorithmRuntimeSnapshot final
+{
+    std::string camera_id;
+    std::uint64_t config_revision{};
+    AlgorithmRuntimeState state{AlgorithmRuntimeState::disabled};
+    bool has_current_frame{};
+    std::uint64_t latest_sequence_number{};
+    std::optional<algorithm::DetectorInfo> detector_info;
+    EventRuntimeSnapshot metrics;
+};
+
+struct AlgorithmFrameTestResult final
+{
+    algorithm::DetectorInfo detector_info;
+    algorithm::DetectionResult detection;
+    std::uint32_t source_width{};
+    std::uint32_t source_height{};
+    std::vector<std::byte> preview_jpeg;
+};
+
 /// M5 service composition for the bounded in-memory event chain. Camera observers only call
 /// submit_frame(), which never waits for encoding, SQLite, or disk I/O.
 class EventRuntime final
@@ -106,6 +128,10 @@ class EventRuntime final
                                                             camera::MonotonicTime monotonic_time,
                                                             camera::WallClockTime wall_clock_time);
     [[nodiscard]] Result<void> reconfigure(const config::EdgeConfig& configuration);
+    [[nodiscard]] Result<AlgorithmRuntimeSnapshot> algorithm_snapshot(
+        std::string_view camera_id) const;
+    [[nodiscard]] Result<AlgorithmFrameTestResult> test_current_frame(
+        std::string_view camera_id) const;
     void request_stop() noexcept;
     [[nodiscard]] Result<void> join(std::chrono::steady_clock::time_point deadline);
     [[nodiscard]] EventRuntimeSnapshot snapshot() const noexcept;

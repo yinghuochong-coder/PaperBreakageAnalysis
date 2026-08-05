@@ -37,6 +37,17 @@ Error runtime_error(std::string code, Severity severity, std::string message, st
                       retryable);
 }
 
+Error algorithm_runtime_error(std::string code, Severity severity, std::string message,
+                              std::string operation, const std::string_view camera_id,
+                              const bool retryable = false)
+{
+    auto error = runtime_error(std::move(code), severity, std::move(message), std::move(operation),
+                               retryable);
+    error.module = "algorithm";
+    error.source_id = std::string{camera_id};
+    return error;
+}
+
 std::filesystem::path path_from_utf8(const std::string_view value)
 {
     std::u8string converted;
@@ -59,11 +70,42 @@ struct Lane final
     std::string camera_id;
     std::unique_ptr<event::MemoryRing> ring;
     std::unique_ptr<algorithm::DetectorHost> detector;
+    std::optional<algorithm::DetectorInfo> detector_info;
+    std::optional<camera::FrameView> latest_frame;
     std::uint64_t latest_submitted_sequence{};
     std::uint64_t manual_after_sequence{};
     std::optional<std::uint64_t> manual_target_sequence;
     bool manual_pending{};
 };
+
+std::string detector_plugin_id(const config::AlgorithmConfig& configuration)
+{
+    return configuration.type == "mock" ? std::string{algorithm::mock::mock_trigger_plugin_id}
+                                        : configuration.type;
+}
+
+algorithm::DetectorConfig detector_config(const config::EdgeConfig& configuration,
+                                          const std::string_view camera_id)
+{
+    algorithm::DetectorConfig result{.plugin_id = detector_plugin_id(configuration.algorithm),
+                                     .camera_id = std::string{camera_id},
+                                     .revision = configuration.config_revision,
+                                     .processing_timeout = 100ms};
+    if (result.plugin_id == algorithm::classical::classical_vision_plugin_id)
+    {
+        result.parameters = {
+            {.name = "roi_offset_x",
+             .value = static_cast<std::int64_t>(configuration.algorithm.roi.offset_x)},
+            {.name = "roi_offset_y",
+             .value = static_cast<std::int64_t>(configuration.algorithm.roi.offset_y)},
+            {.name = "roi_width",
+             .value = static_cast<std::int64_t>(configuration.algorithm.roi.width)},
+            {.name = "roi_height",
+             .value = static_cast<std::int64_t>(configuration.algorithm.roi.height)},
+        };
+    }
+    return result;
+}
 
 struct EventPipelineState final
 {
@@ -121,35 +163,19 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
         if (!plan)
             return Result<std::unique_ptr<EventPipelineState>>::failure(std::move(plan).error());
         std::unique_ptr<algorithm::DetectorHost> detector;
+        std::optional<algorithm::DetectorInfo> detector_information;
         if (configuration.algorithm.enabled)
         {
             detector = std::make_unique<algorithm::DetectorHost>(*state->registry);
-            const std::string plugin_id = configuration.algorithm.type == "mock"
-                                              ? std::string{algorithm::mock::mock_trigger_plugin_id}
-                                              : configuration.algorithm.type;
-            algorithm::DetectorConfig detector_config{
-                .plugin_id = plugin_id,
-                .camera_id = camera.id,
-                .revision = configuration.config_revision,
-                .processing_timeout = 100ms,
-            };
-            if (plugin_id == algorithm::classical::classical_vision_plugin_id)
-            {
-                detector_config.parameters = {
-                    {.name = "roi_offset_x",
-                     .value = static_cast<std::int64_t>(configuration.algorithm.roi.offset_x)},
-                    {.name = "roi_offset_y",
-                     .value = static_cast<std::int64_t>(configuration.algorithm.roi.offset_y)},
-                    {.name = "roi_width",
-                     .value = static_cast<std::int64_t>(configuration.algorithm.roi.width)},
-                    {.name = "roi_height",
-                     .value = static_cast<std::int64_t>(configuration.algorithm.roi.height)},
-                };
-            }
-            auto loaded = detector->load(detector_config);
+            auto loaded = detector->load(detector_config(configuration, camera.id));
             if (!loaded)
                 return Result<std::unique_ptr<EventPipelineState>>::failure(
                     std::move(loaded).error());
+            auto information = detector->info();
+            if (!information)
+                return Result<std::unique_ptr<EventPipelineState>>::failure(
+                    std::move(information).error());
+            detector_information = std::move(information).value();
         }
         // Keep the configured history available even when detection is delayed by a full
         // algorithm queue. The pool plan already budgets these queue-held frame buffers.
@@ -164,7 +190,8 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
                      static_cast<double>(configuration.event.pre_event_seconds),
                  .maximum_active_leases = 8U,
                  .maximum_leased_frame_references = maximum_references}),
-             .detector = std::move(detector)});
+             .detector = std::move(detector),
+             .detector_info = std::move(detector_information)});
     }
     if (state->lanes.empty())
         return Result<std::unique_ptr<EventPipelineState>>::success(std::move(state));
@@ -205,6 +232,13 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
 }
 
 Lane* find_lane(EventPipelineState& state, const std::string_view camera_id)
+{
+    const auto found = std::ranges::find_if(
+        state.lanes, [camera_id](const Lane& lane) { return lane.camera_id == camera_id; });
+    return found == state.lanes.end() ? nullptr : &*found;
+}
+
+const Lane* find_lane(const EventPipelineState& state, const std::string_view camera_id)
 {
     const auto found = std::ranges::find_if(
         state.lanes, [camera_id](const Lane& lane) { return lane.camera_id == camera_id; });
@@ -802,6 +836,7 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
         ++impl_->rejected_frames;
         return Result<void>::failure(std::move(cached).error());
     }
+    lane->latest_frame = frame;
     if (lane->manual_pending && !lane->manual_target_sequence &&
         frame.sequence_number() > lane->manual_after_sequence)
         lane->manual_target_sequence = frame.sequence_number();
@@ -920,9 +955,19 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
     }
     if (restart_worker && impl_->worker.joinable())
         impl_->worker.join();
+    auto next = std::move(candidate).value();
     {
         std::scoped_lock lock{impl_->mutex};
-        impl_->pipeline = std::move(candidate).value();
+        for (auto& lane : next->lanes)
+        {
+            const auto* previous = find_lane(*impl_->pipeline, lane.camera_id);
+            if (previous != nullptr)
+            {
+                lane.latest_frame = previous->latest_frame;
+                lane.latest_submitted_sequence = previous->latest_submitted_sequence;
+            }
+        }
+        impl_->pipeline = std::move(next);
         impl_->options.configuration = configuration;
         impl_->consecutive_detector_failures.store(0U);
         impl_->consecutive_backlog_events.store(0U);
@@ -944,6 +989,91 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
         }
     }
     return Result<void>::success();
+}
+
+Result<AlgorithmRuntimeSnapshot> EventRuntime::algorithm_snapshot(
+    const std::string_view camera_id) const
+{
+    const auto runtime_metrics = snapshot();
+    std::scoped_lock lock{impl_->mutex};
+    const auto* lane = find_lane(*impl_->pipeline, camera_id);
+    if (lane == nullptr)
+    {
+        return Result<AlgorithmRuntimeSnapshot>::failure(
+            algorithm_runtime_error("CAMERA_NOT_FOUND", Severity::error, "逻辑相机未启用算法运行时",
+                                    "algorithm.runtime.snapshot", camera_id));
+    }
+    return Result<AlgorithmRuntimeSnapshot>::success(
+        {.camera_id = lane->camera_id,
+         .config_revision = impl_->pipeline->configuration.config_revision,
+         .state = runtime_metrics.algorithm_state,
+         .has_current_frame = lane->latest_frame.has_value(),
+         .latest_sequence_number = lane->latest_frame ? lane->latest_frame->sequence_number() : 0U,
+         .detector_info = lane->detector_info,
+         .metrics = runtime_metrics});
+}
+
+Result<AlgorithmFrameTestResult> EventRuntime::test_current_frame(
+    const std::string_view camera_id) const
+{
+    config::EdgeConfig configuration;
+    std::optional<camera::FrameView> frame;
+    std::function<Result<void>(algorithm::DetectorPluginRegistry&)> registry_configurer;
+    {
+        std::scoped_lock lock{impl_->mutex};
+        const auto* lane = find_lane(*impl_->pipeline, camera_id);
+        if (lane == nullptr)
+        {
+            return Result<AlgorithmFrameTestResult>::failure(algorithm_runtime_error(
+                "CAMERA_NOT_FOUND", Severity::error, "逻辑相机未启用算法运行时",
+                "algorithm.runtime.testCurrentFrame", camera_id));
+        }
+        if (!lane->latest_frame)
+        {
+            return Result<AlgorithmFrameTestResult>::failure(algorithm_runtime_error(
+                "ALGORITHM_NOT_READY", Severity::warning, "当前相机尚无可测试图像",
+                "algorithm.runtime.testCurrentFrame", camera_id, true));
+        }
+        configuration = impl_->pipeline->configuration;
+        frame = lane->latest_frame;
+        registry_configurer = impl_->options.detector_registry_configurer;
+    }
+
+    algorithm::DetectorPluginRegistry registry;
+    if (auto registered = algorithm::mock::register_mock_trigger_detector(registry); !registered)
+        return Result<AlgorithmFrameTestResult>::failure(std::move(registered).error());
+    if (auto registered = algorithm::classical::register_classical_vision_detector(registry);
+        !registered)
+        return Result<AlgorithmFrameTestResult>::failure(std::move(registered).error());
+    if (registry_configurer)
+    {
+        auto configured = registry_configurer(registry);
+        if (!configured)
+            return Result<AlgorithmFrameTestResult>::failure(std::move(configured).error());
+    }
+
+    algorithm::DetectorHost detector{registry};
+    if (auto loaded = detector.load(detector_config(configuration, camera_id)); !loaded)
+        return Result<AlgorithmFrameTestResult>::failure(std::move(loaded).error());
+    auto information = detector.info();
+    if (!information)
+        return Result<AlgorithmFrameTestResult>::failure(std::move(information).error());
+    auto detection = detector.process(*frame);
+    if (!detection)
+        return Result<AlgorithmFrameTestResult>::failure(std::move(detection).error());
+    auto encoder = event::make_opencv_key_frame_jpeg_encoder();
+    auto preview = encoder->encode(*frame, {.jpeg_quality = 85U,
+                                            .maximum_dimension = 4096U,
+                                            .maximum_input_bytes = 64U * 1024U * 1024U,
+                                            .maximum_jpeg_bytes = 8U * 1024U * 1024U});
+    if (!preview)
+        return Result<AlgorithmFrameTestResult>::failure(std::move(preview).error());
+    return Result<AlgorithmFrameTestResult>::success(
+        {.detector_info = std::move(information).value(),
+         .detection = std::move(detection).value(),
+         .source_width = frame->geometry().width,
+         .source_height = frame->geometry().height,
+         .preview_jpeg = std::move(preview).value()});
 }
 
 void EventRuntime::request_stop() noexcept

@@ -337,6 +337,114 @@ Json event_config_json(const config::EventConfig& value)
             {"retentionDays", value.retention_days}};
 }
 
+Json algorithm_config_json(const config::AlgorithmConfig& value)
+{
+    return {{"enabled", value.enabled},
+            {"type", value.type},
+            {"roi",
+             {{"width", value.roi.width},
+              {"height", value.roi.height},
+              {"offsetX", value.roi.offset_x},
+              {"offsetY", value.roi.offset_y}}},
+            {"candidateThreshold", value.candidate_threshold},
+            {"confirmationThreshold", value.confirmation_threshold},
+            {"consecutiveFrames", value.consecutive_frames},
+            {"cooldownMs", value.cooldown_ms},
+            {"modelReference", value.model_reference},
+            {"modelVersion", value.model_version},
+            {"device", value.device},
+            {"debugOverlay", value.debug_overlay}};
+}
+
+Json detector_info_json(const algorithm::DetectorInfo& value)
+{
+    return {{"pluginId", value.plugin_id},
+            {"displayName", value.display_name},
+            {"implementationVersion", value.implementation_version},
+            {"modelVersion", value.model_version},
+            {"supportsHotUpdate", value.supports_hot_update},
+            {"prototypeOnly", value.prototype_only}};
+}
+
+std::string_view candidate_type_name(const algorithm::DetectionCandidateType value) noexcept
+{
+    using Type = algorithm::DetectionCandidateType;
+    switch (value)
+    {
+    case Type::none:
+        return "none";
+    case Type::paper_break:
+        return "paper-break";
+    case Type::paper_missing:
+        return "paper-missing";
+    case Type::obstruction:
+        return "obstruction";
+    case Type::flicker:
+        return "flicker";
+    case Type::indeterminate:
+        return "indeterminate";
+    }
+    return "unknown";
+}
+
+Json detection_json(const algorithm::DetectionResult& value)
+{
+    Json debug_metrics = Json::array();
+    for (const auto& metric : value.debug_metrics)
+        debug_metrics.push_back({{"name", metric.name}, {"value", metric.value}});
+    return {{"triggered", value.triggered},
+            {"anomalous", value.anomalous},
+            {"triggerSource", algorithm::to_string(value.trigger_source)},
+            {"candidateType", candidate_type_name(value.candidate_type)},
+            {"cameraId", value.camera_id},
+            {"sequenceNumber", value.sequence_number},
+            {"cameraFrameNumber", value.camera_frame_number},
+            {"evaluatedRegion",
+             {{"offsetX", value.evaluated_region.offset_x},
+              {"offsetY", value.evaluated_region.offset_y},
+              {"width", value.evaluated_region.width},
+              {"height", value.evaluated_region.height}}},
+            {"meanGrayscale", value.mean_grayscale},
+            {"meanGrayscaleChange", value.mean_grayscale_change},
+            {"paperRatio", value.paper_ratio},
+            {"confidence", value.confidence},
+            {"areaRatio", value.area_ratio},
+            {"changeScore", value.change_score},
+            {"processingTimeUs", value.processing_time.count()},
+            {"detectorVersion", value.detector_version},
+            {"modelVersion", value.model_version},
+            {"reason", value.reason},
+            {"debugMetrics", std::move(debug_metrics)}};
+}
+
+Json algorithm_runtime_json(const AlgorithmRuntimeSnapshot& value)
+{
+    const auto& metrics = value.metrics;
+    Json result{{"cameraId", value.camera_id},
+                {"configRevision", value.config_revision},
+                {"state", to_string(value.state)},
+                {"hasCurrentFrame", value.has_current_frame},
+                {"latestSequenceNumber", value.latest_sequence_number},
+                {"metrics",
+                 {{"queueDepth", metrics.frame_queue_depth},
+                  {"queueCapacity", metrics.frame_queue_capacity},
+                  {"queueHighWatermark", metrics.frame_queue_high_watermark},
+                  {"submittedFrames", metrics.submitted_frames},
+                  {"processedFrames", metrics.processed_frames},
+                  {"skippedFrames", metrics.skipped_frames},
+                  {"detectorFailures", metrics.detector_failures},
+                  {"consecutiveDetectorFailures", metrics.consecutive_detector_failures},
+                  {"processCalls", metrics.detector_process_calls},
+                  {"lastProcessingTimeUs", metrics.last_algorithm_processing_time.count()},
+                  {"averageProcessingTimeUs", metrics.average_algorithm_processing_time.count()},
+                  {"maximumProcessingTimeUs", metrics.maximum_algorithm_processing_time.count()},
+                  {"candidatesCreated", metrics.candidates_created},
+                  {"confirmedEvents", metrics.confirmed_events},
+                  {"rejectedCandidates", metrics.rejected_candidates}}}};
+    result["detector"] = value.detector_info ? detector_info_json(*value.detector_info) : Json{};
+    return result;
+}
+
 Json event_record_json(const storage::EventMetadataRecord& event)
 {
     return {{"eventId", event.event_id},
@@ -738,6 +846,28 @@ Result<std::string> camera_id(const Json& payload, const std::string_view operat
                                                           "cameraId 必须为 CAM01 至 CAM04",
                                                           std::string{operation}));
     return Result<std::string>::success(value);
+}
+
+Result<ipc::CommandResponse> algorithm_configuration_response(config::ConfigRepository& repository,
+                                                              EventRuntime& runtime,
+                                                              const std::string_view camera_id)
+{
+    auto configuration = repository.snapshot();
+    if (!configuration)
+        return Result<ipc::CommandResponse>::failure(configuration.error());
+    auto actual = runtime.algorithm_snapshot(camera_id);
+    if (!actual)
+        return Result<ipc::CommandResponse>::failure(actual.error());
+    return Result<ipc::CommandResponse>::success(
+        {.payload_json =
+             Json{{"algorithm", algorithm_config_json(configuration.value().stored->algorithm)},
+                  {"effectiveAlgorithm",
+                   algorithm_config_json(configuration.value().effective->algorithm)},
+                  {"storedConfigRevision", configuration.value().stored_config_revision},
+                  {"effectiveConfigRevision", configuration.value().effective_config_revision},
+                  {"runtime", algorithm_runtime_json(actual.value())}}
+                 .dump(),
+         .binary = {}});
 }
 
 Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
@@ -1188,6 +1318,97 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
     if (!payload)
     {
         return Result<ipc::CommandResponse>::failure(payload.error());
+    }
+
+    if (request.command.starts_with("algorithm."))
+    {
+        const bool write_command = request.command == "algorithm.updateConfig" ||
+                                   request.command == "algorithm.testCurrentFrame";
+        if (write_command && (!peer.local || !peer.authenticated || !peer.administrator))
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_UNAUTHORIZED", Severity::error, "算法配置和调试操作要求提升后的本机管理员身份",
+                "ipc.algorithm.dispatch"));
+        if (write_command && stop_token.stop_requested())
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "SYS_SERVICE_STOPPING", Severity::warning, "服务正在停止，拒绝算法配置和调试操作",
+                "ipc.algorithm.dispatch", true));
+        if (!event_runtime_)
+            return Result<ipc::CommandResponse>::failure(
+                command_error("SYS_NOT_SUPPORTED", Severity::warning, "算法运行时未装配",
+                              "ipc.algorithm.dispatch"));
+
+        if (request.command == "algorithm.getConfig")
+        {
+            if (!has_only_field(payload.value(), "cameraId"))
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error, "algorithm.getConfig 只接受 cameraId",
+                    "ipc.algorithm.getConfig"));
+            auto id = camera_id(payload.value(), "ipc.algorithm.getConfig");
+            if (!id)
+                return Result<ipc::CommandResponse>::failure(id.error());
+            return algorithm_configuration_response(repository_, *event_runtime_, id.value());
+        }
+        if (request.command == "algorithm.updateConfig")
+        {
+            if (!has_only_fields(payload.value(),
+                                 {"cameraId", "expectedConfigRevision", "algorithm"}) ||
+                !payload.value().contains("expectedConfigRevision") ||
+                !payload.value()["expectedConfigRevision"].is_number_unsigned() ||
+                !payload.value().contains("algorithm") || !payload.value()["algorithm"].is_object())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "algorithm.updateConfig 需要 cameraId、expectedConfigRevision 和 "
+                                  "algorithm 对象",
+                                  "ipc.algorithm.updateConfig"));
+            auto id = camera_id(payload.value(), "ipc.algorithm.updateConfig");
+            if (!id)
+                return Result<ipc::CommandResponse>::failure(id.error());
+            auto current_runtime = event_runtime_->algorithm_snapshot(id.value());
+            if (!current_runtime)
+                return Result<ipc::CommandResponse>::failure(current_runtime.error());
+            auto current = repository_.snapshot();
+            if (!current)
+                return Result<ipc::CommandResponse>::failure(current.error());
+            Json document = Json::parse(config::serialize_config(*current.value().stored));
+            document["algorithm"] = payload.value()["algorithm"];
+            auto updated = repository_.update(
+                document.dump(), payload.value()["expectedConfigRevision"].get<std::uint64_t>(),
+                {.source = config::ConfigChangeSource::local_ipc,
+                 .actor = peer.actor_sid,
+                 .correlation_id = request.request_id});
+            if (!updated)
+                return Result<ipc::CommandResponse>::failure(updated.error());
+            return algorithm_configuration_response(repository_, *event_runtime_, id.value());
+        }
+        if (request.command == "algorithm.testCurrentFrame")
+        {
+            if (!has_only_field(payload.value(), "cameraId"))
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "algorithm.testCurrentFrame 只接受 cameraId",
+                                  "ipc.algorithm.testCurrentFrame"));
+            auto id = camera_id(payload.value(), "ipc.algorithm.testCurrentFrame");
+            if (!id)
+                return Result<ipc::CommandResponse>::failure(id.error());
+            auto tested = event_runtime_->test_current_frame(id.value());
+            if (!tested)
+                return Result<ipc::CommandResponse>::failure(tested.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{{"detector", detector_info_json(tested.value().detector_info)},
+                          {"result", detection_json(tested.value().detection)},
+                          {"isolated", true},
+                          {"candidateCreated", false},
+                          {"previewFormat", "jpeg"},
+                          {"previewSourceWidth", tested.value().source_width},
+                          {"previewSourceHeight", tested.value().source_height},
+                          {"previewBytes", tested.value().preview_jpeg.size()}}
+                         .dump(),
+                 .binary = std::move(tested).value().preview_jpeg});
+        }
+        return Result<ipc::CommandResponse>::failure(
+            command_error("IPC_COMMAND_UNKNOWN", Severity::error, "未知 algorithm 命令",
+                          "ipc.algorithm.dispatch"));
     }
 
     if (request.command.starts_with("event."))

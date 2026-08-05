@@ -1,5 +1,6 @@
 #pragma once
 
+#include "paperbreak/console/algorithm_client.hpp"
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/event_client.hpp"
@@ -64,12 +65,21 @@ struct EventUiActions final
     std::function<Result<void>(std::string, std::filesystem::path)> export_event;
 };
 
+struct AlgorithmUiActions final
+{
+    std::function<void()> refresh;
+    std::function<Result<void>(std::string)> select_camera;
+    std::function<Result<void>(AlgorithmConfigurationValue)> update_configuration;
+    std::function<Result<void>()> test_current_frame;
+};
+
 class MainWindow final : public QMainWindow
 {
   public:
     explicit MainWindow(std::function<void(bool)> preview_pause_changed = {},
                         CameraUiActions camera_actions = {}, ThemeUiActions theme_actions = {},
                         OperationsUiActions operations_actions = {},
+                        AlgorithmUiActions algorithm_actions = {},
                         EventUiActions event_actions = {}, QWidget* parent = nullptr);
 
     void apply_snapshot(const ClientStateSnapshot& snapshot);
@@ -77,6 +87,7 @@ class MainWindow final : public QMainWindow
     void apply_preview_snapshot(const PreviewSnapshot& snapshot);
     void apply_camera_snapshot(const CameraClientSnapshot& snapshot);
     void apply_operations_snapshot(const OperationsSnapshot& snapshot);
+    void apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapshot);
     void apply_event_snapshot(const EventClientSnapshot& snapshot);
     void request_diagnostics_export();
 
@@ -88,6 +99,7 @@ class MainWindow final : public QMainWindow
     [[nodiscard]] bool camera_device_controls_disabled() const noexcept;
     [[nodiscard]] bool select_theme_mode(ThemeMode mode) noexcept;
     [[nodiscard]] bool operations_pages_ready() const noexcept;
+    [[nodiscard]] bool algorithm_page_ready() const noexcept;
     [[nodiscard]] bool event_pages_ready() const noexcept;
 
   private:
@@ -98,6 +110,7 @@ class MainWindow final : public QMainWindow
     void run_camera_control(const std::string& command, bool confirmation_required);
     void show_camera_result(const Result<void>& result);
     void show_operations_result(const Result<void>& result);
+    void show_algorithm_result(const Result<void>& result);
     void show_event_result(const Result<void>& result);
     void show_event_config_result(const Result<void>& result);
     void update_alarm_details();
@@ -145,6 +158,7 @@ class MainWindow final : public QMainWindow
     CameraUiActions camera_actions_;
     ThemeUiActions theme_actions_;
     OperationsUiActions operations_actions_;
+    AlgorithmUiActions algorithm_actions_;
     EventUiActions event_actions_;
     CameraClientSnapshot camera_snapshot_;
     std::string camera_editor_id_;
@@ -167,6 +181,31 @@ class MainWindow final : public QMainWindow
     QLabel* operations_status_{};
     QPushButton* diagnostics_export_{};
     OperationsSnapshot operations_snapshot_;
+    AlgorithmClientSnapshot algorithm_snapshot_;
+    QComboBox* algorithm_camera_selector_{};
+    QCheckBox* algorithm_enabled_{};
+    QComboBox* algorithm_type_{};
+    QSpinBox* algorithm_roi_width_{};
+    QSpinBox* algorithm_roi_height_{};
+    QSpinBox* algorithm_roi_x_{};
+    QSpinBox* algorithm_roi_y_{};
+    QDoubleSpinBox* algorithm_candidate_threshold_{};
+    QDoubleSpinBox* algorithm_confirmation_threshold_{};
+    QSpinBox* algorithm_consecutive_frames_{};
+    QSpinBox* algorithm_cooldown_ms_{};
+    QLineEdit* algorithm_model_reference_{};
+    QLineEdit* algorithm_model_version_{};
+    QComboBox* algorithm_device_{};
+    QCheckBox* algorithm_debug_overlay_{};
+    QWidget* algorithm_editor_{};
+    QPushButton* algorithm_save_{};
+    QPushButton* algorithm_test_{};
+    QLabel* algorithm_runtime_status_{};
+    QLabel* algorithm_operation_status_{};
+    QLabel* algorithm_test_result_{};
+    QLabel* algorithm_test_preview_{};
+    QTableWidget* algorithm_metrics_{};
+    QTableWidget* algorithm_debug_metrics_{};
     EventClientSnapshot event_snapshot_;
     QSpinBox* event_pre_seconds_{};
     QSpinBox* event_post_seconds_{};

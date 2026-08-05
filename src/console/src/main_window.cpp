@@ -20,6 +20,9 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QPainter>
+#include <QPen>
+#include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
@@ -37,6 +40,7 @@
 #include <array>
 #include <memory>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 namespace paperbreak::console
@@ -318,11 +322,12 @@ QString placeholder_message(const ConsolePageId id)
 
 MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                        CameraUiActions camera_actions, ThemeUiActions theme_actions,
-                       OperationsUiActions operations_actions, EventUiActions event_actions,
-                       QWidget* parent)
+                       OperationsUiActions operations_actions, AlgorithmUiActions algorithm_actions,
+                       EventUiActions event_actions, QWidget* parent)
     : QMainWindow(parent), preview_pause_changed_(std::move(preview_pause_changed)),
       camera_actions_(std::move(camera_actions)), theme_actions_(std::move(theme_actions)),
-      operations_actions_(std::move(operations_actions)), event_actions_(std::move(event_actions))
+      operations_actions_(std::move(operations_actions)),
+      algorithm_actions_(std::move(algorithm_actions)), event_actions_(std::move(event_actions))
 {
     setObjectName(QStringLiteral("main-window"));
     setWindowTitle(QStringLiteral("PaperBreakEdge 断纸分析控制台"));
@@ -703,6 +708,203 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                     camera_bind_slot_->currentText().toStdString(), device.serial,
                     camera_bind_location_->text().trimmed().toStdString(),
                     camera_snapshot_.stored_config_revision));
+            });
+            pages_->addWidget(page);
+            continue;
+        }
+        if (descriptor.id == ConsolePageId::algorithm_configuration)
+        {
+            QWidget* page = make_child<QWidget>(pages_);
+            page->setObjectName(QStringLiteral("page-algorithm-configuration"));
+            auto* layout = make_layout<QVBoxLayout>(page);
+            layout->setContentsMargins(24, 20, 24, 20);
+            auto* heading =
+                make_child<QLabel>(page, QStringLiteral("算法配置、实际状态与单帧测试"));
+            heading->setProperty("role", "pageTitle");
+            layout->addWidget(heading);
+            auto* prototype_notice = make_child<QLabel>(
+                page,
+                QStringLiteral(
+                    "M6-00 验收基线尚未冻结：当前检测器均为原型，不代表正式断纸算法已通过。"));
+            prototype_notice->setObjectName(QStringLiteral("algorithm-prototype-notice"));
+            prototype_notice->setWordWrap(true);
+            prototype_notice->setProperty("role", "warning");
+            layout->addWidget(prototype_notice);
+
+            auto* scroll = make_child<QScrollArea>(page);
+            scroll->setWidgetResizable(true);
+            QWidget* content = make_child<QWidget>(scroll);
+            auto* content_layout = make_layout<QVBoxLayout>(content);
+            content_layout->setContentsMargins(2, 2, 8, 2);
+            content_layout->setSpacing(12);
+
+            auto* selection = make_child<QWidget>(content);
+            auto* selection_layout = make_layout<QHBoxLayout>(selection);
+            selection_layout->setContentsMargins(0, 0, 0, 0);
+            algorithm_camera_selector_ = make_child<QComboBox>(selection);
+            algorithm_camera_selector_->setObjectName(QStringLiteral("algorithm-camera-selector"));
+            algorithm_camera_selector_->addItems({QStringLiteral("CAM01"), QStringLiteral("CAM02"),
+                                                  QStringLiteral("CAM03"),
+                                                  QStringLiteral("CAM04")});
+            auto* refresh = make_child<QPushButton>(selection, QStringLiteral("刷新实际状态"));
+            refresh->setObjectName(QStringLiteral("algorithm-refresh"));
+            selection_layout->addWidget(make_child<QLabel>(selection, QStringLiteral("逻辑相机")));
+            selection_layout->addWidget(algorithm_camera_selector_);
+            selection_layout->addStretch(1);
+            selection_layout->addWidget(refresh);
+            content_layout->addWidget(selection);
+
+            algorithm_editor_ = make_child<QWidget>(content);
+            algorithm_editor_->setObjectName(QStringLiteral("algorithm-editor"));
+            auto* form = make_layout<QFormLayout>(algorithm_editor_);
+            algorithm_enabled_ =
+                make_child<QCheckBox>(algorithm_editor_, QStringLiteral("启用自动检测"));
+            algorithm_type_ = make_child<QComboBox>(algorithm_editor_);
+            algorithm_type_->setObjectName(QStringLiteral("algorithm-type"));
+            algorithm_type_->addItem(QStringLiteral("模拟检测器（原型）"), QStringLiteral("mock"));
+            algorithm_type_->addItem(QStringLiteral("传统视觉（原型）"),
+                                     QStringLiteral("classical-vision"));
+            algorithm_roi_width_ = make_child<QSpinBox>(algorithm_editor_);
+            algorithm_roi_height_ = make_child<QSpinBox>(algorithm_editor_);
+            algorithm_roi_x_ = make_child<QSpinBox>(algorithm_editor_);
+            algorithm_roi_y_ = make_child<QSpinBox>(algorithm_editor_);
+            algorithm_roi_width_->setRange(1, 16384);
+            algorithm_roi_height_->setRange(1, 16384);
+            algorithm_roi_x_->setRange(0, 16383);
+            algorithm_roi_y_->setRange(0, 16383);
+            algorithm_candidate_threshold_ = make_child<QDoubleSpinBox>(algorithm_editor_);
+            algorithm_confirmation_threshold_ = make_child<QDoubleSpinBox>(algorithm_editor_);
+            for (auto* threshold :
+                 {algorithm_candidate_threshold_, algorithm_confirmation_threshold_})
+            {
+                threshold->setRange(0.0, 1.0);
+                threshold->setDecimals(4);
+                threshold->setSingleStep(0.01);
+            }
+            algorithm_consecutive_frames_ = make_child<QSpinBox>(algorithm_editor_);
+            algorithm_consecutive_frames_->setRange(1, 1000);
+            algorithm_cooldown_ms_ = make_child<QSpinBox>(algorithm_editor_);
+            algorithm_cooldown_ms_->setRange(0, 3600000);
+            algorithm_model_reference_ = make_child<QLineEdit>(algorithm_editor_);
+            algorithm_model_reference_->setMaxLength(512);
+            algorithm_model_version_ = make_child<QLineEdit>(algorithm_editor_);
+            algorithm_model_version_->setMaxLength(128);
+            algorithm_device_ = make_child<QComboBox>(algorithm_editor_);
+            algorithm_device_->setEditable(true);
+            algorithm_device_->addItems(
+                {QStringLiteral("cpu"), QStringLiteral("cuda"), QStringLiteral("directml")});
+            algorithm_device_->lineEdit()->setMaxLength(64);
+            algorithm_debug_overlay_ =
+                make_child<QCheckBox>(algorithm_editor_, QStringLiteral("启用调试可视化数据"));
+            form->addRow(QStringLiteral("启用"), algorithm_enabled_);
+            form->addRow(QStringLiteral("检测器类型"), algorithm_type_);
+            form->addRow(QStringLiteral("ROI 宽"), algorithm_roi_width_);
+            form->addRow(QStringLiteral("ROI 高"), algorithm_roi_height_);
+            form->addRow(QStringLiteral("ROI X"), algorithm_roi_x_);
+            form->addRow(QStringLiteral("ROI Y"), algorithm_roi_y_);
+            form->addRow(QStringLiteral("候选阈值"), algorithm_candidate_threshold_);
+            form->addRow(QStringLiteral("确认阈值"), algorithm_confirmation_threshold_);
+            form->addRow(QStringLiteral("连续帧"), algorithm_consecutive_frames_);
+            form->addRow(QStringLiteral("冷却时间 (ms)"), algorithm_cooldown_ms_);
+            form->addRow(QStringLiteral("模型引用"), algorithm_model_reference_);
+            form->addRow(QStringLiteral("配置模型版本"), algorithm_model_version_);
+            form->addRow(QStringLiteral("设备"), algorithm_device_);
+            form->addRow(QStringLiteral("调试"), algorithm_debug_overlay_);
+            algorithm_editor_->setEnabled(false);
+            content_layout->addWidget(algorithm_editor_);
+
+            auto* actions = make_child<QWidget>(content);
+            auto* actions_layout = make_layout<QHBoxLayout>(actions);
+            actions_layout->setContentsMargins(0, 0, 0, 0);
+            algorithm_save_ =
+                make_child<QPushButton>(actions, QStringLiteral("保存并应用算法配置"));
+            algorithm_save_->setObjectName(QStringLiteral("algorithm-save"));
+            algorithm_test_ = make_child<QPushButton>(actions, QStringLiteral("测试当前图像"));
+            algorithm_test_->setObjectName(QStringLiteral("algorithm-test-current-frame"));
+            algorithm_save_->setEnabled(false);
+            algorithm_test_->setEnabled(false);
+            actions_layout->addWidget(algorithm_save_);
+            actions_layout->addWidget(algorithm_test_);
+            actions_layout->addStretch(1);
+            content_layout->addWidget(actions);
+
+            algorithm_runtime_status_ =
+                make_child<QLabel>(content, QStringLiteral("正在读取实际生效状态"));
+            algorithm_runtime_status_->setObjectName(QStringLiteral("algorithm-runtime-status"));
+            algorithm_runtime_status_->setWordWrap(true);
+            algorithm_runtime_status_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            content_layout->addWidget(algorithm_runtime_status_);
+
+            auto* metric_group =
+                make_child<QGroupBox>(content, QStringLiteral("算法运行时汇总性能与结果指标"));
+            auto* metric_layout = make_layout<QVBoxLayout>(metric_group);
+            algorithm_metrics_ = make_child<QTableWidget>(metric_group);
+            algorithm_metrics_->setObjectName(QStringLiteral("algorithm-metrics"));
+            configure_table(algorithm_metrics_,
+                            {QStringLiteral("指标"), QStringLiteral("值"), QStringLiteral("单位")});
+            metric_layout->addWidget(algorithm_metrics_);
+            content_layout->addWidget(metric_group);
+
+            auto* test_group = make_child<QGroupBox>(content, QStringLiteral("隔离单帧测试结果"));
+            auto* test_layout = make_layout<QVBoxLayout>(test_group);
+            algorithm_test_result_ = make_child<QLabel>(test_group, QStringLiteral("尚未测试"));
+            algorithm_test_result_->setObjectName(QStringLiteral("algorithm-test-result"));
+            algorithm_test_result_->setWordWrap(true);
+            algorithm_test_preview_ =
+                make_child<QLabel>(test_group, QStringLiteral("测试后显示当前图像"));
+            algorithm_test_preview_->setObjectName(QStringLiteral("algorithm-test-preview"));
+            algorithm_test_preview_->setAlignment(Qt::AlignCenter);
+            algorithm_test_preview_->setMinimumHeight(240);
+            algorithm_debug_metrics_ = make_child<QTableWidget>(test_group);
+            algorithm_debug_metrics_->setObjectName(QStringLiteral("algorithm-debug-metrics"));
+            configure_table(algorithm_debug_metrics_,
+                            {QStringLiteral("调试指标"), QStringLiteral("值")});
+            test_layout->addWidget(algorithm_test_result_);
+            test_layout->addWidget(algorithm_test_preview_);
+            test_layout->addWidget(algorithm_debug_metrics_);
+            content_layout->addWidget(test_group);
+
+            algorithm_operation_status_ =
+                make_child<QLabel>(content, QStringLiteral("等待后台服务连接"));
+            algorithm_operation_status_->setWordWrap(true);
+            content_layout->addWidget(algorithm_operation_status_);
+            content_layout->addStretch(1);
+            scroll->setWidget(content);
+            layout->addWidget(scroll, 1);
+
+            QObject::connect(algorithm_camera_selector_, &QComboBox::currentTextChanged, this,
+                             [this](const QString& camera_id) {
+                                 if (algorithm_actions_.select_camera)
+                                     show_algorithm_result(
+                                         algorithm_actions_.select_camera(camera_id.toStdString()));
+                             });
+            QObject::connect(refresh, &QPushButton::clicked, this, [this] {
+                if (algorithm_actions_.refresh)
+                    algorithm_actions_.refresh();
+            });
+            QObject::connect(algorithm_save_, &QPushButton::clicked, this, [this] {
+                if (!algorithm_actions_.update_configuration)
+                    return;
+                show_algorithm_result(algorithm_actions_.update_configuration(
+                    {.enabled = algorithm_enabled_->isChecked(),
+                     .type = algorithm_type_->currentData().toString().toStdString(),
+                     .roi = {.width = static_cast<std::uint32_t>(algorithm_roi_width_->value()),
+                             .height = static_cast<std::uint32_t>(algorithm_roi_height_->value()),
+                             .offset_x = static_cast<std::uint32_t>(algorithm_roi_x_->value()),
+                             .offset_y = static_cast<std::uint32_t>(algorithm_roi_y_->value())},
+                     .candidate_threshold = algorithm_candidate_threshold_->value(),
+                     .confirmation_threshold = algorithm_confirmation_threshold_->value(),
+                     .consecutive_frames =
+                         static_cast<std::uint32_t>(algorithm_consecutive_frames_->value()),
+                     .cooldown_ms = static_cast<std::uint32_t>(algorithm_cooldown_ms_->value()),
+                     .model_reference = algorithm_model_reference_->text().toStdString(),
+                     .model_version = algorithm_model_version_->text().toStdString(),
+                     .device = algorithm_device_->currentText().toStdString(),
+                     .debug_overlay = algorithm_debug_overlay_->isChecked()}));
+            });
+            QObject::connect(algorithm_test_, &QPushButton::clicked, this, [this] {
+                if (algorithm_actions_.test_current_frame)
+                    show_algorithm_result(algorithm_actions_.test_current_frame());
             });
             pages_->addWidget(page);
             continue;
@@ -1524,6 +1726,15 @@ void MainWindow::show_operations_result(const Result<void>& result)
             QStringLiteral("失败：%1").arg(QString::fromStdString(result.error().message)));
 }
 
+void MainWindow::show_algorithm_result(const Result<void>& result)
+{
+    if (!result && algorithm_operation_status_)
+        algorithm_operation_status_->setText(
+            QStringLiteral("失败：%1（%2）")
+                .arg(QString::fromStdString(result.error().message),
+                     QString::fromStdString(result.error().business_code)));
+}
+
 void MainWindow::show_event_result(const Result<void>& result)
 {
     if (!result && event_status_)
@@ -1676,6 +1887,222 @@ void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
         operations_status_->setText(QStringLiteral("后台服务连接中断，运维数据已标记过期"));
     else
         operations_status_->setText(QStringLiteral("运维数据已同步；诊断导出内容将强制脱敏"));
+}
+
+void MainWindow::apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapshot)
+{
+    const bool configuration_changed =
+        algorithm_snapshot_.camera_id != snapshot.camera_id ||
+        algorithm_snapshot_.stored_config_revision != snapshot.stored_config_revision ||
+        algorithm_snapshot_.stale;
+    algorithm_snapshot_ = snapshot;
+    if (!algorithm_editor_ || !algorithm_runtime_status_ || !algorithm_metrics_)
+        return;
+
+    const QString selected = QString::fromStdString(snapshot.camera_id);
+    if (algorithm_camera_selector_->currentText() != selected)
+    {
+        algorithm_camera_selector_->blockSignals(true);
+        algorithm_camera_selector_->setCurrentText(selected);
+        algorithm_camera_selector_->blockSignals(false);
+    }
+    if (configuration_changed && !snapshot.stale)
+    {
+        const auto& value = snapshot.configuration;
+        algorithm_enabled_->setChecked(value.enabled);
+        int type = algorithm_type_->findData(QString::fromStdString(value.type));
+        if (type < 0)
+        {
+            algorithm_type_->addItem(QString::fromStdString(value.type),
+                                     QString::fromStdString(value.type));
+            type = algorithm_type_->count() - 1;
+        }
+        algorithm_type_->setCurrentIndex(type);
+        algorithm_roi_width_->setValue(static_cast<int>(value.roi.width));
+        algorithm_roi_height_->setValue(static_cast<int>(value.roi.height));
+        algorithm_roi_x_->setValue(static_cast<int>(value.roi.offset_x));
+        algorithm_roi_y_->setValue(static_cast<int>(value.roi.offset_y));
+        algorithm_candidate_threshold_->setValue(value.candidate_threshold);
+        algorithm_confirmation_threshold_->setValue(value.confirmation_threshold);
+        algorithm_consecutive_frames_->setValue(static_cast<int>(value.consecutive_frames));
+        algorithm_cooldown_ms_->setValue(static_cast<int>(value.cooldown_ms));
+        algorithm_model_reference_->setText(QString::fromStdString(value.model_reference));
+        algorithm_model_version_->setText(QString::fromStdString(value.model_version));
+        algorithm_device_->setEditText(QString::fromStdString(value.device));
+        algorithm_debug_overlay_->setChecked(value.debug_overlay);
+    }
+
+    const bool connected = snapshot.connection.state == ipc::ClientConnectionState::connected;
+    const bool editable = connected && !snapshot.stale && !snapshot.operation_pending;
+    algorithm_camera_selector_->setEnabled(connected && !snapshot.operation_pending);
+    algorithm_editor_->setEnabled(editable);
+    algorithm_save_->setEnabled(editable);
+    algorithm_test_->setEnabled(editable && snapshot.runtime.has_current_frame);
+
+    if (snapshot.stale)
+        algorithm_runtime_status_->setText(
+            QStringLiteral("算法配置或实际状态不可用，旧值已标记过期"));
+    else
+    {
+        const auto& runtime = snapshot.runtime;
+        const QString prototype =
+            runtime.prototype_only ? QStringLiteral("是") : QStringLiteral("否");
+        QString application_state = QStringLiteral("已保存");
+        if (snapshot.stored_config_revision == snapshot.effective_config_revision)
+            application_state += QStringLiteral(" · 已下发");
+        if (runtime.config_revision == snapshot.effective_config_revision)
+            application_state += QStringLiteral(" · 已应用 · 无需重启");
+        else
+            application_state += QStringLiteral(" · 运行时修订尚未一致");
+        algorithm_runtime_status_->setText(
+            QStringLiteral("%1\n实际状态：%2 · 相机 %3 · 生效修订 %4（保存修订 %5）\n"
+                           "插件：%6 / %7 · 实现版本 %8 · 检测器模型版本 %9 · 配置设备 %10\n"
+                           "仅原型：%11 · 热更新：%12 · 当前帧：%13（序号 %14）")
+                .arg(application_state, QString::fromStdString(runtime.state),
+                     QString::fromStdString(runtime.camera_id))
+                .arg(snapshot.effective_config_revision)
+                .arg(snapshot.stored_config_revision)
+                .arg(QString::fromStdString(runtime.plugin_id),
+                     QString::fromStdString(runtime.display_name),
+                     QString::fromStdString(runtime.implementation_version),
+                     QString::fromStdString(runtime.detector_model_version),
+                     QString::fromStdString(snapshot.effective_configuration.device), prototype,
+                     runtime.supports_hot_update ? QStringLiteral("支持")
+                                                 : QStringLiteral("不支持"),
+                     runtime.has_current_frame ? QStringLiteral("可测试") : QStringLiteral("无"))
+                .arg(runtime.latest_sequence_number));
+    }
+
+    const auto& metrics = snapshot.runtime.metrics;
+    const std::array metric_rows{
+        std::tuple{QStringLiteral("算法队列深度"), QString::number(metrics.queue_depth),
+                   QStringLiteral("帧")},
+        std::tuple{QStringLiteral("算法队列容量"), QString::number(metrics.queue_capacity),
+                   QStringLiteral("帧")},
+        std::tuple{QStringLiteral("队列高水位"), QString::number(metrics.queue_high_watermark),
+                   QStringLiteral("帧")},
+        std::tuple{QStringLiteral("已提交帧"), QString::number(metrics.submitted_frames),
+                   QStringLiteral("帧")},
+        std::tuple{QStringLiteral("已处理帧"), QString::number(metrics.processed_frames),
+                   QStringLiteral("帧")},
+        std::tuple{QStringLiteral("跳帧"), QString::number(metrics.skipped_frames),
+                   QStringLiteral("帧")},
+        std::tuple{QStringLiteral("检测失败"), QString::number(metrics.detector_failures),
+                   QStringLiteral("次")},
+        std::tuple{QStringLiteral("连续失败"),
+                   QString::number(metrics.consecutive_detector_failures), QStringLiteral("次")},
+        std::tuple{QStringLiteral("处理调用"), QString::number(metrics.process_calls),
+                   QStringLiteral("次")},
+        std::tuple{QStringLiteral("最近处理耗时"), QString::number(metrics.last_processing_time_us),
+                   QStringLiteral("us")},
+        std::tuple{QStringLiteral("平均处理耗时"),
+                   QString::number(metrics.average_processing_time_us), QStringLiteral("us")},
+        std::tuple{QStringLiteral("最大处理耗时"),
+                   QString::number(metrics.maximum_processing_time_us), QStringLiteral("us")},
+        std::tuple{QStringLiteral("候选"), QString::number(metrics.candidates_created),
+                   QStringLiteral("个")},
+        std::tuple{QStringLiteral("确认"), QString::number(metrics.confirmed_events),
+                   QStringLiteral("个")},
+        std::tuple{QStringLiteral("拒绝"), QString::number(metrics.rejected_candidates),
+                   QStringLiteral("个")}};
+    algorithm_metrics_->setRowCount(static_cast<int>(metric_rows.size()));
+    for (std::size_t index = 0; index < metric_rows.size(); ++index)
+    {
+        const int row = static_cast<int>(index);
+        set_table_item(algorithm_metrics_, row, 0, std::get<0>(metric_rows[index]));
+        set_table_item(algorithm_metrics_, row, 1, std::get<1>(metric_rows[index]));
+        set_table_item(algorithm_metrics_, row, 2, std::get<2>(metric_rows[index]));
+    }
+    algorithm_metrics_->resizeColumnsToContents();
+
+    algorithm_debug_metrics_->setRowCount(
+        snapshot.test_result ? static_cast<int>(snapshot.test_result->debug_metrics.size()) : 0);
+    if (snapshot.test_result)
+    {
+        const auto& result = *snapshot.test_result;
+        algorithm_test_result_->setText(
+            QStringLiteral(
+                "隔离测试=%1；未创建正式候选=%2；帧 %3；异常=%4；触发=%5；类型=%6；"
+                "置信度=%7；面积比=%8；变化量=%9；耗时=%10 us；原因=%11；实现=%12；模型=%13")
+                .arg(result.isolated ? QStringLiteral("是") : QStringLiteral("否"),
+                     result.candidate_created ? QStringLiteral("否") : QStringLiteral("是"))
+                .arg(result.sequence_number)
+                .arg(result.anomalous ? QStringLiteral("是") : QStringLiteral("否"),
+                     result.triggered ? QStringLiteral("是") : QStringLiteral("否"),
+                     QString::fromStdString(result.candidate_type))
+                .arg(result.confidence, 0, 'f', 4)
+                .arg(result.area_ratio, 0, 'f', 4)
+                .arg(result.change_score, 0, 'f', 4)
+                .arg(result.processing_time_us)
+                .arg(QString::fromStdString(result.reason),
+                     QString::fromStdString(result.detector_version),
+                     QString::fromStdString(result.model_version)));
+        QPixmap preview;
+        if (!result.preview_jpeg.empty() &&
+            preview.loadFromData(reinterpret_cast<const uchar*>(result.preview_jpeg.data()),
+                                 static_cast<uint>(result.preview_jpeg.size()), "JPEG"))
+        {
+            if (snapshot.configuration.debug_overlay && result.preview_source_width > 0U &&
+                result.preview_source_height > 0U)
+            {
+                const double scale_x = static_cast<double>(preview.width()) /
+                                       static_cast<double>(result.preview_source_width);
+                const double scale_y = static_cast<double>(preview.height()) /
+                                       static_cast<double>(result.preview_source_height);
+                const QRectF region{result.evaluated_region.offset_x * scale_x,
+                                    result.evaluated_region.offset_y * scale_y,
+                                    result.evaluated_region.width * scale_x,
+                                    result.evaluated_region.height * scale_y};
+                QPainter painter{&preview};
+                const QColor color = result.anomalous ? QColor{220, 50, 47} : QColor{38, 166, 91};
+                painter.setPen(QPen{color, 3.0});
+                painter.drawRect(region);
+                painter.fillRect(QRectF{region.left(), region.top(), 260.0, 28.0},
+                                 QColor{0, 0, 0, 170});
+                painter.setPen(Qt::white);
+                painter.drawText(QRectF{region.left() + 6.0, region.top(), 250.0, 28.0},
+                                 Qt::AlignVCenter,
+                                 QStringLiteral("%1 置信度 %2")
+                                     .arg(QString::fromStdString(result.candidate_type))
+                                     .arg(result.confidence, 0, 'f', 3));
+            }
+            algorithm_test_preview_->setPixmap(
+                preview.scaled(900, 520, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        }
+        else
+        {
+            algorithm_test_preview_->setPixmap({});
+            algorithm_test_preview_->setText(QStringLiteral("测试图像不可用"));
+        }
+        for (std::size_t index = 0; index < result.debug_metrics.size(); ++index)
+        {
+            set_table_item(algorithm_debug_metrics_, static_cast<int>(index), 0,
+                           QString::fromStdString(result.debug_metrics[index].name));
+            set_table_item(algorithm_debug_metrics_, static_cast<int>(index), 1,
+                           QString::number(result.debug_metrics[index].value, 'g', 10));
+        }
+    }
+    else
+    {
+        algorithm_test_result_->setText(QStringLiteral("尚未对当前图像执行隔离测试"));
+        algorithm_test_preview_->setPixmap({});
+        algorithm_test_preview_->setText(QStringLiteral("测试后显示当前图像及 ROI / 检测结果叠加"));
+    }
+    algorithm_debug_metrics_->resizeColumnsToContents();
+
+    if (snapshot.operation_pending)
+        algorithm_operation_status_->setText(
+            QStringLiteral("正在执行 %1").arg(QString::fromStdString(snapshot.operation)));
+    else if (snapshot.error)
+        algorithm_operation_status_->setText(
+            QStringLiteral("失败：%1（%2）")
+                .arg(QString::fromStdString(snapshot.error->message),
+                     QString::fromStdString(snapshot.error->business_code)));
+    else if (!connected)
+        algorithm_operation_status_->setText(QStringLiteral("后台服务连接中断"));
+    else
+        algorithm_operation_status_->setText(
+            QStringLiteral("配置与实际状态已同步；单帧测试不会创建候选或写入磁盘"));
 }
 
 void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
@@ -1962,16 +2389,28 @@ bool MainWindow::operations_pages_ready() const noexcept
            has_readable_table_header(log_table_);
 }
 
+bool MainWindow::algorithm_page_ready() const noexcept
+{
+    return algorithm_camera_selector_ && algorithm_editor_ && algorithm_enabled_ &&
+           algorithm_type_ && algorithm_roi_width_ && algorithm_roi_height_ && algorithm_roi_x_ &&
+           algorithm_roi_y_ && algorithm_candidate_threshold_ &&
+           algorithm_confirmation_threshold_ && algorithm_consecutive_frames_ &&
+           algorithm_cooldown_ms_ && algorithm_model_reference_ && algorithm_model_version_ &&
+           algorithm_device_ && algorithm_debug_overlay_ && algorithm_save_ && algorithm_test_ &&
+           algorithm_runtime_status_ && algorithm_metrics_ && algorithm_test_result_ &&
+           algorithm_test_preview_ && algorithm_debug_metrics_ &&
+           findChild<QLabel*>(QStringLiteral("algorithm-prototype-notice"));
+}
+
 bool MainWindow::event_pages_ready() const noexcept
 {
     return event_config_editor_ && event_config_save_ && event_pre_seconds_ &&
-           event_post_seconds_ && event_max_seconds_ &&
-           event_merge_seconds_ && event_key_frames_ && event_retention_days_ && event_save_raw_ &&
-           event_preview_video_ && event_upload_policy_ && event_filter_start_ &&
-           event_filter_end_ && event_filter_state_ && event_filter_camera_ && event_table_ &&
-           event_thumbnail_ && event_manifest_ && event_confirm_ && event_reject_ &&
-           event_export_ && event_open_directory_ && event_retry_upload_ &&
-           !event_retry_upload_->isEnabled();
+           event_post_seconds_ && event_max_seconds_ && event_merge_seconds_ && event_key_frames_ &&
+           event_retention_days_ && event_save_raw_ && event_preview_video_ &&
+           event_upload_policy_ && event_filter_start_ && event_filter_end_ &&
+           event_filter_state_ && event_filter_camera_ && event_table_ && event_thumbnail_ &&
+           event_manifest_ && event_confirm_ && event_reject_ && event_export_ &&
+           event_open_directory_ && event_retry_upload_ && !event_retry_upload_->isEnabled();
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

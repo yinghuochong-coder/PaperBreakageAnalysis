@@ -1,3 +1,4 @@
+#include "paperbreak/console/algorithm_client.hpp"
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/event_client.hpp"
@@ -289,8 +290,7 @@ class EventClientHandler final : public paperbreak::ipc::IRequestHandler
             if (reject_config_update.load())
                 return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
                     paperbreak::make_error("SYS_CONFIG_INVALID", paperbreak::Severity::error,
-                                           "事件配置校验失败", "test",
-                                           "eventClient.updateConfig"));
+                                           "事件配置校验失败", "test", "eventClient.updateConfig"));
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json = R"({"accepted":true})", .binary = {}});
         }
@@ -304,6 +304,111 @@ class EventClientHandler final : public paperbreak::ipc::IRequestHandler
     std::string last_update_payload;
     std::atomic_bool reject_config_update{};
     std::filesystem::path export_source;
+};
+
+class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage& request, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        const auto request_payload = nlohmann::json::parse(request.payload_json);
+        const std::string camera_id = request_payload.value("cameraId", "CAM01");
+        if (request.command == "algorithm.updateConfig")
+        {
+            std::scoped_lock lock{mutex};
+            last_update_payload = request.payload_json;
+        }
+        if (request.command == "algorithm.getConfig" || request.command == "algorithm.updateConfig")
+        {
+            const nlohmann::json configuration{
+                {"enabled", true},
+                {"type", "classical-vision"},
+                {"roi", {{"width", 4}, {"height", 4}, {"offsetX", 0}, {"offsetY", 0}}},
+                {"candidateThreshold", 0.6},
+                {"confirmationThreshold", 0.8},
+                {"consecutiveFrames", 3},
+                {"cooldownMs", 1000},
+                {"modelReference", ""},
+                {"modelVersion", "prototype-config"},
+                {"device", "cpu"},
+                {"debugOverlay", true}};
+            const nlohmann::json runtime{{"cameraId", camera_id},
+                                         {"configRevision", 9},
+                                         {"state", "active"},
+                                         {"hasCurrentFrame", true},
+                                         {"latestSequenceNumber", 41},
+                                         {"detector",
+                                          {{"pluginId", "classical-vision"},
+                                           {"displayName", "M6 Classical Vision Prototype"},
+                                           {"implementationVersion", "1.0.0-prototype"},
+                                           {"modelVersion", "none"},
+                                           {"supportsHotUpdate", true},
+                                           {"prototypeOnly", true}}},
+                                         {"metrics",
+                                          {{"queueDepth", 1},
+                                           {"queueCapacity", 8},
+                                           {"queueHighWatermark", 3},
+                                           {"submittedFrames", 40},
+                                           {"processedFrames", 39},
+                                           {"skippedFrames", 1},
+                                           {"detectorFailures", 2},
+                                           {"consecutiveDetectorFailures", 0},
+                                           {"processCalls", 39},
+                                           {"lastProcessingTimeUs", 100},
+                                           {"averageProcessingTimeUs", 90},
+                                           {"maximumProcessingTimeUs", 180},
+                                           {"candidatesCreated", 4},
+                                           {"confirmedEvents", 2},
+                                           {"rejectedCandidates", 1}}}};
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = nlohmann::json{{"algorithm", configuration},
+                                                {"effectiveAlgorithm", configuration},
+                                                {"storedConfigRevision", 9},
+                                                {"effectiveConfigRevision", 9},
+                                                {"runtime", runtime}}
+                                     .dump(),
+                 .binary = {}});
+        }
+        if (request.command == "algorithm.testCurrentFrame")
+        {
+            const nlohmann::json result{
+                {"triggered", true},
+                {"anomalous", true},
+                {"triggerSource", "RoiPaperRatio"},
+                {"candidateType", "paper-missing"},
+                {"sequenceNumber", 41},
+                {"confidence", 0.9},
+                {"areaRatio", 0.8},
+                {"changeScore", 0.7},
+                {"processingTimeUs", 123},
+                {"reason", "paper-ratio-below-minimum"},
+                {"detectorVersion", "1.0.0-prototype"},
+                {"modelVersion", "none"},
+                {"evaluatedRegion", {{"offsetX", 0}, {"offsetY", 0}, {"width", 4}, {"height", 4}}},
+                {"debugMetrics",
+                 nlohmann::json::array({{{"name", "paperRatio"}, {"value", 0.2}}})}};
+            const nlohmann::json response{
+                {"isolated", true},
+                {"candidateCreated", false},
+                {"detector", {{"pluginId", "classical-vision"}, {"prototypeOnly", true}}},
+                {"previewFormat", "jpeg"},
+                {"previewSourceWidth", 4},
+                {"previewSourceHeight", 4},
+                {"previewBytes", 4},
+                {"result", result}};
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = response.dump(),
+                 .binary = {std::byte{0xff}, std::byte{0xd8}, std::byte{0xff}, std::byte{0xd9}}});
+        }
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+            paperbreak::make_error("IPC_REQUEST_INVALID", paperbreak::Severity::error, "unexpected",
+                                   "test", "algorithmClient.handle"));
+    }
+
+    std::mutex mutex;
+    std::string last_update_payload;
 };
 
 class PreviewSubscriptionHandler final : public paperbreak::ipc::IRequestHandler
@@ -757,6 +862,82 @@ TEST(OperationsClient, QueriesFiltersAcknowledgesAndExportsThroughBoundedWorker)
     EXPECT_FALSE(cleanup_error);
 }
 
+TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
+{
+    const std::string name = state_name();
+    auto handler = std::make_shared<AlgorithmClientHandler>();
+    paperbreak::ipc::IpcServer server(handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name));
+    ASSERT_TRUE(server.start());
+
+    paperbreak::console::AlgorithmClientSnapshot latest;
+    paperbreak::console::AlgorithmClient client([&](const auto& snapshot) { latest = snapshot; },
+                                                client_options(name));
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until([&] { return !latest.stale; }));
+    EXPECT_EQ(latest.camera_id, "CAM01");
+    EXPECT_EQ(latest.stored_config_revision, 9U);
+    EXPECT_EQ(latest.configuration.type, "classical-vision");
+    EXPECT_EQ(latest.runtime.plugin_id, "classical-vision");
+    EXPECT_EQ(latest.runtime.state, "active");
+    EXPECT_TRUE(latest.runtime.prototype_only);
+    EXPECT_TRUE(latest.runtime.has_current_frame);
+    EXPECT_EQ(latest.runtime.metrics.queue_capacity, 8U);
+    EXPECT_EQ(latest.runtime.metrics.maximum_processing_time_us, 180);
+
+    auto changed = latest.configuration;
+    changed.enabled = false;
+    changed.candidate_threshold = 0.25;
+    changed.confirmation_threshold = 0.75;
+    changed.consecutive_frames = 7U;
+    changed.cooldown_ms = 500U;
+    changed.model_reference = "models/prototype.bin";
+    changed.model_version = "prototype-2";
+    changed.device = "directml";
+    changed.debug_overlay = false;
+    ASSERT_TRUE(client.update_configuration(changed));
+    ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{handler->mutex};
+        return !handler->last_update_payload.empty() && !latest.operation_pending;
+    }));
+    {
+        std::scoped_lock lock{handler->mutex};
+        const auto payload = nlohmann::json::parse(handler->last_update_payload);
+        EXPECT_EQ(payload["cameraId"], "CAM01");
+        EXPECT_EQ(payload["expectedConfigRevision"], 9U);
+        EXPECT_FALSE(payload["algorithm"]["enabled"].get<bool>());
+        EXPECT_EQ(payload["algorithm"]["candidateThreshold"], 0.25);
+        EXPECT_EQ(payload["algorithm"]["consecutiveFrames"], 7U);
+        EXPECT_EQ(payload["algorithm"]["modelReference"], "models/prototype.bin");
+        EXPECT_EQ(payload["algorithm"]["device"], "directml");
+    }
+
+    ASSERT_TRUE(client.test_current_frame());
+    ASSERT_TRUE(wait_until([&] { return latest.test_result.has_value(); }));
+    EXPECT_TRUE(latest.test_result->isolated);
+    EXPECT_FALSE(latest.test_result->candidate_created);
+    EXPECT_TRUE(latest.test_result->triggered);
+    EXPECT_EQ(latest.test_result->candidate_type, "paper-missing");
+    EXPECT_EQ(latest.test_result->sequence_number, 41U);
+    EXPECT_EQ(latest.test_result->preview_source_width, 4U);
+    EXPECT_EQ(latest.test_result->preview_jpeg.size(), 4U);
+    ASSERT_EQ(latest.test_result->debug_metrics.size(), 1U);
+    EXPECT_EQ(latest.test_result->debug_metrics.front().name, "paperRatio");
+
+    ASSERT_TRUE(client.select_camera("CAM02"));
+    ASSERT_TRUE(wait_until([&] { return !latest.stale && latest.runtime.camera_id == "CAM02"; }));
+    auto invalid = client.select_camera("CAM99");
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
+
+    client.stop();
+    EXPECT_TRUE(latest.stale);
+    auto disconnected = client.test_current_frame();
+    ASSERT_FALSE(disconnected);
+    EXPECT_EQ(disconnected.error().business_code, "IPC_NOT_CONNECTED");
+    stop_server(server);
+}
+
 TEST(EventClient, QueriesDetailsReviewsAndExportsVerifiedArchive)
 {
     const std::string name = state_name();
@@ -799,9 +980,8 @@ TEST(EventClient, QueriesDetailsReviewsAndExportsVerifiedArchive)
 
     handler->reject_config_update.store(true);
     ASSERT_TRUE(client.update_configuration(changed_configuration));
-    ASSERT_TRUE(wait_until([&] {
-        return !latest.operation_pending && latest.configuration_error.has_value();
-    }));
+    ASSERT_TRUE(wait_until(
+        [&] { return !latest.operation_pending && latest.configuration_error.has_value(); }));
     EXPECT_EQ(latest.configuration_error->business_code, "SYS_CONFIG_INVALID");
     EXPECT_EQ(latest.configuration_error->message, "事件配置校验失败");
     handler->reject_config_update.store(false);

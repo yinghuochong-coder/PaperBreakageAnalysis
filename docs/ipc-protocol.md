@@ -326,6 +326,32 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 响应仍保留 `saved=true`，同时返回 `applied=false` 和结构化 `applyError`，客户端不得把保存值显示为
 实际值。
 
+### 算法配置、实际状态与当前图像测试
+
+`algorithm.getConfig` 要求已认证本机用户；`algorithm.updateConfig` 和
+`algorithm.testCurrentFrame` 要求提升后的本机管理员。三项命令均只接受 CAM01～CAM04，
+未知字段被拒绝；服务停止写入阶段拒绝后两项命令。
+
+- `algorithm.getConfig`：payload 为 `{"cameraId":"CAM01"}`。返回完整保存配置
+  `algorithm`、实际有效配置 `effectiveAlgorithm`、两项配置修订和 `runtime`。运行时包含实际
+  检测器信息、`active` / `disabled` / `manual-trigger-only` 状态、当前帧可用性及序号；
+  `metrics` 包含有界算法运行时的队列深度/容量/高水位、提交/处理/跳过/失败帧、处理调用与
+  最近/平均/最大耗时、候选/确认/拒绝计数。当前指标是共享算法事件运行时汇总，不伪装为单路
+  独立计数；禁用时 `detector` 为 `null`。
+- `algorithm.updateConfig`：payload 必须且只能包含 `cameraId`、无符号
+  `expectedConfigRevision` 和完整 `algorithm` 对象。服务复用严格 schema、乐观修订、原子
+  保存、审计和事务式热应用；冲突返回 `SYS_CONFIG_VERSION_CONFLICT`，失败保留旧检测器和
+  旧有效配置。成功响应与 `algorithm.getConfig` 相同，以便客户端立即显示实际应用修订与状态。
+- `algorithm.testCurrentFrame`：payload 为 `{"cameraId":"CAM01"}`。服务复制该相机最近一帧
+  的 RAII 视图，在正式算法队列和候选状态机之外创建隔离检测器，执行一次检测并同步生成最多
+  8 MiB 的 JPEG；没有当前帧返回 `ALGORITHM_NOT_READY`。JSON 返回 `detector`、完整
+  `DetectionResult`、`isolated=true`、`candidateCreated=false`、JPEG 格式/字节数及源图尺寸，
+  二进制负载为该 JPEG。该操作不改变正式检测器状态/指标，不创建候选且不写盘；Qt 客户端按
+  `evaluatedRegion` 绘制 ROI、候选类型和置信度叠加。
+
+M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 UI 持续可见，不能解释为
+正式断纸算法验收通过。
+
 ### 事件配置、查询、复核与导出
 
 事件读取命令要求已认证本机用户；`event.updateConfig`、`event.manualTrigger`、
