@@ -67,9 +67,11 @@ v1 命令集合：`system.requestStatus`、`config.replace`、`event.review`、`
 
 M8-02 边缘运行时只允许单一工作线程调用同步传输。传输命令回调只尝试写入默认 64、最大 4096 条且默认 8 MiB、最大 64 MiB 的双重有界队列；任一上限满载都拒绝最新命令并累计 `UPLINK_SERVER_BUSY` 语义指标，不能阻塞网络回调。连接成功后立即发送一次 `status`，随后按协商的 1～3600 秒间隔依次发送 `heartbeat` 和 `status`。连接、心跳或状态发送失败后，从默认 1 秒开始指数退避，最大 1 分钟；具体运行时配置不得超过 1 小时。
 
-边缘端严格校验命令字段、协议版本、当前 `machineId`、RFC 3339 截止时间和握手能力。除 `system.requestStatus` 外，命令还必须具有 `operatorConfirmed=true` 且审计日志已装配。命令映射进入与本机 IPC 相同的 `SystemCommandService` dispatcher，配置替换使用同一 schema、修订冲突和原子存储逻辑，并把审计来源记录为 `uplink`。`event.retryUpload` 在 M8-03 前稳定返回不支持；`service.restart` 未声明能力时不增加 SCM 旁路。
+边缘端严格校验命令字段、协议版本、当前 `machineId`、RFC 3339 截止时间和握手能力。除 `system.requestStatus` 外，命令还必须具有 `operatorConfirmed=true` 且审计日志已装配。命令映射进入与本机 IPC 相同的 `SystemCommandService` dispatcher，配置替换使用同一 schema、修订冲突和原子存储逻辑，并把审计来源记录为 `uplink`。M8-03 起，已装配事件数据库时 `event.retryUpload` 将指定事件处于 `RetryWait`、`PermanentFailed` 或 `ManualIntervention` 的任务幂等地放回 `Pending`；没有可重试任务时返回 `requeuedJobs=0`，不创建事件或任务。`service.restart` 未声明能力时不增加 SCM 旁路。
 
 命令结果缓存默认保留最近 1024、最大 4096 个 `commandId`，同时受默认 16 MiB、最大 64 MiB 字节上限约束，按 FIFO 淘汰最旧结果。相同 ID 和相同规范化内容重放原业务结果，`duplicate=true` 且不再次执行；相同 ID 与不同内容返回 `UPLINK_COMMAND_CONFLICT`。缓存只在当前边缘进程内有效，不替代上位机对未确认命令的持久重放。`command.result` 的 `result` 或 `error` 均为不超过 1 MiB 的 JSON 对象；现有服务命令若产生本机二进制附件，结果只报告 `binaryOmitted=true` 和字节数，二进制文件上传由 M8-03/M8-04 的可靠文件路径处理。
+
+M8-03 的可靠上传任务保存在边缘 SQLite schema v4，不经命令结果缓存。任务按报警元数据、关键帧、manifest、低码率回放、原始文件的顺序领取，同时受未完成条数、未完成声明字节和全部历史条数上限约束；永久失败和人工处理仍占未完成预算，历史满载只淘汰最旧已完成行。同一幂等键及相同内容只保留一行；冲突内容返回 `UPLOAD_JOB_CONFLICT`。可重试失败按带抖动且有最大间隔的指数退避重新到期，达到最大尝试次数转人工处理；永久拒绝直接转 `PermanentFailed`。重启时遗留在途任务保留 ID 与 checkpoint 后恢复，不重复建立事件。M8-03 的执行器接口不定义分块、断点续传和端到端校验，这些仍由 M8-04 完成。
 
 ## 5. JPEG 预览二进制帧
 

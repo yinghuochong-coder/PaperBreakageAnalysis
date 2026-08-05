@@ -1737,9 +1737,31 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                  .binary = {}});
         }
         if (request.command == "event.retryUpload")
-            return Result<ipc::CommandResponse>::failure(
-                command_error("SYS_NOT_SUPPORTED", Severity::warning,
-                              "上传队列将在 M8 接入，当前不能重试上传", "ipc.event.retryUpload"));
+        {
+            if (!has_only_field(payload.value(), "eventId") ||
+                !payload.value()["eventId"].is_string())
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "IPC_REQUEST_INVALID", Severity::error,
+                    "event.retryUpload 必须且只能包含 eventId", "ipc.event.retryUpload"));
+            if (!event_database_)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("SYS_NOT_SUPPORTED", Severity::warning, "持久上传仓库尚未装配",
+                                  "ipc.event.retryUpload"));
+            const auto event_id = payload.value()["eventId"].get<std::string>();
+            auto event = event_database_->get_event(event_id);
+            if (!event)
+                return Result<ipc::CommandResponse>::failure(event.error());
+            auto retried = event_database_->retry_event_upload_jobs(
+                event_id, std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count());
+            if (!retried)
+                return Result<ipc::CommandResponse>::failure(retried.error());
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json =
+                     Json{{"eventId", event_id}, {"requeuedJobs", retried.value()}}.dump(),
+                 .binary = {}});
+        }
         if (request.command == "event.manualTrigger")
         {
             if (!has_only_field(payload.value(), "cameraId") ||

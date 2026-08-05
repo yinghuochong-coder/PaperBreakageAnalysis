@@ -15,9 +15,14 @@
 namespace paperbreak::storage
 {
 
-inline constexpr std::uint32_t database_schema_version = 3U;
+inline constexpr std::uint32_t database_schema_version = 4U;
 inline constexpr std::size_t database_default_page_size = 50U;
 inline constexpr std::size_t database_maximum_page_size = 200U;
+inline constexpr std::size_t maximum_upload_job_capacity = 1000000U;
+inline constexpr std::size_t maximum_upload_job_history_capacity = 2000000U;
+inline constexpr std::uint64_t maximum_upload_pending_bytes =
+    16ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t maximum_upload_json_bytes = 1024U * 1024U;
 
 struct MetadataDatabaseOptions final
 {
@@ -27,6 +32,9 @@ struct MetadataDatabaseOptions final
     std::chrono::milliseconds busy_timeout{250};
     std::size_t maximum_reconcile_events{10000U};
     std::size_t maximum_manifest_bytes{8U * 1024U * 1024U};
+    std::size_t upload_job_capacity{10000U};
+    std::size_t upload_job_history_capacity{50000U};
+    std::uint64_t upload_pending_byte_capacity{1024ULL * 1024ULL * 1024ULL * 1024ULL};
 };
 
 struct MetadataDatabaseOpenReport final
@@ -122,6 +130,88 @@ struct EventRetentionRecord final
     std::string last_error;
 };
 
+enum class UploadJobKind
+{
+    alarm_metadata,
+    key_frame,
+    manifest,
+    low_rate_replay,
+    raw_file,
+};
+
+enum class UploadJobState
+{
+    pending,
+    in_progress,
+    retry_wait,
+    completed,
+    permanent_failed,
+    manual_intervention,
+};
+
+enum class UploadFailureClass
+{
+    retryable,
+    permanent,
+    manual_intervention,
+};
+
+struct UploadJobRequest final
+{
+    std::string idempotency_key;
+    std::optional<std::string> event_id;
+    UploadJobKind kind{UploadJobKind::manifest};
+    std::string logical_id;
+    std::string relative_path;
+    std::string payload_json{"{}"};
+    std::string checksum;
+    std::uint64_t upload_bytes{};
+    std::int64_t created_at_utc_ms{};
+};
+
+struct UploadJobRecord final
+{
+    std::int64_t job_id{};
+    std::string idempotency_key;
+    std::optional<std::string> event_id;
+    UploadJobKind kind{UploadJobKind::manifest};
+    std::int32_t priority{};
+    std::string logical_id;
+    std::string relative_path;
+    std::string payload_json;
+    std::string checksum;
+    std::uint64_t upload_bytes{};
+    UploadJobState state{UploadJobState::pending};
+    std::uint32_t attempts{};
+    std::int64_t next_attempt_utc_ms{};
+    std::string checkpoint_json{"{}"};
+    std::string last_error_code;
+    std::int64_t created_at_utc_ms{};
+    std::int64_t updated_at_utc_ms{};
+};
+
+struct UploadJobEnqueueOutcome final
+{
+    UploadJobRecord job;
+    bool duplicate{};
+};
+
+struct UploadQueueStats final
+{
+    std::size_t active_jobs{};
+    std::uint64_t active_bytes{};
+    std::size_t pending_jobs{};
+    std::size_t in_progress_jobs{};
+    std::size_t retry_wait_jobs{};
+    std::size_t completed_jobs{};
+    std::size_t permanent_failed_jobs{};
+    std::size_t manual_intervention_jobs{};
+};
+
+[[nodiscard]] std::string_view upload_job_kind_name(UploadJobKind kind) noexcept;
+[[nodiscard]] std::int32_t upload_job_priority(UploadJobKind kind) noexcept;
+[[nodiscard]] std::string_view upload_job_state_name(UploadJobState state) noexcept;
+
 /// SQLite metadata index. The event directory remains the immutable file source of truth.
 class EventMetadataDatabase final
 {
@@ -198,6 +288,37 @@ class EventMetadataDatabase final
 
     /// Sum of indexed immutable event files for rows that have not completed deletion.
     [[nodiscard]] Result<std::uint64_t> retained_event_bytes() const;
+
+    /// Atomically inserts one bounded persistent upload task. The idempotency key never creates or
+    /// modifies an event. Repeating identical content returns the existing task as a duplicate.
+    [[nodiscard]] Result<UploadJobEnqueueOutcome> enqueue_upload_job(
+        const UploadJobRequest& request);
+
+    /// Claims the highest-priority due task and transitions it to InProgress in one transaction.
+    [[nodiscard]] Result<std::optional<UploadJobRecord>> claim_next_upload_job(
+        std::int64_t now_utc_ms);
+
+    [[nodiscard]] Result<void> complete_upload_job(std::int64_t job_id,
+                                                   std::string_view checkpoint_json,
+                                                   std::int64_t completed_at_utc_ms);
+    [[nodiscard]] Result<void> fail_upload_job(std::int64_t job_id,
+                                               UploadFailureClass failure_class,
+                                               std::string_view error_code,
+                                               std::string_view checkpoint_json,
+                                               std::optional<std::int64_t> next_attempt_utc_ms,
+                                               std::int64_t updated_at_utc_ms);
+
+    /// Moves a terminal failed task back to Pending after an explicit operator action.
+    [[nodiscard]] Result<void> retry_upload_job(std::int64_t job_id,
+                                                std::int64_t updated_at_utc_ms);
+    [[nodiscard]] Result<std::size_t> retry_event_upload_jobs(std::string_view event_id,
+                                                              std::int64_t updated_at_utc_ms);
+
+    /// Reclaims tasks left InProgress by a previous process without duplicating rows or events.
+    [[nodiscard]] Result<std::size_t> recover_upload_jobs(std::int64_t now_utc_ms);
+    [[nodiscard]] Result<std::optional<UploadJobRecord>> get_upload_job(
+        std::string_view idempotency_key) const;
+    [[nodiscard]] Result<UploadQueueStats> upload_queue_stats() const;
 
     /// Bounded reconciliation. Directory-only events are indexed; database-only rows are marked
     /// Missing. No event directory or database row is deleted.

@@ -563,11 +563,31 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
         administrator, {});
     ASSERT_TRUE(updated) << updated.error().message;
     EXPECT_EQ(Json::parse(updated.value().payload_json)["event"]["preEventSeconds"], 9U);
+    ASSERT_TRUE(
+        database->enqueue_upload_job({.idempotency_key = "event-retry:" + event_id,
+                                      .event_id = event_id,
+                                      .kind = paperbreak::storage::UploadJobKind::manifest,
+                                      .logical_id = "manifest",
+                                      .relative_path = "2026/08/04/" + event_id + "/manifest.json",
+                                      .payload_json = "{}",
+                                      .checksum = "sha256",
+                                      .upload_bytes = 1U,
+                                      .created_at_utc_ms = 1}));
+    auto upload = database->claim_next_upload_job(1);
+    ASSERT_TRUE(upload);
+    ASSERT_TRUE(upload.value());
+    ASSERT_TRUE(database->fail_upload_job(
+        upload.value()->job_id, paperbreak::storage::UploadFailureClass::manual_intervention,
+        "UPLOAD_CHECKSUM_MISMATCH", "{}", std::nullopt, 2));
     auto retry =
         commands.handle(fixture.request("event.retryUpload", Json{{"eventId", event_id}}.dump()),
                         administrator, {});
-    ASSERT_FALSE(retry);
-    EXPECT_EQ(retry.error().business_code, "SYS_NOT_SUPPORTED");
+    ASSERT_TRUE(retry);
+    EXPECT_EQ(Json::parse(retry.value().payload_json)["requeuedJobs"], 1U);
+    auto retried = database->get_upload_job("event-retry:" + event_id);
+    ASSERT_TRUE(retried);
+    ASSERT_TRUE(retried.value());
+    EXPECT_EQ(retried.value()->state, paperbreak::storage::UploadJobState::pending);
 
     auto invalid = commands.handle(fixture.request("event.list", R"({"limit":0})"), reader, {});
     ASSERT_FALSE(invalid);

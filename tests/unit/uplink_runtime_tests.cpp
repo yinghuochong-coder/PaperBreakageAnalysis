@@ -164,7 +164,7 @@ TEST(UplinkRuntime, UsesCappedExponentialBackoffAndReconnectsAfterRecovery)
     RuntimeFixture fixture;
     fixture.transport->set_online(false);
     ASSERT_TRUE(fixture.runtime->start());
-    ASSERT_TRUE(wait_until([&] { return fixture.runtime->snapshot().connection_attempts >= 3U; }));
+    ASSERT_TRUE(wait_until([&] { return fixture.runtime->snapshot().reconnect_failures >= 3U; }));
     const auto offline = fixture.runtime->snapshot();
     EXPECT_EQ(offline.state, paperbreak::uplink::UplinkRuntimeState::backing_off);
     EXPECT_LE(offline.current_reconnect_delay, 40ms);

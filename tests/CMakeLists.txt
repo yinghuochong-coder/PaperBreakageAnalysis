@@ -32,6 +32,7 @@ add_executable(PaperBreakTests
     unit/uplink_protocol_tests.cpp
     unit/uplink_mock_transport_tests.cpp
     unit/uplink_runtime_tests.cpp
+    unit/uplink_upload_scheduler_tests.cpp
     unit/uplink_simulator_tests.cpp
     unit/windows_control_tests.cpp
     unit/windows_scm_tests.cpp

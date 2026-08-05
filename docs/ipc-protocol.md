@@ -405,7 +405,7 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
   分块读取，并通过 `QSaveFile` 原子保存到用户选择的目标；服务不接受任意目标路径。导出器
   支持 ZIP64，并在显式 64 GiB 总上限或单文件/文件数上限之外返回
   `EVENT_EXPORT_TOO_LARGE`。
-- `event.retryUpload`：M5 固定返回 `SYS_NOT_SUPPORTED`；上传队列在 M8 接入前不伪造成功。
+- `event.retryUpload`：payload 必须且只能包含 `eventId`。M8-03 起，已装配事件数据库时将该事件处于 `RetryWait`、`PermanentFailed` 或 `ManualIntervention` 的持久任务重置为 `Pending` 并返回 `requeuedJobs`；重复请求不创建任务或事件，没有匹配失败任务时返回 0。未装配持久仓库时返回 `SYS_NOT_SUPPORTED`。
 
 ### `preview.subscribe`
 

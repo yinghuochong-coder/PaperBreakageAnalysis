@@ -1,9 +1,10 @@
 add_library(paperbreak_uplink STATIC
     src/module.cpp
     src/protocol.cpp
-    src/runtime.cpp)
+    src/runtime.cpp
+    src/upload_scheduler.cpp)
 target_link_libraries(paperbreak_uplink
-    PUBLIC paperbreak_common paperbreak_compiler_options
+    PUBLIC paperbreak_common paperbreak_storage paperbreak_compiler_options
     PRIVATE paperbreak_event nlohmann_json::nlohmann_json)
 target_include_directories(paperbreak_uplink PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

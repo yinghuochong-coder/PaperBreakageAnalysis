@@ -298,9 +298,18 @@ TEST(StorageMetadataDatabase, MigratesVersionOneRetentionStateWithBackup)
     std::filesystem::create_directories(options.database_path.parent_path());
     {
         RawDatabase version_one{options.database_path};
-        version_one.execute("CREATE TABLE events(event_id TEXT PRIMARY KEY NOT NULL);"
-                            "INSERT INTO events VALUES('019fcb80-ffff-7000-8000-000000000001');"
-                            "PRAGMA user_version=1;");
+        version_one.execute(
+            "CREATE TABLE events(event_id TEXT PRIMARY KEY NOT NULL,relative_directory TEXT NOT "
+            "NULL);"
+            "CREATE TABLE upload_jobs(job_id INTEGER PRIMARY KEY,event_id TEXT NOT NULL "
+            "REFERENCES events(event_id) ON DELETE CASCADE,state TEXT NOT NULL,attempts INTEGER "
+            "NOT NULL DEFAULT 0,next_attempt_utc_ms INTEGER,checkpoint_json TEXT NOT NULL DEFAULT "
+            "'{}',last_error_code TEXT,updated_at_utc_ms INTEGER NOT NULL,UNIQUE(event_id));"
+            "INSERT INTO events VALUES('019fcb80-ffff-7000-8000-000000000001',"
+            "'2026/08/04/019fcb80-ffff-7000-8000-000000000001');"
+            "INSERT INTO upload_jobs(event_id,state,updated_at_utc_ms) VALUES("
+            "'019fcb80-ffff-7000-8000-000000000001','Pending',1);"
+            "PRAGMA user_version=1;");
     }
     auto opened = EventMetadataDatabase::open(options);
     ASSERT_TRUE(opened) << opened.error().business_code;
@@ -327,7 +336,7 @@ TEST(StorageMetadataDatabase, RejectsUnsupportedAndCorruptDatabasesAndRestoresBa
     std::filesystem::create_directories(unsupported_options.database_path.parent_path());
     {
         RawDatabase raw{unsupported_options.database_path};
-        raw.execute("PRAGMA user_version=4;");
+        raw.execute("PRAGMA user_version=" + std::to_string(database_schema_version + 1U) + ";");
     }
     auto unsupported = EventMetadataDatabase::open(unsupported_options);
     ASSERT_FALSE(unsupported);

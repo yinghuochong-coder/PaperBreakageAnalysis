@@ -239,6 +239,8 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `UPLINK_COMMAND_EXPIRED` | Warning | 否 | 远程命令的 RFC 3339 截止时间已过；缓存并返回拒绝结果，不执行副作用 |
 | `UPLINK_COMMAND_CONFLICT` | Error | 否 | 相同 `commandId` 携带不同类型、正文、截止时间或确认状态；保留原结果并拒绝冲突内容 |
 | `UPLOAD_ENQUEUE_FAILED` | Critical | 是 | 已提交事件无法建立持久上传任务；事件保持本地并报警 |
+| `UPLOAD_JOB_CONFLICT` | Error | 否 | 相同上传幂等键携带不同事件、资源、路径、摘要或负载；保留原任务并拒绝覆盖 |
+| `UPLOAD_TRANSFER_INTERRUPTED` | Warning | 是 | 服务或执行器停止时任务仍在途；保留 checkpoint 并在重启后恢复领取 |
 | `UPLOAD_TRANSFER_FAILED` | Error | 是 | 受限传输尝试失败；保持 checkpoint 并按策略退避 |
 | `UPLOAD_CHECKSUM_MISMATCH` | Error | 是 | 服务端或本地分块校验不一致；重传受影响内容且有上限 |
 | `UPLOAD_REJECTED` | Error | 否 | 服务端永久拒绝有效请求；转 `PermanentFailed` 并等待人工处理 |

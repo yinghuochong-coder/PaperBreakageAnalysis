@@ -447,6 +447,57 @@ ALTER TABLE events ADD COLUMN reviewed_at_utc_ms INTEGER;
 ALTER TABLE events ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT '';
 )sql";
 
+constexpr std::string_view schema_v4 = R"sql(
+DROP INDEX IF EXISTS idx_upload_jobs_state_time;
+ALTER TABLE upload_jobs RENAME TO upload_jobs_v1;
+CREATE TABLE upload_jobs(
+  job_id INTEGER PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  event_id TEXT REFERENCES events(event_id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK(kind IN
+    ('AlarmMetadata','KeyFrame','Manifest','LowRateReplay','RawFile')),
+  priority INTEGER NOT NULL CHECK(priority BETWEEN 100 AND 500),
+  logical_id TEXT NOT NULL,
+  relative_path TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  checksum TEXT NOT NULL DEFAULT '',
+  upload_bytes INTEGER NOT NULL CHECK(upload_bytes > 0),
+  state TEXT NOT NULL CHECK(state IN
+    ('Pending','InProgress','RetryWait','Completed','PermanentFailed','ManualIntervention')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  next_attempt_utc_ms INTEGER NOT NULL,
+  checkpoint_json TEXT NOT NULL DEFAULT '{}',
+  last_error_code TEXT NOT NULL DEFAULT '',
+  created_at_utc_ms INTEGER NOT NULL,
+  updated_at_utc_ms INTEGER NOT NULL,
+  completed_at_utc_ms INTEGER,
+  CHECK(kind='AlarmMetadata' OR event_id IS NOT NULL),
+  CHECK(state<>'Completed' OR completed_at_utc_ms IS NOT NULL)
+) STRICT;
+INSERT INTO upload_jobs(
+  job_id,idempotency_key,event_id,kind,priority,logical_id,relative_path,payload_json,
+  checksum,upload_bytes,state,attempts,next_attempt_utc_ms,checkpoint_json,last_error_code,
+  created_at_utc_ms,updated_at_utc_ms,completed_at_utc_ms)
+SELECT j.job_id,'legacy-event:' || j.event_id,j.event_id,'Manifest',300,'manifest',
+       e.relative_directory || '/manifest.json','{}','',
+       MAX(1,COALESCE(r.manifest_size_bytes,1)),
+       CASE WHEN j.state IN ('Completed','Uploaded') THEN 'Completed'
+            WHEN j.state='PermanentFailed' THEN 'PermanentFailed'
+            WHEN j.state='ManualIntervention' THEN 'ManualIntervention'
+            WHEN j.state='InProgress' THEN 'RetryWait'
+            ELSE 'Pending' END,
+       j.attempts,COALESCE(j.next_attempt_utc_ms,j.updated_at_utc_ms),j.checkpoint_json,
+       COALESCE(j.last_error_code,''),j.updated_at_utc_ms,j.updated_at_utc_ms,
+       CASE WHEN j.state IN ('Completed','Uploaded') THEN j.updated_at_utc_ms ELSE NULL END
+  FROM upload_jobs_v1 j
+  JOIN events e ON e.event_id=j.event_id
+  LEFT JOIN event_retention r ON r.event_id=j.event_id;
+DROP TABLE upload_jobs_v1;
+CREATE INDEX idx_upload_jobs_schedule
+  ON upload_jobs(state,next_attempt_utc_ms,priority DESC,created_at_utc_ms,job_id);
+CREATE INDEX idx_upload_jobs_event ON upload_jobs(event_id,kind,state);
+)sql";
+
 Result<void> migrate_to_v1(sqlite3* database)
 {
     auto begun = execute(database, "BEGIN IMMEDIATE", "database.migrate.begin", true);
@@ -491,6 +542,24 @@ Result<void> migrate_to_v3(sqlite3* database)
     auto schema = execute(database, schema_v3, "database.migrate.schema-v3", true);
     if (schema)
         schema = execute(database, "PRAGMA user_version=3", "database.migrate.version", true);
+    if (schema)
+        schema = execute(database, "COMMIT", "database.migrate.commit", true);
+    if (!schema)
+    {
+        static_cast<void>(execute(database, "ROLLBACK", "database.migrate.rollback", true));
+        return schema;
+    }
+    return Result<void>::success();
+}
+
+Result<void> migrate_to_v4(sqlite3* database)
+{
+    auto begun = execute(database, "BEGIN IMMEDIATE", "database.migrate.begin", true);
+    if (!begun)
+        return begun;
+    auto schema = execute(database, schema_v4, "database.migrate.schema-v4", true);
+    if (schema)
+        schema = execute(database, "PRAGMA user_version=4", "database.migrate.version", true);
     if (schema)
         schema = execute(database, "COMMIT", "database.migrate.commit", true);
     if (!schema)
@@ -972,6 +1041,135 @@ std::string column_text(sqlite3_stmt* statement, const int column)
     return value == nullptr ? std::string{} : reinterpret_cast<const char*>(value);
 }
 
+std::optional<UploadJobKind> parse_upload_kind(const std::string_view value) noexcept
+{
+    if (value == "AlarmMetadata")
+        return UploadJobKind::alarm_metadata;
+    if (value == "KeyFrame")
+        return UploadJobKind::key_frame;
+    if (value == "Manifest")
+        return UploadJobKind::manifest;
+    if (value == "LowRateReplay")
+        return UploadJobKind::low_rate_replay;
+    if (value == "RawFile")
+        return UploadJobKind::raw_file;
+    return std::nullopt;
+}
+
+std::optional<UploadJobState> parse_upload_state(const std::string_view value) noexcept
+{
+    if (value == "Pending")
+        return UploadJobState::pending;
+    if (value == "InProgress")
+        return UploadJobState::in_progress;
+    if (value == "RetryWait")
+        return UploadJobState::retry_wait;
+    if (value == "Completed")
+        return UploadJobState::completed;
+    if (value == "PermanentFailed")
+        return UploadJobState::permanent_failed;
+    if (value == "ManualIntervention")
+        return UploadJobState::manual_intervention;
+    return std::nullopt;
+}
+
+Error upload_error(std::string code, std::string message, std::string operation,
+                   const bool retryable = false)
+{
+    return make_error(std::move(code), retryable ? Severity::warning : Severity::error,
+                      std::move(message), "storage", std::move(operation), retryable);
+}
+
+bool valid_json_object(const std::string_view value)
+{
+    if (value.empty() || value.size() > maximum_upload_json_bytes)
+        return false;
+    const auto parsed = Json::parse(value, nullptr, false);
+    return !parsed.is_discarded() && parsed.is_object();
+}
+
+bool valid_upload_relative_path(const std::string_view value)
+{
+    if (value.empty() || value.size() > maximum_text_bytes)
+        return false;
+    const std::filesystem::path path{value};
+    if (path.is_absolute() || path.has_root_name() || path.has_root_directory())
+        return false;
+    return std::ranges::none_of(path, [](const auto& component) { return component == ".."; });
+}
+
+constexpr std::string_view upload_job_columns = R"sql(
+job_id,idempotency_key,event_id,kind,priority,logical_id,relative_path,payload_json,checksum,
+upload_bytes,state,attempts,next_attempt_utc_ms,checkpoint_json,last_error_code,
+created_at_utc_ms,updated_at_utc_ms
+)sql";
+
+Result<UploadJobRecord> read_upload_job(sqlite3* database, sqlite3_stmt* statement,
+                                        const std::string_view operation)
+{
+    const auto kind = parse_upload_kind(column_text(statement, 3));
+    const auto state = parse_upload_state(column_text(statement, 10));
+    const auto job_id = sqlite3_column_int64(statement, 0);
+    const auto priority = sqlite3_column_int64(statement, 4);
+    const auto upload_bytes = sqlite3_column_int64(statement, 9);
+    const auto attempts = sqlite3_column_int64(statement, 11);
+    const auto next_attempt = sqlite3_column_int64(statement, 12);
+    const auto created_at = sqlite3_column_int64(statement, 15);
+    const auto updated_at = sqlite3_column_int64(statement, 16);
+    if (!kind || !state || job_id <= 0 || priority < std::numeric_limits<std::int32_t>::min() ||
+        priority > std::numeric_limits<std::int32_t>::max() || upload_bytes <= 0 || attempts < 0 ||
+        attempts > std::numeric_limits<std::uint32_t>::max() || next_attempt < 0 ||
+        created_at < 0 || updated_at < 0)
+        return Result<UploadJobRecord>::failure(
+            database_error(database, SQLITE_CORRUPT, operation, "上传任务字段损坏"));
+    UploadJobRecord record{.job_id = job_id,
+                           .idempotency_key = column_text(statement, 1),
+                           .kind = *kind,
+                           .priority = static_cast<std::int32_t>(priority),
+                           .logical_id = column_text(statement, 5),
+                           .relative_path = column_text(statement, 6),
+                           .payload_json = column_text(statement, 7),
+                           .checksum = column_text(statement, 8),
+                           .upload_bytes = static_cast<std::uint64_t>(upload_bytes),
+                           .state = *state,
+                           .attempts = static_cast<std::uint32_t>(attempts),
+                           .next_attempt_utc_ms = next_attempt,
+                           .checkpoint_json = column_text(statement, 13),
+                           .last_error_code = column_text(statement, 14),
+                           .created_at_utc_ms = created_at,
+                           .updated_at_utc_ms = updated_at};
+    if (sqlite3_column_type(statement, 2) != SQLITE_NULL)
+        record.event_id = column_text(statement, 2);
+    return Result<UploadJobRecord>::success(std::move(record));
+}
+
+Result<std::optional<UploadJobRecord>> select_upload_job(sqlite3* database,
+                                                         const std::string_view predicate,
+                                                         const std::string_view value,
+                                                         const std::string_view operation)
+{
+    const auto sql = "SELECT " + std::string{upload_job_columns} + " FROM upload_jobs WHERE " +
+                     std::string{predicate} + "=?";
+    auto prepared = prepare(database, sql, operation);
+    if (!prepared)
+        return Result<std::optional<UploadJobRecord>>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind_text(statement.get(), index, value))
+        return Result<std::optional<UploadJobRecord>>::failure(
+            std::move(bind_failure(database, operation)).error());
+    const auto result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE)
+        return Result<std::optional<UploadJobRecord>>::success(std::nullopt);
+    if (result != SQLITE_ROW)
+        return Result<std::optional<UploadJobRecord>>::failure(
+            database_error(database, result, operation, "无法读取上传任务"));
+    auto record = read_upload_job(database, statement.get(), operation);
+    if (!record)
+        return Result<std::optional<UploadJobRecord>>::failure(std::move(record).error());
+    return Result<std::optional<UploadJobRecord>>::success(std::move(record).value());
+}
+
 bool directory_component(const std::filesystem::directory_entry& entry,
                          const std::size_t length) noexcept
 {
@@ -1002,7 +1200,12 @@ Result<std::unique_ptr<EventMetadataDatabase>> EventMetadataDatabase::open(
         options.busy_timeout.count() <= 0 || options.busy_timeout.count() > 60000 ||
         options.maximum_reconcile_events == 0U || options.maximum_reconcile_events > 100000U ||
         options.maximum_manifest_bytes == 0U ||
-        options.maximum_manifest_bytes > 64U * 1024U * 1024U)
+        options.maximum_manifest_bytes > 64U * 1024U * 1024U || options.upload_job_capacity == 0U ||
+        options.upload_job_capacity > maximum_upload_job_capacity ||
+        options.upload_job_history_capacity < options.upload_job_capacity ||
+        options.upload_job_history_capacity > maximum_upload_job_history_capacity ||
+        options.upload_pending_byte_capacity == 0U ||
+        options.upload_pending_byte_capacity > maximum_upload_pending_bytes)
         return Result<std::unique_ptr<EventMetadataDatabase>>::failure(
             config_error("SQLite 元数据配置无效", "database.open.validate"));
     options.database_path =
@@ -1102,6 +1305,8 @@ Result<std::unique_ptr<EventMetadataDatabase>> EventMetadataDatabase::open(
             migrated = migrate_to_v2(connection.get());
         if (migrated && version.value() <= 2U)
             migrated = migrate_to_v3(connection.get());
+        if (migrated && version.value() <= 3U)
+            migrated = migrate_to_v4(connection.get());
         if (!migrated)
             return Result<std::unique_ptr<EventMetadataDatabase>>::failure(
                 std::move(migrated).error());
@@ -1126,6 +1331,62 @@ EventMetadataDatabase::EventMetadataDatabase(ConstructionKey,
 }
 
 EventMetadataDatabase::~EventMetadataDatabase() = default;
+
+std::string_view upload_job_kind_name(const UploadJobKind kind) noexcept
+{
+    switch (kind)
+    {
+    case UploadJobKind::alarm_metadata:
+        return "AlarmMetadata";
+    case UploadJobKind::key_frame:
+        return "KeyFrame";
+    case UploadJobKind::manifest:
+        return "Manifest";
+    case UploadJobKind::low_rate_replay:
+        return "LowRateReplay";
+    case UploadJobKind::raw_file:
+        return "RawFile";
+    }
+    return "RawFile";
+}
+
+std::int32_t upload_job_priority(const UploadJobKind kind) noexcept
+{
+    switch (kind)
+    {
+    case UploadJobKind::alarm_metadata:
+        return 500;
+    case UploadJobKind::key_frame:
+        return 400;
+    case UploadJobKind::manifest:
+        return 300;
+    case UploadJobKind::low_rate_replay:
+        return 200;
+    case UploadJobKind::raw_file:
+        return 100;
+    }
+    return 100;
+}
+
+std::string_view upload_job_state_name(const UploadJobState state) noexcept
+{
+    switch (state)
+    {
+    case UploadJobState::pending:
+        return "Pending";
+    case UploadJobState::in_progress:
+        return "InProgress";
+    case UploadJobState::retry_wait:
+        return "RetryWait";
+    case UploadJobState::completed:
+        return "Completed";
+    case UploadJobState::permanent_failed:
+        return "PermanentFailed";
+    case UploadJobState::manual_intervention:
+        return "ManualIntervention";
+    }
+    return "ManualIntervention";
+}
 
 const MetadataDatabaseOpenReport& EventMetadataDatabase::open_report() const noexcept
 {
@@ -1830,6 +2091,583 @@ SELECT COALESCE(SUM(f.size_bytes),0)
         return Result<std::uint64_t>::failure(database_error(
             impl_->database.get(), result, "database.retention.bytes", "无法统计保留事件占用"));
     return Result<std::uint64_t>::success(static_cast<std::uint64_t>(bytes));
+}
+
+Result<UploadJobEnqueueOutcome> EventMetadataDatabase::enqueue_upload_job(
+    const UploadJobRequest& request)
+{
+    const bool event_requirement = request.kind == UploadJobKind::alarm_metadata ||
+                                   (request.event_id && valid_text(*request.event_id));
+    if (!valid_text(request.idempotency_key) || !event_requirement ||
+        (request.event_id && !valid_text(*request.event_id)) || !valid_text(request.logical_id) ||
+        request.relative_path.size() > maximum_text_bytes ||
+        (request.kind != UploadJobKind::alarm_metadata &&
+         !valid_upload_relative_path(request.relative_path)) ||
+        request.checksum.size() > maximum_text_bytes || !valid_json_object(request.payload_json) ||
+        request.upload_bytes == 0U ||
+        request.upload_bytes >
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+        request.created_at_utc_ms < 0)
+        return Result<UploadJobEnqueueOutcome>::failure(upload_error(
+            "UPLOAD_ENQUEUE_FAILED", "上传任务字段、JSON 或字节数无效", "upload.enqueue.validate"));
+
+    const std::scoped_lock lock{impl_->mutex};
+    auto begun = execute(impl_->database.get(), "BEGIN IMMEDIATE", "upload.enqueue.begin");
+    if (!begun)
+        return Result<UploadJobEnqueueOutcome>::failure(std::move(begun).error());
+    const auto rollback = [this] {
+        static_cast<void>(execute(impl_->database.get(), "ROLLBACK", "upload.enqueue.rollback"));
+    };
+
+    auto existing = select_upload_job(impl_->database.get(), "idempotency_key",
+                                      request.idempotency_key, "upload.enqueue.existing");
+    if (!existing)
+    {
+        rollback();
+        return Result<UploadJobEnqueueOutcome>::failure(std::move(existing).error());
+    }
+    if (existing.value())
+    {
+        const auto& job = *existing.value();
+        const bool identical =
+            job.event_id == request.event_id && job.kind == request.kind &&
+            job.logical_id == request.logical_id && job.relative_path == request.relative_path &&
+            job.payload_json == request.payload_json && job.checksum == request.checksum &&
+            job.upload_bytes == request.upload_bytes;
+        auto committed = execute(impl_->database.get(), "COMMIT", "upload.enqueue.commit");
+        if (!committed)
+        {
+            rollback();
+            return Result<UploadJobEnqueueOutcome>::failure(std::move(committed).error());
+        }
+        if (!identical)
+            return Result<UploadJobEnqueueOutcome>::failure(
+                upload_error("UPLOAD_JOB_CONFLICT", "相同幂等键携带了不同上传任务内容",
+                             "upload.enqueue.idempotency"));
+        return Result<UploadJobEnqueueOutcome>::success(
+            {.job = std::move(*existing.value()), .duplicate = true});
+    }
+
+    auto capacity = prepare(impl_->database.get(), R"sql(
+SELECT SUM(CASE WHEN state<>'Completed' THEN 1 ELSE 0 END),
+ COALESCE(SUM(CASE WHEN state<>'Completed' THEN upload_bytes ELSE 0 END),0),
+ COUNT(*) FROM upload_jobs
+)sql",
+                            "upload.enqueue.capacity");
+    if (!capacity)
+    {
+        rollback();
+        return Result<UploadJobEnqueueOutcome>::failure(std::move(capacity).error());
+    }
+    auto capacity_statement = std::move(capacity).value();
+    const auto capacity_result = sqlite3_step(capacity_statement.get());
+    const auto active_jobs =
+        capacity_result == SQLITE_ROW ? sqlite3_column_int64(capacity_statement.get(), 0) : -1;
+    const auto active_bytes =
+        capacity_result == SQLITE_ROW ? sqlite3_column_int64(capacity_statement.get(), 1) : -1;
+    const auto total_jobs =
+        capacity_result == SQLITE_ROW ? sqlite3_column_int64(capacity_statement.get(), 2) : -1;
+    if (capacity_result != SQLITE_ROW || active_jobs < 0 || active_bytes < 0 || total_jobs < 0)
+    {
+        rollback();
+        return Result<UploadJobEnqueueOutcome>::failure(
+            database_error(impl_->database.get(), capacity_result, "upload.enqueue.capacity",
+                           "无法统计上传队列容量"));
+    }
+    const auto bytes = static_cast<std::uint64_t>(active_bytes);
+    if (static_cast<std::uint64_t>(active_jobs) >= impl_->options.upload_job_capacity ||
+        request.upload_bytes > impl_->options.upload_pending_byte_capacity ||
+        bytes > impl_->options.upload_pending_byte_capacity - request.upload_bytes)
+    {
+        rollback();
+        Error error = make_error("UPLOAD_ENQUEUE_FAILED", Severity::critical,
+                                 "上传队列条数或待上传字节已达到配置上限", "storage",
+                                 "upload.enqueue.capacity", true);
+        error.details.push_back({.key = "activeJobs", .value = std::to_string(active_jobs)});
+        error.details.push_back({.key = "activeBytes", .value = std::to_string(active_bytes)});
+        return Result<UploadJobEnqueueOutcome>::failure(std::move(error));
+    }
+    if (static_cast<std::uint64_t>(total_jobs) >= impl_->options.upload_job_history_capacity)
+    {
+        const auto remove_count = static_cast<std::uint64_t>(total_jobs) -
+                                  impl_->options.upload_job_history_capacity + 1U;
+        auto pruned = prepare(impl_->database.get(), R"sql(
+DELETE FROM upload_jobs WHERE job_id IN (
+ SELECT job_id FROM upload_jobs WHERE state='Completed'
+  ORDER BY updated_at_utc_ms ASC,job_id ASC LIMIT ?)
+)sql",
+                              "upload.enqueue.prune");
+        if (!pruned)
+        {
+            rollback();
+            return Result<UploadJobEnqueueOutcome>::failure(std::move(pruned).error());
+        }
+        auto prune_statement = std::move(pruned).value();
+        int prune_index = 1;
+        if (!bind_int64(prune_statement.get(), prune_index,
+                        static_cast<std::int64_t>(remove_count)))
+        {
+            rollback();
+            return Result<UploadJobEnqueueOutcome>::failure(
+                std::move(bind_failure(impl_->database.get(), "upload.enqueue.prune.bind"))
+                    .error());
+        }
+        auto pruned_result =
+            step_done(impl_->database.get(), prune_statement.get(), "upload.enqueue.prune");
+        if (!pruned_result ||
+            static_cast<std::uint64_t>(sqlite3_changes(impl_->database.get())) < remove_count)
+        {
+            rollback();
+            return pruned_result
+                       ? Result<UploadJobEnqueueOutcome>::failure(
+                             upload_error("UPLOAD_ENQUEUE_FAILED",
+                                          "上传任务历史容量已满且没有足够已完成记录可淘汰",
+                                          "upload.enqueue.prune", true))
+                       : Result<UploadJobEnqueueOutcome>::failure(std::move(pruned_result).error());
+        }
+    }
+
+    auto inserted = prepare(impl_->database.get(), R"sql(
+INSERT INTO upload_jobs(idempotency_key,event_id,kind,priority,logical_id,relative_path,
+ payload_json,checksum,upload_bytes,state,attempts,next_attempt_utc_ms,checkpoint_json,
+ last_error_code,created_at_utc_ms,updated_at_utc_ms)
+VALUES(?,?,?,?,?,?,?,?,?,'Pending',0,?,'{}','',?,?)
+)sql",
+                            "upload.enqueue.insert");
+    if (!inserted)
+    {
+        rollback();
+        return Result<UploadJobEnqueueOutcome>::failure(std::move(inserted).error());
+    }
+    auto statement = std::move(inserted).value();
+    int index = 1;
+    bool bound = bind_text(statement.get(), index, request.idempotency_key);
+    bound = bound && (request.event_id ? bind_text(statement.get(), index, *request.event_id)
+                                       : bind_null(statement.get(), index));
+    bound = bound && bind_text(statement.get(), index, upload_job_kind_name(request.kind)) &&
+            bind_int64(statement.get(), index, upload_job_priority(request.kind)) &&
+            bind_text(statement.get(), index, request.logical_id) &&
+            bind_text(statement.get(), index, request.relative_path) &&
+            bind_text(statement.get(), index, request.payload_json) &&
+            bind_text(statement.get(), index, request.checksum) &&
+            bind_int64(statement.get(), index, static_cast<std::int64_t>(request.upload_bytes)) &&
+            bind_int64(statement.get(), index, request.created_at_utc_ms) &&
+            bind_int64(statement.get(), index, request.created_at_utc_ms) &&
+            bind_int64(statement.get(), index, request.created_at_utc_ms);
+    if (!bound)
+    {
+        rollback();
+        return Result<UploadJobEnqueueOutcome>::failure(
+            std::move(bind_failure(impl_->database.get(), "upload.enqueue.bind")).error());
+    }
+    auto stepped = step_done(impl_->database.get(), statement.get(), "upload.enqueue.insert");
+    if (!stepped)
+    {
+        rollback();
+        return Result<UploadJobEnqueueOutcome>::failure(std::move(stepped).error());
+    }
+    if (request.event_id)
+    {
+        auto event = prepare(impl_->database.get(),
+                             "UPDATE events SET upload_state='Pending' WHERE event_id=?",
+                             "upload.enqueue.event");
+        if (!event)
+        {
+            rollback();
+            return Result<UploadJobEnqueueOutcome>::failure(std::move(event).error());
+        }
+        auto event_statement = std::move(event).value();
+        index = 1;
+        if (!bind_text(event_statement.get(), index, *request.event_id))
+        {
+            rollback();
+            return Result<UploadJobEnqueueOutcome>::failure(
+                std::move(bind_failure(impl_->database.get(), "upload.enqueue.event.bind"))
+                    .error());
+        }
+        stepped = step_done(impl_->database.get(), event_statement.get(), "upload.enqueue.event");
+        if (!stepped || sqlite3_changes(impl_->database.get()) != 1)
+        {
+            rollback();
+            return stepped ? Result<UploadJobEnqueueOutcome>::failure(
+                                 upload_error("UPLOAD_ENQUEUE_FAILED", "上传任务引用的事件不存在",
+                                              "upload.enqueue.event"))
+                           : Result<UploadJobEnqueueOutcome>::failure(std::move(stepped).error());
+        }
+    }
+    existing = select_upload_job(impl_->database.get(), "idempotency_key", request.idempotency_key,
+                                 "upload.enqueue.readback");
+    if (!existing || !existing.value())
+    {
+        rollback();
+        return !existing ? Result<UploadJobEnqueueOutcome>::failure(std::move(existing).error())
+                         : Result<UploadJobEnqueueOutcome>::failure(
+                               upload_error("UPLOAD_ENQUEUE_FAILED", "无法回读已创建的上传任务",
+                                            "upload.enqueue.readback"));
+    }
+    auto job = std::move(*existing.value());
+    auto committed = execute(impl_->database.get(), "COMMIT", "upload.enqueue.commit");
+    if (!committed)
+    {
+        rollback();
+        return Result<UploadJobEnqueueOutcome>::failure(std::move(committed).error());
+    }
+    return Result<UploadJobEnqueueOutcome>::success({.job = std::move(job), .duplicate = false});
+}
+
+Result<std::optional<UploadJobRecord>> EventMetadataDatabase::claim_next_upload_job(
+    const std::int64_t now_utc_ms)
+{
+    if (now_utc_ms < 0)
+        return Result<std::optional<UploadJobRecord>>::failure(
+            upload_error("SYS_CONFIG_INVALID", "上传任务领取时间无效", "upload.claim.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    auto begun = execute(impl_->database.get(), "BEGIN IMMEDIATE", "upload.claim.begin");
+    if (!begun)
+        return Result<std::optional<UploadJobRecord>>::failure(std::move(begun).error());
+    const auto rollback = [this] {
+        static_cast<void>(execute(impl_->database.get(), "ROLLBACK", "upload.claim.rollback"));
+    };
+    const auto sql = "SELECT " + std::string{upload_job_columns} + R"sql(
+ FROM upload_jobs WHERE state IN ('Pending','RetryWait') AND next_attempt_utc_ms<=?
+ ORDER BY priority DESC,created_at_utc_ms ASC,job_id ASC LIMIT 1
+)sql";
+    auto selected = prepare(impl_->database.get(), sql, "upload.claim.select");
+    if (!selected)
+    {
+        rollback();
+        return Result<std::optional<UploadJobRecord>>::failure(std::move(selected).error());
+    }
+    auto select_statement = std::move(selected).value();
+    int index = 1;
+    if (!bind_int64(select_statement.get(), index, now_utc_ms))
+    {
+        rollback();
+        return Result<std::optional<UploadJobRecord>>::failure(
+            std::move(bind_failure(impl_->database.get(), "upload.claim.bind")).error());
+    }
+    const auto selected_result = sqlite3_step(select_statement.get());
+    if (selected_result == SQLITE_DONE)
+    {
+        auto committed = execute(impl_->database.get(), "COMMIT", "upload.claim.commit");
+        return committed
+                   ? Result<std::optional<UploadJobRecord>>::success(std::nullopt)
+                   : Result<std::optional<UploadJobRecord>>::failure(std::move(committed).error());
+    }
+    if (selected_result != SQLITE_ROW)
+    {
+        rollback();
+        return Result<std::optional<UploadJobRecord>>::failure(database_error(
+            impl_->database.get(), selected_result, "upload.claim.select", "无法选择到期上传任务"));
+    }
+    auto record =
+        read_upload_job(impl_->database.get(), select_statement.get(), "upload.claim.select");
+    if (!record)
+    {
+        rollback();
+        return Result<std::optional<UploadJobRecord>>::failure(std::move(record).error());
+    }
+    auto claimed = prepare(impl_->database.get(), R"sql(
+UPDATE upload_jobs SET state='InProgress',attempts=attempts+1,updated_at_utc_ms=?
+ WHERE job_id=? AND state IN ('Pending','RetryWait') AND next_attempt_utc_ms<=?
+)sql",
+                           "upload.claim.update");
+    if (!claimed)
+    {
+        rollback();
+        return Result<std::optional<UploadJobRecord>>::failure(std::move(claimed).error());
+    }
+    auto claim_statement = std::move(claimed).value();
+    index = 1;
+    if (!bind_int64(claim_statement.get(), index, now_utc_ms) ||
+        !bind_int64(claim_statement.get(), index, record.value().job_id) ||
+        !bind_int64(claim_statement.get(), index, now_utc_ms))
+    {
+        rollback();
+        return Result<std::optional<UploadJobRecord>>::failure(
+            std::move(bind_failure(impl_->database.get(), "upload.claim.update.bind")).error());
+    }
+    auto updated = step_done(impl_->database.get(), claim_statement.get(), "upload.claim.update");
+    if (!updated || sqlite3_changes(impl_->database.get()) != 1)
+    {
+        rollback();
+        return updated
+                   ? Result<std::optional<UploadJobRecord>>::failure(upload_error(
+                         "DATABASE_BUSY", "上传任务领取发生并发冲突", "upload.claim.update", true))
+                   : Result<std::optional<UploadJobRecord>>::failure(std::move(updated).error());
+    }
+    auto result = std::move(record).value();
+    result.state = UploadJobState::in_progress;
+    ++result.attempts;
+    result.updated_at_utc_ms = now_utc_ms;
+    auto committed = execute(impl_->database.get(), "COMMIT", "upload.claim.commit");
+    if (!committed)
+    {
+        rollback();
+        return Result<std::optional<UploadJobRecord>>::failure(std::move(committed).error());
+    }
+    return Result<std::optional<UploadJobRecord>>::success(std::move(result));
+}
+
+Result<void> EventMetadataDatabase::complete_upload_job(const std::int64_t job_id,
+                                                        const std::string_view checkpoint_json,
+                                                        const std::int64_t completed_at_utc_ms)
+{
+    if (job_id <= 0 || completed_at_utc_ms < 0 || !valid_json_object(checkpoint_json))
+        return Result<void>::failure(upload_error(
+            "SYS_CONFIG_INVALID", "上传完成参数或 checkpoint 无效", "upload.complete.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    auto begun = execute(impl_->database.get(), "BEGIN IMMEDIATE", "upload.complete.begin");
+    if (!begun)
+        return begun;
+    const auto rollback = [this] {
+        static_cast<void>(execute(impl_->database.get(), "ROLLBACK", "upload.complete.rollback"));
+    };
+    auto prepared = prepare(impl_->database.get(), R"sql(
+UPDATE upload_jobs SET state='Completed',checkpoint_json=?,last_error_code='',
+ next_attempt_utc_ms=?,updated_at_utc_ms=?,completed_at_utc_ms=?
+ WHERE job_id=? AND state='InProgress'
+)sql",
+                            "upload.complete.update");
+    if (!prepared)
+    {
+        rollback();
+        return Result<void>::failure(std::move(prepared).error());
+    }
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind_text(statement.get(), index, checkpoint_json) ||
+        !bind_int64(statement.get(), index, completed_at_utc_ms) ||
+        !bind_int64(statement.get(), index, completed_at_utc_ms) ||
+        !bind_int64(statement.get(), index, completed_at_utc_ms) ||
+        !bind_int64(statement.get(), index, job_id))
+    {
+        rollback();
+        return bind_failure(impl_->database.get(), "upload.complete.bind");
+    }
+    auto updated = step_done(impl_->database.get(), statement.get(), "upload.complete.update");
+    if (!updated || sqlite3_changes(impl_->database.get()) != 1)
+    {
+        rollback();
+        return updated
+                   ? Result<void>::failure(upload_error(
+                         "SYS_INVALID_STATE", "上传任务不处于可完成状态", "upload.complete.state"))
+                   : updated;
+    }
+    auto event = prepare(impl_->database.get(), R"sql(
+UPDATE events SET upload_state='Uploaded'
+ WHERE event_id=(SELECT event_id FROM upload_jobs WHERE job_id=?)
+   AND NOT EXISTS(
+     SELECT 1 FROM upload_jobs pending
+      WHERE pending.event_id=events.event_id AND pending.state<>'Completed')
+)sql",
+                         "upload.complete.event");
+    if (!event)
+    {
+        rollback();
+        return Result<void>::failure(std::move(event).error());
+    }
+    auto event_statement = std::move(event).value();
+    index = 1;
+    if (!bind_int64(event_statement.get(), index, job_id))
+    {
+        rollback();
+        return bind_failure(impl_->database.get(), "upload.complete.event.bind");
+    }
+    updated = step_done(impl_->database.get(), event_statement.get(), "upload.complete.event");
+    if (!updated)
+    {
+        rollback();
+        return updated;
+    }
+    auto committed = execute(impl_->database.get(), "COMMIT", "upload.complete.commit");
+    if (!committed)
+        rollback();
+    return committed;
+}
+
+Result<void> EventMetadataDatabase::fail_upload_job(
+    const std::int64_t job_id, const UploadFailureClass failure_class,
+    const std::string_view error_code, const std::string_view checkpoint_json,
+    const std::optional<std::int64_t> next_attempt_utc_ms, const std::int64_t updated_at_utc_ms)
+{
+    if (job_id <= 0 || updated_at_utc_ms < 0 || !valid_text(error_code) ||
+        !valid_json_object(checkpoint_json) ||
+        (failure_class == UploadFailureClass::retryable &&
+         (!next_attempt_utc_ms || *next_attempt_utc_ms < updated_at_utc_ms)) ||
+        (next_attempt_utc_ms && *next_attempt_utc_ms < 0))
+        return Result<void>::failure(upload_error(
+            "SYS_CONFIG_INVALID", "上传失败分类、时间或 checkpoint 无效", "upload.fail.validate"));
+    const std::string_view state = failure_class == UploadFailureClass::retryable ? "RetryWait"
+                                   : failure_class == UploadFailureClass::permanent
+                                       ? "PermanentFailed"
+                                       : "ManualIntervention";
+    const auto next = next_attempt_utc_ms.value_or(updated_at_utc_ms);
+    const std::scoped_lock lock{impl_->mutex};
+    auto prepared = prepare(impl_->database.get(), R"sql(
+UPDATE upload_jobs SET state=?,checkpoint_json=?,last_error_code=?,next_attempt_utc_ms=?,
+ updated_at_utc_ms=?,completed_at_utc_ms=NULL WHERE job_id=? AND state='InProgress'
+)sql",
+                            "upload.fail.update");
+    if (!prepared)
+        return Result<void>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind_text(statement.get(), index, state) ||
+        !bind_text(statement.get(), index, checkpoint_json) ||
+        !bind_text(statement.get(), index, error_code) ||
+        !bind_int64(statement.get(), index, next) ||
+        !bind_int64(statement.get(), index, updated_at_utc_ms) ||
+        !bind_int64(statement.get(), index, job_id))
+        return bind_failure(impl_->database.get(), "upload.fail.bind");
+    auto updated = step_done(impl_->database.get(), statement.get(), "upload.fail.update");
+    if (!updated)
+        return updated;
+    if (sqlite3_changes(impl_->database.get()) != 1)
+        return Result<void>::failure(
+            upload_error("SYS_INVALID_STATE", "上传任务不处于可失败状态", "upload.fail.state"));
+    return Result<void>::success();
+}
+
+Result<void> EventMetadataDatabase::retry_upload_job(const std::int64_t job_id,
+                                                     const std::int64_t updated_at_utc_ms)
+{
+    if (job_id <= 0 || updated_at_utc_ms < 0)
+        return Result<void>::failure(
+            upload_error("SYS_CONFIG_INVALID", "人工重试参数无效", "upload.retry.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    auto prepared = prepare(impl_->database.get(), R"sql(
+UPDATE upload_jobs SET state='Pending',attempts=0,next_attempt_utc_ms=?,last_error_code='',
+ updated_at_utc_ms=?,completed_at_utc_ms=NULL
+ WHERE job_id=? AND state IN ('PermanentFailed','ManualIntervention')
+)sql",
+                            "upload.retry.update");
+    if (!prepared)
+        return Result<void>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind_int64(statement.get(), index, updated_at_utc_ms) ||
+        !bind_int64(statement.get(), index, updated_at_utc_ms) ||
+        !bind_int64(statement.get(), index, job_id))
+        return bind_failure(impl_->database.get(), "upload.retry.bind");
+    auto updated = step_done(impl_->database.get(), statement.get(), "upload.retry.update");
+    if (!updated)
+        return updated;
+    if (sqlite3_changes(impl_->database.get()) != 1)
+        return Result<void>::failure(upload_error(
+            "SYS_INVALID_STATE", "上传任务不处于人工可重试状态", "upload.retry.state"));
+    return Result<void>::success();
+}
+
+Result<std::size_t> EventMetadataDatabase::retry_event_upload_jobs(
+    const std::string_view event_id, const std::int64_t updated_at_utc_ms)
+{
+    if (!valid_text(event_id) || updated_at_utc_ms < 0)
+        return Result<std::size_t>::failure(upload_error(
+            "SYS_CONFIG_INVALID", "事件上传人工重试参数无效", "upload.retry-event.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    auto prepared = prepare(impl_->database.get(), R"sql(
+UPDATE upload_jobs SET state='Pending',attempts=0,next_attempt_utc_ms=?,last_error_code='',
+ updated_at_utc_ms=?,completed_at_utc_ms=NULL
+ WHERE event_id=? AND state IN ('RetryWait','PermanentFailed','ManualIntervention')
+)sql",
+                            "upload.retry-event.update");
+    if (!prepared)
+        return Result<std::size_t>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind_int64(statement.get(), index, updated_at_utc_ms) ||
+        !bind_int64(statement.get(), index, updated_at_utc_ms) ||
+        !bind_text(statement.get(), index, event_id))
+        return Result<std::size_t>::failure(
+            std::move(bind_failure(impl_->database.get(), "upload.retry-event.bind")).error());
+    auto updated = step_done(impl_->database.get(), statement.get(), "upload.retry-event.update");
+    if (!updated)
+        return Result<std::size_t>::failure(std::move(updated).error());
+    return Result<std::size_t>::success(
+        static_cast<std::size_t>(sqlite3_changes(impl_->database.get())));
+}
+
+Result<std::size_t> EventMetadataDatabase::recover_upload_jobs(const std::int64_t now_utc_ms)
+{
+    if (now_utc_ms < 0)
+        return Result<std::size_t>::failure(
+            upload_error("SYS_CONFIG_INVALID", "上传恢复时间无效", "upload.recover.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    auto prepared = prepare(impl_->database.get(), R"sql(
+UPDATE upload_jobs SET state='RetryWait',next_attempt_utc_ms=?,updated_at_utc_ms=?,
+ last_error_code='UPLOAD_TRANSFER_INTERRUPTED' WHERE state='InProgress'
+)sql",
+                            "upload.recover.update");
+    if (!prepared)
+        return Result<std::size_t>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    int index = 1;
+    if (!bind_int64(statement.get(), index, now_utc_ms) ||
+        !bind_int64(statement.get(), index, now_utc_ms))
+        return Result<std::size_t>::failure(
+            std::move(bind_failure(impl_->database.get(), "upload.recover.bind")).error());
+    auto updated = step_done(impl_->database.get(), statement.get(), "upload.recover.update");
+    if (!updated)
+        return Result<std::size_t>::failure(std::move(updated).error());
+    return Result<std::size_t>::success(
+        static_cast<std::size_t>(sqlite3_changes(impl_->database.get())));
+}
+
+Result<std::optional<UploadJobRecord>> EventMetadataDatabase::get_upload_job(
+    const std::string_view idempotency_key) const
+{
+    if (!valid_text(idempotency_key))
+        return Result<std::optional<UploadJobRecord>>::failure(
+            upload_error("SYS_CONFIG_INVALID", "上传任务幂等键无效", "upload.get.validate"));
+    const std::scoped_lock lock{impl_->mutex};
+    return select_upload_job(impl_->database.get(), "idempotency_key", idempotency_key,
+                             "upload.get");
+}
+
+Result<UploadQueueStats> EventMetadataDatabase::upload_queue_stats() const
+{
+    const std::scoped_lock lock{impl_->mutex};
+    auto prepared = prepare(impl_->database.get(), R"sql(
+SELECT
+ SUM(CASE WHEN state<>'Completed' THEN 1 ELSE 0 END),
+ COALESCE(SUM(CASE WHEN state<>'Completed' THEN upload_bytes ELSE 0 END),0),
+ SUM(CASE WHEN state='Pending' THEN 1 ELSE 0 END),
+ SUM(CASE WHEN state='InProgress' THEN 1 ELSE 0 END),
+ SUM(CASE WHEN state='RetryWait' THEN 1 ELSE 0 END),
+ SUM(CASE WHEN state='Completed' THEN 1 ELSE 0 END),
+ SUM(CASE WHEN state='PermanentFailed' THEN 1 ELSE 0 END),
+ SUM(CASE WHEN state='ManualIntervention' THEN 1 ELSE 0 END)
+ FROM upload_jobs
+)sql",
+                            "upload.stats");
+    if (!prepared)
+        return Result<UploadQueueStats>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    const auto result = sqlite3_step(statement.get());
+    if (result != SQLITE_ROW)
+        return Result<UploadQueueStats>::failure(
+            database_error(impl_->database.get(), result, "upload.stats", "无法统计上传任务"));
+    const auto value = [statement = statement.get()](const int column) -> std::int64_t {
+        return sqlite3_column_type(statement, column) == SQLITE_NULL
+                   ? 0
+                   : sqlite3_column_int64(statement, column);
+    };
+    std::array<std::int64_t, 8U> values{};
+    for (std::size_t index = 0U; index < values.size(); ++index)
+        values[index] = value(static_cast<int>(index));
+    if (std::ranges::any_of(values, [](const auto item) { return item < 0; }))
+        return Result<UploadQueueStats>::failure(database_error(
+            impl_->database.get(), SQLITE_CORRUPT, "upload.stats", "上传任务统计字段损坏"));
+    return Result<UploadQueueStats>::success(
+        {.active_jobs = static_cast<std::size_t>(values[0]),
+         .active_bytes = static_cast<std::uint64_t>(values[1]),
+         .pending_jobs = static_cast<std::size_t>(values[2]),
+         .in_progress_jobs = static_cast<std::size_t>(values[3]),
+         .retry_wait_jobs = static_cast<std::size_t>(values[4]),
+         .completed_jobs = static_cast<std::size_t>(values[5]),
+         .permanent_failed_jobs = static_cast<std::size_t>(values[6]),
+         .manual_intervention_jobs = static_cast<std::size_t>(values[7])});
 }
 
 Result<EventReconcileReport> EventMetadataDatabase::reconcile()
