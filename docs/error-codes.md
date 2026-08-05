@@ -189,8 +189,12 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `NVME_QUEUE_FULL` | Warning | 是 | 每相机两个待写块已满；拒绝当前完整普通块、记录缺口，不阻塞采集 |
 | `NVME_BLOCK_INVALID` | Error | 否 | 帧序号、相机、布局、负载或块边界违反 NVMe v1 声明；当前普通块不提交 |
 | `NVME_CACHE_UNAVAILABLE` | Error | 是 | 缓存根、容量准入或既有块恢复状态不可安全使用；降级为内存缓存 |
+| `NVME_CACHE_PROTECTED` | Error | 是 | 固定容量内没有零租约已提交块可回收；不得覆盖事件证据，普通滚动缓存降级并记录缺口 |
 | `NVME_WRITE_TIMEOUT` | Error | 是 | 单块写入未在配置总截止时间内完成；保留临时尾块并降级内存 |
 | `NVME_WRITE_FAILED` | Error | 视 I/O | 预分配、写入、flush、原子发布或正常回绕删除失败；保留原生诊断并降级内存 |
+| `NVME_INDEX_FAILED` | Error | 视 SQLite/I/O | 可重建派生块/租约索引无法打开、校验、登记、查询或事务提交；保留块文件事实并降级，不把未登记块视为可回收 |
+| `NVME_INDEX_QUERY_LIMIT` | Warning | 是 | 时间窗命中块数超过调用方或 4096 块固定上限；拒绝返回截断结果，不伪称序列完整 |
+| `NVME_LEASE_CAPACITY` | Error | 是 | 活动事件租约达到 64 条固定上限；拒绝新 NVMe 租约但继续内存事件链并报警 |
 
 ### 4.6 数据库
 

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -247,6 +248,160 @@ TEST(EventRuntimeIntegration, ManualTriggerPersistsContinuousWindowWithoutBlocki
     EXPECT_EQ(snapshot.rejected_frames, 0U);
     EXPECT_EQ(snapshot.events_committed, 1U);
     EXPECT_EQ(errors.load(), 0U);
+}
+
+TEST(EventRuntimeNvme, SuccessfulEventCommitReleasesProtectedBlocks)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto nvme = NvmeRollingCache::create({.root = temporary.path() / "cache",
+                                          .maximum_cache_bytes = 65536U,
+                                          .write_limit_bytes_per_second = 16U * 1024U * 1024U,
+                                          .io_timeout = 2s,
+                                          .cameras = {{.camera_id = "CAM01",
+                                                       .maximum_frame_bytes = 16U,
+                                                       .index_capacity = 12U,
+                                                       .required_input_bytes_per_second = 1024U}}});
+    ASSERT_TRUE(nvme);
+    ASSERT_TRUE(nvme.value()->start());
+    auto configuration = runtime_config();
+    configuration.storage.rolling_cache_enabled = true;
+    configuration.acquisition.frame_pool_capacity = 512U;
+    std::atomic_uint64_t errors{};
+    auto runtime = EventRuntime::create({.configuration = configuration,
+                                         .event_root = event_root,
+                                         .database = shared_database,
+                                         .nvme_cache = nvme.value(),
+                                         .frame_queue_capacity = 64U,
+                                         .error_observer = [&](const Error&) { ++errors; }});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+    const auto submit = [&](const std::uint64_t sequence) {
+        auto input = frame(sequence, std::chrono::milliseconds{static_cast<int>(sequence * 100U)});
+        EXPECT_TRUE(runtime.value()->submit_frame(input));
+        EXPECT_TRUE(nvme.value()->submit_frame(std::move(input)));
+    };
+    for (std::uint64_t sequence = 1U; sequence <= 10U; ++sequence)
+        submit(sequence);
+    auto requested = runtime.value()->request_manual_trigger("CAM01");
+    ASSERT_TRUE(requested);
+    ASSERT_TRUE(requested.value());
+    submit(11U);
+    submit(12U);
+    bool lease_observed = false;
+    for (std::size_t attempt = 0U; attempt < 200U; ++attempt)
+    {
+        if (nvme.value()->snapshot().active_event_leases == 1U)
+        {
+            lease_observed = true;
+            break;
+        }
+        std::this_thread::sleep_for(5ms);
+    }
+    ASSERT_TRUE(lease_observed);
+    for (std::uint64_t sequence = 13U; sequence <= 24U; ++sequence)
+        submit(sequence);
+    bool committed_and_released = false;
+    for (std::size_t attempt = 0U; attempt < 400U; ++attempt)
+    {
+        const auto event_snapshot = runtime.value()->snapshot();
+        const auto nvme_snapshot = nvme.value()->snapshot();
+        if (event_snapshot.events_committed == 1U && nvme_snapshot.active_event_leases == 0U)
+        {
+            committed_and_released = true;
+            break;
+        }
+        std::this_thread::sleep_for(5ms);
+    }
+    ASSERT_TRUE(committed_and_released);
+    const auto nvme_snapshot = nvme.value()->snapshot();
+    EXPECT_GE(nvme_snapshot.indexed_blocks, 2U);
+    EXPECT_EQ(nvme_snapshot.protected_blocks, 0U);
+    EXPECT_EQ(nvme_snapshot.lease_failures, 0U);
+    EXPECT_EQ(errors.load(), 0U);
+    runtime.value()->request_stop();
+    ASSERT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+    nvme.value()->request_stop();
+    ASSERT_TRUE(nvme.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeNvme, FailedEventPersistenceKeepsLeaseProtected)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "blocked-events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto nvme = NvmeRollingCache::create({.root = temporary.path() / "cache",
+                                          .maximum_cache_bytes = 65536U,
+                                          .write_limit_bytes_per_second = 16U * 1024U * 1024U,
+                                          .io_timeout = 2s,
+                                          .cameras = {{.camera_id = "CAM01",
+                                                       .maximum_frame_bytes = 16U,
+                                                       .index_capacity = 12U,
+                                                       .required_input_bytes_per_second = 1024U}}});
+    ASSERT_TRUE(nvme);
+    ASSERT_TRUE(nvme.value()->start());
+    auto configuration = runtime_config();
+    configuration.storage.rolling_cache_enabled = true;
+    configuration.acquisition.frame_pool_capacity = 512U;
+    std::atomic_uint64_t errors{};
+    auto runtime = EventRuntime::create({.configuration = configuration,
+                                         .event_root = event_root,
+                                         .database = shared_database,
+                                         .nvme_cache = nvme.value(),
+                                         .frame_queue_capacity = 64U,
+                                         .error_observer = [&](const Error&) { ++errors; }});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    std::error_code file_error;
+    std::filesystem::remove_all(event_root, file_error);
+    ASSERT_FALSE(file_error);
+    std::ofstream blocker{event_root, std::ios::binary};
+    ASSERT_TRUE(blocker);
+    blocker << "not-a-directory";
+    blocker.close();
+    ASSERT_TRUE(runtime.value()->start());
+    const auto submit = [&](const std::uint64_t sequence) {
+        auto input = frame(sequence, std::chrono::milliseconds{static_cast<int>(sequence * 100U)});
+        EXPECT_TRUE(runtime.value()->submit_frame(input));
+        EXPECT_TRUE(nvme.value()->submit_frame(std::move(input)));
+    };
+    for (std::uint64_t sequence = 1U; sequence <= 10U; ++sequence)
+        submit(sequence);
+    auto requested = runtime.value()->request_manual_trigger("CAM01");
+    ASSERT_TRUE(requested);
+    ASSERT_TRUE(requested.value());
+    for (std::uint64_t sequence = 11U; sequence <= 24U; ++sequence)
+        submit(sequence);
+    bool failed_and_protected = false;
+    for (std::size_t attempt = 0U; attempt < 400U; ++attempt)
+    {
+        const auto event_snapshot = runtime.value()->snapshot();
+        const auto nvme_snapshot = nvme.value()->snapshot();
+        if (event_snapshot.event_failures > 0U && nvme_snapshot.active_event_leases == 1U &&
+            nvme_snapshot.protected_blocks > 0U)
+        {
+            failed_and_protected = true;
+            break;
+        }
+        std::this_thread::sleep_for(5ms);
+    }
+    ASSERT_TRUE(failed_and_protected);
+    EXPECT_EQ(runtime.value()->snapshot().events_committed, 0U);
+    EXPECT_GT(errors.load(), 0U);
+    runtime.value()->request_stop();
+    ASSERT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+    nvme.value()->request_stop();
+    ASSERT_TRUE(nvme.value()->join(std::chrono::steady_clock::now() + 5s));
 }
 
 TEST(EventRuntimeIntegration, RejectsUnsafePoolBudgetAndUnknownManualCamera)

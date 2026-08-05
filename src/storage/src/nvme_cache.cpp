@@ -135,16 +135,18 @@ struct NvmeRollingCacheImpl final
 
     NvmeRollingCacheOptions options;
     std::shared_ptr<INvmeBlockStore> store;
+    std::shared_ptr<INvmeBlockIndex> index;
     mutable std::mutex mutex;
+    mutable std::mutex index_operation_mutex;
     std::condition_variable condition;
     std::unordered_map<std::string, Lane> lanes;
     std::deque<NvmeBlock> queue;
-    std::deque<NvmeCommittedBlock> committed;
     std::jthread worker;
     NvmeRollingCacheSnapshot metrics;
     bool started{};
     bool stop_requested{};
     bool completed{true};
+    std::size_t maximum_index_blocks{};
 
     [[nodiscard]] bool ordinary_writes_allowed_locked() const noexcept
     {
@@ -246,36 +248,53 @@ struct NvmeRollingCacheImpl final
     {
         for (;;)
         {
-            std::optional<NvmeCommittedBlock> oldest;
             {
                 std::scoped_lock lock{mutex};
                 if (metrics.current_cache_bytes <= options.maximum_cache_bytes - required)
                     return Result<void>::success();
-                if (committed.empty())
-                {
-                    return Result<void>::failure(
-                        nvme_error("NVME_CACHE_UNAVAILABLE", Severity::error,
-                                   "NVMe 固定容量没有可回收的普通块", "storage.nvme.reclaim",
-                                   "no-reclaimable-block", true));
-                }
-                oldest = committed.front();
             }
-            auto removed = store->remove_committed(oldest->path);
+            std::scoped_lock index_lock{index_operation_mutex};
+            auto oldest = index->oldest_reclaimable();
+            if (!oldest)
+                return Result<void>::failure(std::move(oldest).error());
+            if (!oldest.value())
+            {
+                return Result<void>::failure(nvme_error(
+                    "NVME_CACHE_PROTECTED", Severity::error, "NVMe 固定容量中的块均受事件租约保护",
+                    "storage.nvme.reclaim", "no-unprotected-block", true));
+            }
+            auto removed = store->remove_committed(oldest.value()->path);
             if (!removed)
                 return removed;
+            auto erased = index->erase_block(oldest.value()->block_id);
+            if (!erased)
+                return erased;
+            auto index_snapshot = index->snapshot();
             {
                 std::scoped_lock lock{mutex};
-                if (!committed.empty() && committed.front().path == oldest->path)
-                    committed.pop_front();
                 metrics.current_cache_bytes =
-                    oldest->physical_bytes > metrics.current_cache_bytes
+                    oldest.value()->physical_bytes > metrics.current_cache_bytes
                         ? 0U
-                        : metrics.current_cache_bytes - oldest->physical_bytes;
+                        : metrics.current_cache_bytes - oldest.value()->physical_bytes;
                 ++metrics.blocks_reclaimed;
                 metrics.bytes_reclaimed =
-                    saturating_add(metrics.bytes_reclaimed, oldest->physical_bytes);
+                    saturating_add(metrics.bytes_reclaimed, oldest.value()->physical_bytes);
+                apply_index_snapshot_locked(index_snapshot);
             }
         }
+    }
+
+    void apply_index_snapshot_locked(const Result<NvmeBlockIndexSnapshot>& current)
+    {
+        if (!current)
+        {
+            metrics.last_error = current.error();
+            return;
+        }
+        metrics.indexed_blocks = current.value().block_count;
+        metrics.active_event_leases = current.value().active_leases;
+        metrics.protected_blocks = current.value().protected_blocks;
+        metrics.protected_bytes = current.value().protected_bytes;
     }
 
     void run(const std::stop_token token) noexcept
@@ -324,11 +343,56 @@ struct NvmeRollingCacheImpl final
                 degrade(written.error());
                 break;
             }
+            std::uint64_t block_sequence_gaps{};
+            for (std::size_t frame_index = 1U; frame_index < block.frames.size(); ++frame_index)
+            {
+                const auto previous = block.frames[frame_index - 1U].sequence_number();
+                const auto current = block.frames[frame_index].sequence_number();
+                if (current > previous + 1U)
+                    block_sequence_gaps =
+                        saturating_add(block_sequence_gaps, current - previous - 1U);
+            }
+            NvmeIndexedBlock indexed{
+                .block_id = block.block_id,
+                .camera_id = block.camera_id,
+                .generation = block.generation,
+                .path = written.value().path,
+                .physical_bytes = written.value().physical_bytes,
+                .start_monotonic_time = block.start_monotonic_time,
+                .end_monotonic_time = block.frames.back().received_monotonic_time(),
+                .start_wall_clock_time = block.start_wall_clock_time,
+                .end_wall_clock_time = block.frames.back().received_wall_clock_time(),
+                .start_sequence_number = block.frames.front().sequence_number(),
+                .end_sequence_number = block.frames.back().sequence_number(),
+                .frame_count = static_cast<std::uint32_t>(block.frames.size()),
+                .sequence_gaps = block_sequence_gaps,
+                .header_crc32c = written.value().header_crc32c,
+                .index_crc32c = written.value().index_crc32c,
+                .data_crc32c = written.value().data_crc32c,
+                .footer_crc32c = written.value().footer_crc32c,
+                .commit_verified = written.value().commit_verified};
+            {
+                std::scoped_lock index_lock{index_operation_mutex};
+                auto registered = index->register_block(std::move(indexed));
+                if (!registered)
+                {
+                    {
+                        std::scoped_lock lock{mutex};
+                        metrics.current_cache_bytes = saturating_add(
+                            metrics.current_cache_bytes, written.value().physical_bytes);
+                    }
+                    degrade(registered.error());
+                    break;
+                }
+            }
+            auto index_snapshot = [&] {
+                std::scoped_lock index_lock{index_operation_mutex};
+                return index->snapshot();
+            }();
             {
                 std::scoped_lock lock{mutex};
                 const auto elapsed =
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - write_started);
-                committed.push_back(written.value());
                 ++metrics.committed_blocks;
                 metrics.bytes_committed =
                     saturating_add(metrics.bytes_committed, written.value().physical_bytes);
@@ -338,6 +402,7 @@ struct NvmeRollingCacheImpl final
                     elapsed.count() > 0.0
                         ? static_cast<double>(written.value().physical_bytes) / elapsed.count()
                         : 0.0;
+                apply_index_snapshot_locked(index_snapshot);
             }
         }
         {
@@ -352,9 +417,10 @@ struct NvmeRollingCacheImpl final
 };
 
 Result<std::shared_ptr<NvmeRollingCache>> NvmeRollingCache::create(
-    NvmeRollingCacheOptions options, std::shared_ptr<INvmeBlockStore> store)
+    NvmeRollingCacheOptions options, std::shared_ptr<INvmeBlockStore> store,
+    std::shared_ptr<INvmeBlockIndex> index)
 {
-    if (!store || options.root.empty() || options.maximum_cache_bytes == 0U ||
+    if (!store || !index || options.root.empty() || options.maximum_cache_bytes == 0U ||
         options.write_limit_bytes_per_second == 0U ||
         options.io_timeout <= std::chrono::milliseconds::zero() ||
         options.queue_capacity_per_camera != nvme_default_queue_capacity_per_camera ||
@@ -369,6 +435,8 @@ Result<std::shared_ptr<NvmeRollingCache>> NvmeRollingCache::create(
     auto impl = std::make_unique<NvmeRollingCacheImpl>();
     impl->options = std::move(options);
     impl->store = std::move(store);
+    impl->index = std::move(index);
+    std::uint64_t smallest_block = (std::numeric_limits<std::uint64_t>::max)();
     for (const auto& layout : impl->options.cameras)
     {
         const auto maximum =
@@ -383,6 +451,7 @@ Result<std::shared_ptr<NvmeRollingCache>> NvmeRollingCache::create(
                            "storage.nvme.create", "invalid-camera-layout"));
         }
         required_rate = saturating_add(required_rate, layout.required_input_bytes_per_second);
+        smallest_block = std::min(smallest_block, maximum.value());
         impl->lanes.emplace(layout.camera_id, NvmeRollingCacheImpl::Lane{.layout = layout});
     }
     if (required_rate > impl->options.write_limit_bytes_per_second)
@@ -398,6 +467,8 @@ Result<std::shared_ptr<NvmeRollingCache>> NvmeRollingCache::create(
     impl->metrics.camera_count = impl->options.cameras.size();
     impl->metrics.queue_capacity =
         impl->options.cameras.size() * impl->options.queue_capacity_per_camera;
+    impl->maximum_index_blocks =
+        static_cast<std::size_t>(impl->options.maximum_cache_bytes / smallest_block);
     return Result<std::shared_ptr<NvmeRollingCache>>::success(
         std::make_shared<NvmeRollingCache>(ConstructionKey{}, std::move(impl)));
 }
@@ -432,6 +503,15 @@ Result<void> NvmeRollingCache::start()
         impl_->completed = true;
         return Result<void>::success();
     }
+    auto indexed = impl_->index->prepare(impl_->options.root, impl_->maximum_index_blocks,
+                                         nvme_default_maximum_event_leases);
+    if (!indexed)
+    {
+        impl_->degrade(indexed.error());
+        std::scoped_lock lock{impl_->mutex};
+        impl_->completed = true;
+        return Result<void>::success();
+    }
     {
         std::scoped_lock lock{impl_->mutex};
         impl_->metrics.state = NvmeCacheState::running;
@@ -452,6 +532,47 @@ Result<void> NvmeRollingCache::start()
         impl_->completed = true;
     }
     return Result<void>::success();
+}
+
+Result<NvmeEventLeaseOutcome> NvmeRollingCache::protect_event_window(NvmeEventLeaseRequest request)
+{
+    std::scoped_lock index_lock{impl_->index_operation_mutex};
+    auto protected_window = impl_->index->protect_event_window(std::move(request));
+    auto index_snapshot = impl_->index->snapshot();
+    {
+        std::scoped_lock lock{impl_->mutex};
+        if (!protected_window)
+        {
+            ++impl_->metrics.lease_failures;
+            impl_->metrics.last_error = protected_window.error();
+        }
+        impl_->apply_index_snapshot_locked(index_snapshot);
+    }
+    return protected_window;
+}
+
+Result<void> NvmeRollingCache::release_event(const std::string_view event_id)
+{
+    std::scoped_lock index_lock{impl_->index_operation_mutex};
+    auto released = impl_->index->release_event(event_id);
+    auto index_snapshot = impl_->index->snapshot();
+    {
+        std::scoped_lock lock{impl_->mutex};
+        if (!released)
+        {
+            ++impl_->metrics.lease_failures;
+            impl_->metrics.last_error = released.error();
+        }
+        impl_->apply_index_snapshot_locked(index_snapshot);
+    }
+    return released;
+}
+
+Result<NvmeFrameSequenceTrace> NvmeRollingCache::trace_window(
+    const NvmeBlockWindowQuery& query) const
+{
+    std::scoped_lock index_lock{impl_->index_operation_mutex};
+    return impl_->index->trace_window(query);
 }
 
 Result<NvmeSubmitStatus> NvmeRollingCache::submit_frame(camera::FrameView frame)

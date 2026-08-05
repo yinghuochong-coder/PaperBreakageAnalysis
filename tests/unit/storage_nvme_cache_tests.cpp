@@ -105,7 +105,12 @@ class ControlledBlockStore final : public paperbreak::storage::INvmeBlockStore
                 bytes.error());
         return paperbreak::Result<paperbreak::storage::NvmeCommittedBlock>::success(
             {.path = request.root / (std::to_string(write_calls.load()) + ".pbnvme"),
-             .physical_bytes = bytes.value()});
+             .physical_bytes = bytes.value(),
+             .header_crc32c = 1U,
+             .index_crc32c = 2U,
+             .data_crc32c = 3U,
+             .footer_crc32c = 4U,
+             .commit_verified = true});
     }
 
     paperbreak::Result<void> remove_committed(const std::filesystem::path&) override
@@ -378,4 +383,39 @@ TEST(StorageNvmeCache, UnavailableRootStartsInExplicitMemoryDegradation)
     const auto snapshot = cache.value()->snapshot();
     EXPECT_EQ(snapshot.state, paperbreak::storage::NvmeCacheState::memory_degraded);
     EXPECT_TRUE(snapshot.event_writes_allowed);
+}
+
+TEST(StorageNvmeCache, ProtectedOnlyCapacityNeverDeletesAndDegradesExplicitly)
+{
+    TemporaryDirectory temporary{"protected"};
+    auto store = std::make_shared<ControlledBlockStore>();
+    auto configured = options(temporary.path());
+    configured.maximum_cache_bytes = 16384U;
+    auto cache = paperbreak::storage::NvmeRollingCache::create(configured, store);
+    ASSERT_TRUE(cache);
+    ASSERT_TRUE(cache.value()->start());
+    const auto start = paperbreak::camera::MonotonicTime{1s};
+    for (std::uint64_t index = 0U; index < 3U; ++index)
+        ASSERT_TRUE(cache.value()->submit_frame(frame(index + 1U, start + index * 10ms)));
+    ASSERT_TRUE(wait_for([&] { return cache.value()->snapshot().committed_blocks == 1U; }));
+    auto lease = cache.value()->protect_event_window(
+        {.event_id = "EVT-PROTECTED",
+         .camera_ids = {"CAM01"},
+         .start_monotonic_time = paperbreak::camera::MonotonicTime{0s},
+         .end_monotonic_time = paperbreak::camera::MonotonicTime{3s},
+         .start_wall_clock_time = paperbreak::camera::WallClockTime{0s},
+         .end_wall_clock_time = paperbreak::camera::WallClockTime{3s}});
+    ASSERT_TRUE(lease) << lease.error().message;
+    EXPECT_EQ(lease.value().protected_blocks, 1U);
+    for (std::uint64_t index = 3U; index < 6U; ++index)
+        ASSERT_TRUE(cache.value()->submit_frame(frame(index + 1U, start + index * 10ms)));
+    ASSERT_TRUE(wait_for([&] {
+        return cache.value()->snapshot().state ==
+               paperbreak::storage::NvmeCacheState::memory_degraded;
+    }));
+    const auto snapshot = cache.value()->snapshot();
+    ASSERT_TRUE(snapshot.last_error);
+    EXPECT_EQ(snapshot.last_error->business_code, "NVME_CACHE_PROTECTED");
+    EXPECT_EQ(snapshot.protected_blocks, 1U);
+    EXPECT_EQ(store->remove_calls.load(), 0U);
 }

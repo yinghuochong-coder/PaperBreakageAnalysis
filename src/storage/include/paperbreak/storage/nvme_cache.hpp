@@ -2,6 +2,7 @@
 
 #include "paperbreak/camera/frame.hpp"
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/storage/nvme_index.hpp"
 #include "paperbreak/storage/storage_policy.hpp"
 
 #include <array>
@@ -48,7 +49,7 @@ struct NvmeRollingCacheOptions final
 
 struct NvmeBlock final
 {
-    std::array<std::byte, 16U> block_id{};
+    NvmeBlockId block_id{};
     std::uint64_t generation{};
     std::string camera_id;
     camera::MonotonicTime start_monotonic_time;
@@ -70,6 +71,11 @@ struct NvmeCommittedBlock final
 {
     std::filesystem::path path;
     std::uint64_t physical_bytes{};
+    std::uint32_t header_crc32c{};
+    std::uint32_t index_crc32c{};
+    std::uint32_t data_crc32c{};
+    std::uint32_t footer_crc32c{};
+    bool commit_verified{};
 };
 
 class INvmeBlockStore
@@ -125,6 +131,11 @@ struct NvmeRollingCacheSnapshot final
     std::uint64_t current_cache_bytes{};
     std::uint64_t blocks_reclaimed{};
     std::uint64_t bytes_reclaimed{};
+    std::size_t indexed_blocks{};
+    std::size_t active_event_leases{};
+    std::size_t protected_blocks{};
+    std::uint64_t protected_bytes{};
+    std::uint64_t lease_failures{};
     std::uint64_t write_failures{};
     std::uint64_t write_timeouts{};
     bool accepting{};
@@ -148,7 +159,8 @@ class NvmeRollingCache final
 
     [[nodiscard]] static Result<std::shared_ptr<NvmeRollingCache>> create(
         NvmeRollingCacheOptions options,
-        std::shared_ptr<INvmeBlockStore> store = make_windows_nvme_block_store());
+        std::shared_ptr<INvmeBlockStore> store = make_windows_nvme_block_store(),
+        std::shared_ptr<INvmeBlockIndex> index = make_sqlite_nvme_block_index());
 
     NvmeRollingCache(ConstructionKey, std::unique_ptr<struct NvmeRollingCacheImpl> impl);
     ~NvmeRollingCache();
@@ -157,6 +169,10 @@ class NvmeRollingCache final
 
     [[nodiscard]] Result<void> start();
     [[nodiscard]] Result<NvmeSubmitStatus> submit_frame(camera::FrameView frame);
+    [[nodiscard]] Result<NvmeEventLeaseOutcome> protect_event_window(NvmeEventLeaseRequest request);
+    [[nodiscard]] Result<void> release_event(std::string_view event_id);
+    [[nodiscard]] Result<NvmeFrameSequenceTrace> trace_window(
+        const NvmeBlockWindowQuery& query) const;
     void set_storage_watermark(StorageWatermark watermark) noexcept;
     void request_stop() noexcept;
     [[nodiscard]] Result<void> join(std::chrono::steady_clock::time_point deadline);

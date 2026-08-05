@@ -5,6 +5,7 @@
 #include "paperbreak/common/result.hpp"
 #include "paperbreak/config/basic_config.hpp"
 #include "paperbreak/storage/metadata_database.hpp"
+#include "paperbreak/storage/nvme_cache.hpp"
 #include "paperbreak/storage/storage_policy.hpp"
 
 #include <chrono>
@@ -38,6 +39,7 @@ struct EventRuntimeOptions final
     std::filesystem::path event_root;
     std::shared_ptr<storage::EventMetadataDatabase> database;
     std::shared_ptr<storage::StoragePolicyManager> storage_policy;
+    std::shared_ptr<storage::NvmeRollingCache> nvme_cache;
     /// Per-camera algorithm frame capacity; total depth is bounded by this value times lanes.
     std::size_t frame_queue_capacity{event_frame_queue_default_capacity};
     std::size_t persistence_capacity{8U};

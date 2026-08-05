@@ -3,6 +3,7 @@ add_library(paperbreak_storage STATIC
     src/event_file_system_win.cpp
     src/metadata_database.cpp
     src/event_store.cpp
+    src/nvme_index.cpp
     src/nvme_block_file_win.cpp
     src/nvme_cache.cpp
     src/storage_policy.cpp

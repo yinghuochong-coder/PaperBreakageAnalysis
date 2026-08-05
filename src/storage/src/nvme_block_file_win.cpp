@@ -359,11 +359,13 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
         put_little<std::int64_t>(footer, 40U,
                                  wall_nanoseconds(block.frames.back().received_wall_clock_time()));
         put_little<std::uint64_t>(footer, 48U, block.frames.back().sequence_number());
-        put_little<std::uint32_t>(footer, 56U, crc32c(index_bytes));
+        const auto index_crc = crc32c(index_bytes);
+        put_little<std::uint32_t>(footer, 56U, index_crc);
         put_little<std::uint32_t>(footer, 60U, data_crc);
         put_little<std::uint32_t>(footer, 64U, header_crc);
         std::ranges::copy(marker, footer.begin() + 4088U);
-        put_little<std::uint32_t>(footer, 4084U, crc32c(footer));
+        const auto footer_crc = crc32c(footer);
+        put_little<std::uint32_t>(footer, 4084U, footer_crc);
         const auto footer_offset = maximum.value() - nvme_page_bytes;
         if (auto result = write_at(stream, temporary, footer_offset, std::span{footer}.first(4088U),
                                    gate, request.deadline);
@@ -406,8 +408,13 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
                 file_error("NVME_WRITE_FAILED", Severity::error, "无法原子发布 NVMe 块",
                            "storage.nvme.publish", temporary, "rename-failed", GetLastError()));
         }
-        return Result<NvmeCommittedBlock>::success(
-            {.path = committed, .physical_bytes = maximum.value()});
+        return Result<NvmeCommittedBlock>::success({.path = committed,
+                                                    .physical_bytes = maximum.value(),
+                                                    .header_crc32c = header_crc,
+                                                    .index_crc32c = index_crc,
+                                                    .data_crc32c = data_crc,
+                                                    .footer_crc32c = footer_crc,
+                                                    .commit_verified = true});
     }
 
     Result<void> remove_committed(const std::filesystem::path& path) override

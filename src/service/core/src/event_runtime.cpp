@@ -316,6 +316,7 @@ struct EventRuntimeImpl final
         event::FrozenEventWindow window;
         std::size_t remaining{};
         std::vector<storage::PersistedKeyFrame> key_frames;
+        std::vector<std::string> nvme_lease_ids;
         bool save_raw{true};
     };
 
@@ -325,6 +326,8 @@ struct EventRuntimeImpl final
     std::deque<camera::FrameView> frames;
     std::unique_ptr<EventPipelineState> pipeline;
     std::map<std::string, PendingEvent> pending;
+    std::set<std::string> nvme_lease_sources;
+    std::map<std::string, std::vector<std::string>> nvme_leases_awaiting_commit;
     std::unique_ptr<event::KeyFrameJpegRuntime> jpeg;
     std::unique_ptr<storage::EventPersistenceRuntime> persistence;
     std::jthread worker;
@@ -414,6 +417,33 @@ struct EventRuntimeImpl final
             report(record.error());
             return;
         }
+        bool leases_released = true;
+        std::vector<std::string> lease_ids;
+        {
+            std::scoped_lock lock{mutex};
+            const auto found = nvme_leases_awaiting_commit.find(completion.event_id);
+            if (found != nvme_leases_awaiting_commit.end())
+                lease_ids = found->second;
+        }
+        if (options.nvme_cache)
+        {
+            for (const auto& lease_id : lease_ids)
+            {
+                auto released = options.nvme_cache->release_event(lease_id);
+                if (!released)
+                {
+                    leases_released = false;
+                    report(released.error());
+                }
+            }
+        }
+        if (leases_released)
+        {
+            std::scoped_lock lock{mutex};
+            nvme_leases_awaiting_commit.erase(completion.event_id);
+            for (const auto& lease_id : lease_ids)
+                nvme_lease_sources.erase(lease_id);
+        }
         ++events_committed;
         try
         {
@@ -448,6 +478,27 @@ struct EventRuntimeImpl final
                     std::erase_if(camera.frames, [&](const camera::FrameView& frame) {
                         return !selected.contains({frame.camera_id(), frame.sequence_number()});
                     });
+            }
+            const auto event_id = event.metadata.event_id;
+            if (!event.nvme_lease_ids.empty())
+            {
+                bool lease_tracking_full = false;
+                {
+                    std::scoped_lock lock{mutex};
+                    if (nvme_leases_awaiting_commit.size() <
+                            storage::nvme_default_maximum_event_leases ||
+                        nvme_leases_awaiting_commit.contains(event_id))
+                        nvme_leases_awaiting_commit[event_id] = event.nvme_lease_ids;
+                    else
+                        lease_tracking_full = true;
+                }
+                if (lease_tracking_full)
+                {
+                    ++event_failures;
+                    report(runtime_error("NVME_LEASE_CAPACITY", Severity::error,
+                                         "事件租约提交跟踪达到固定上限", "event.runtime.nvmeLease",
+                                         true));
+                }
             }
             auto submitted = persistence->submit({.metadata = std::move(event.metadata),
                                                   .window = std::move(event.window),
@@ -554,6 +605,12 @@ struct EventRuntimeImpl final
             .window = std::move(window),
             .remaining = selected.value().frames.size(),
             .save_raw = pipeline->configuration.event.save_raw};
+        for (const auto& trigger_item : pending_event.window.triggers)
+        {
+            std::scoped_lock lock{mutex};
+            if (nvme_lease_sources.contains(trigger_item.source_event_id))
+                pending_event.nvme_lease_ids.push_back(trigger_item.source_event_id);
+        }
         const auto event_id = pending_event.metadata.event_id;
         bool pending_full = false;
         {
@@ -674,6 +731,36 @@ struct EventRuntimeImpl final
                     {
                         pipeline->source_to_canonical[source] =
                             window_started.value().event.event_id;
+                        bool lease_exists = false;
+                        {
+                            std::scoped_lock lock{mutex};
+                            lease_exists = nvme_lease_sources.contains(source);
+                        }
+                        if (options.nvme_cache && !lease_exists)
+                        {
+                            std::vector<std::string> camera_ids;
+                            camera_ids.reserve(pipeline->lanes.size());
+                            for (const auto& camera_lane : pipeline->lanes)
+                                camera_ids.push_back(camera_lane.camera_id);
+                            const auto pre = std::chrono::seconds{
+                                pipeline->configuration.event.pre_event_seconds};
+                            const auto post = std::chrono::seconds{
+                                pipeline->configuration.event.post_event_seconds};
+                            auto protected_window = options.nvme_cache->protect_event_window(
+                                {.event_id = source,
+                                 .camera_ids = std::move(camera_ids),
+                                 .start_monotonic_time = detection->value().monotonic_time - pre,
+                                 .end_monotonic_time = detection->value().monotonic_time + post,
+                                 .start_wall_clock_time = detection->value().wall_clock_time - pre,
+                                 .end_wall_clock_time = detection->value().wall_clock_time + post});
+                            if (!protected_window)
+                                report(protected_window.error());
+                            else
+                            {
+                                std::scoped_lock lock{mutex};
+                                nvme_lease_sources.insert(source);
+                            }
+                        }
                         ++events_started;
                     }
                 }
