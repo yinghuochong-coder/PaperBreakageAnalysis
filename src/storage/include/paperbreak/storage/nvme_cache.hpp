@@ -3,6 +3,7 @@
 #include "paperbreak/camera/frame.hpp"
 #include "paperbreak/common/result.hpp"
 #include "paperbreak/storage/nvme_index.hpp"
+#include "paperbreak/storage/nvme_recovery.hpp"
 #include "paperbreak/storage/storage_policy.hpp"
 
 #include <array>
@@ -42,6 +43,9 @@ struct NvmeRollingCacheOptions final
     std::uint64_t maximum_cache_bytes{};
     std::uint64_t write_limit_bytes_per_second{};
     std::chrono::milliseconds io_timeout{std::chrono::seconds{10}};
+    std::chrono::milliseconds recovery_timeout{nvme_default_recovery_timeout};
+    std::size_t recovery_maximum_files{nvme_default_recovery_maximum_files};
+    std::size_t recovery_summary_bytes{nvme_default_recovery_summary_bytes};
     std::size_t queue_capacity_per_camera{nvme_default_queue_capacity_per_camera};
     std::vector<NvmeCameraLayout> cameras;
     std::function<void(const Error&)> error_observer;
@@ -131,6 +135,10 @@ struct NvmeRollingCacheSnapshot final
     std::uint64_t current_cache_bytes{};
     std::uint64_t blocks_reclaimed{};
     std::uint64_t bytes_reclaimed{};
+    std::size_t recovery_scanned_files{};
+    std::size_t recovery_accepted_blocks{};
+    std::size_t recovery_repaired_blocks{};
+    std::size_t recovery_quarantined_blocks{};
     std::size_t indexed_blocks{};
     std::size_t active_event_leases{};
     std::size_t protected_blocks{};
@@ -160,7 +168,8 @@ class NvmeRollingCache final
     [[nodiscard]] static Result<std::shared_ptr<NvmeRollingCache>> create(
         NvmeRollingCacheOptions options,
         std::shared_ptr<INvmeBlockStore> store = make_windows_nvme_block_store(),
-        std::shared_ptr<INvmeBlockIndex> index = make_sqlite_nvme_block_index());
+        std::shared_ptr<INvmeBlockIndex> index = make_sqlite_nvme_block_index(),
+        std::shared_ptr<INvmeBlockRecovery> recovery = make_windows_nvme_block_recovery());
 
     NvmeRollingCache(ConstructionKey, std::unique_ptr<struct NvmeRollingCacheImpl> impl);
     ~NvmeRollingCache();

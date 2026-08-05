@@ -158,25 +158,6 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
                 file_error("NVME_CACHE_UNAVAILABLE", Severity::error, "无法创建 NVMe 缓存目录",
                            "storage.nvme.prepare", root, "create-directory-failed",
                            static_cast<DWORD>(error.value())));
-        for (std::filesystem::directory_iterator iterator{root, error}, end;
-             !error && iterator != end; iterator.increment(error))
-        {
-            if (!iterator->is_regular_file(error))
-                continue;
-            const auto extension = iterator->path().extension();
-            if (extension == L".pbnvme" || extension == L".partial")
-            {
-                return Result<void>::failure(
-                    file_error("NVME_CACHE_UNAVAILABLE", Severity::warning,
-                               "缓存目录包含尚未由 M7-04 扫描的既有块，已降级为内存缓存",
-                               "storage.nvme.prepare", iterator->path(), "recovery-required"));
-            }
-        }
-        if (error)
-            return Result<void>::failure(
-                file_error("NVME_CACHE_UNAVAILABLE", Severity::error, "无法检查 NVMe 缓存目录",
-                           "storage.nvme.prepare", root, "directory-scan-failed",
-                           static_cast<DWORD>(error.value())));
         return Result<void>::success();
     }
 

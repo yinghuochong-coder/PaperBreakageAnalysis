@@ -195,6 +195,9 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `NVME_INDEX_FAILED` | Error | 视 SQLite/I/O | 可重建派生块/租约索引无法打开、校验、登记、查询或事务提交；保留块文件事实并降级，不把未登记块视为可回收 |
 | `NVME_INDEX_QUERY_LIMIT` | Warning | 是 | 时间窗命中块数超过调用方或 4096 块固定上限；拒绝返回截断结果，不伪称序列完整 |
 | `NVME_LEASE_CAPACITY` | Error | 是 | 活动事件租约达到 64 条固定上限；拒绝新 NVMe 租约但继续内存事件链并报警 |
+| `NVME_RECOVERY_LIMIT` | Error | 是 | 启动恢复达到文件数、摘要内存、总截止时间或代次上限；不提交未完整扫描的索引集合，普通缓存降级 |
+| `NVME_RECOVERY_FAILED` | Error | 视 I/O | 启动扫描、读取、修复、持久刷新、原子发布或隔离失败；保留块文件和原生诊断并降级内存 |
+| `NVME_BLOCK_QUARANTINED` | Warning | 否 | 块格式、边界、版本或 CRC 不可信，已非覆盖地移动到 `.quarantine`；不进入正常索引或回绕 |
 
 ### 4.6 数据库
 

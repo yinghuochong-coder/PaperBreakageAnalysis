@@ -525,6 +525,27 @@ class SqliteNvmeBlockIndex final : public INvmeBlockIndex
                 !stepped)
                 return Result<NvmeEventLeaseOutcome>::failure(std::move(stepped).error());
         }
+        auto recovered_attach =
+            prepare_sql(database_.get(),
+                        "INSERT OR IGNORE INTO lease_blocks(event_id,block_id) "
+                        "SELECT l.event_id,b.block_id FROM leases l "
+                        "JOIN lease_cameras lc ON lc.event_id=l.event_id "
+                        "JOIN blocks b ON b.camera_id=lc.camera_id "
+                        "WHERE l.event_id=? AND b.end_wall_utc_ns>=l.start_wall_utc_ns "
+                        "AND b.start_wall_utc_ns<=l.end_wall_utc_ns",
+                        "storage.nvme.lease.attachRecovered");
+        if (!recovered_attach)
+            return Result<NvmeEventLeaseOutcome>::failure(std::move(recovered_attach).error());
+        auto recovered_statement = std::move(recovered_attach).value();
+        parameter = 1;
+        if (!bind_text(recovered_statement.get(), parameter, request.event_id))
+            return Result<NvmeEventLeaseOutcome>::failure(
+                index_error(database_.get(), SQLITE_MISUSE, "storage.nvme.lease.attachRecovered",
+                            "无法绑定恢复块租约 ID"));
+        if (auto attached = step_done(database_.get(), recovered_statement.get(),
+                                      "storage.nvme.lease.attachRecovered");
+            !attached)
+            return Result<NvmeEventLeaseOutcome>::failure(std::move(attached).error());
         auto live = live_leases_.find(request.event_id);
         auto live_start = request.start_monotonic_time;
         auto live_end = request.end_monotonic_time;
