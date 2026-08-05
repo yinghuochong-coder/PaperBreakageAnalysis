@@ -131,7 +131,8 @@ Result<MemoryRingPlan> plan_memory_ring(const MemoryRingPlanRequest& request)
     std::size_t pipeline_frames{};
     if (!checked_add(request.acquisition_queue_capacity, request.algorithm_queue_capacity,
                      pipeline_frames) ||
-        !checked_add(pipeline_frames, request.preview_slot_count, pipeline_frames))
+        !checked_add(pipeline_frames, request.preview_slot_count, pipeline_frames) ||
+        !checked_add(pipeline_frames, request.nvme_queue_frames, pipeline_frames))
     {
         return Result<MemoryRingPlan>::failure(
             config_error(request, "管线缓冲帧数溢出", "pipeline-frame-overflow"));

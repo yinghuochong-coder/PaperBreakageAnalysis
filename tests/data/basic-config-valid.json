@@ -1,5 +1,5 @@
 {
-  "configSchemaVersion": 1,
+  "configSchemaVersion": 2,
   "configRevision": 1,
   "modifiedAt": "2026-08-01T00:00:00.000Z",
   "system": { "machineId": "EDGE-TEST", "productionLineId": "PM-TEST", "shutdownTimeoutMs": 30000 },
@@ -8,7 +8,7 @@
   "preview": { "enabled": true, "fps": 3.0, "maxWidth": 1280, "maxHeight": 720, "jpegQuality": 80 },
   "algorithm": { "enabled": false, "type": "mock", "roi": { "width": 1, "height": 1, "offsetX": 0, "offsetY": 0 }, "candidateThreshold": 0.6, "confirmationThreshold": 0.8, "consecutiveFrames": 3, "cooldownMs": 1000, "modelReference": "", "modelVersion": "", "device": "cpu", "debugOverlay": false },
   "event": { "preEventSeconds": 10, "postEventSeconds": 10, "maxEventSeconds": 60, "mergeGapSeconds": 3, "keyFrameCount": 7, "saveRaw": true, "generatePreviewVideo": false, "uploadPolicy": "confirmed", "retentionDays": 30 },
-  "storage": { "eventRoot": "数据/事件 文件", "cacheRoot": "data/cache", "warningFreeSpaceGiB": 200, "criticalFreeSpaceGiB": 100, "stopFreeSpaceGiB": 20, "maximumEventStorageGiB": 1000 },
+  "storage": { "eventRoot": "数据/事件 文件", "cacheRoot": "data/cache", "rollingCacheEnabled": false, "maximumCacheStorageGiB": 1000, "rollingCacheWriteLimitMiBps": 600, "rollingCacheIoTimeoutMs": 10000, "warningFreeSpaceGiB": 200, "criticalFreeSpaceGiB": 100, "stopFreeSpaceGiB": 20, "maximumEventStorageGiB": 1000 },
   "uplink": { "enabled": false, "serverUrl": "", "heartbeatSeconds": 5, "credentialReference": "", "certificateReference": "" },
   "plantIo": { "enabled": false, "adapterType": "disabled", "endpoint": "", "credentialReference": "", "pollIntervalMs": 1000 },
   "logging": { "level": "info", "directory": "data/logs", "retentionDays": 30, "maximumFileSizeMiB": 10, "maximumFilesPerDay": 5, "queueCapacity": 8192 },

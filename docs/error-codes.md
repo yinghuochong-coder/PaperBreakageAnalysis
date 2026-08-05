@@ -186,6 +186,11 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `STORAGE_STOP_SAVE` | Critical | 否 | 达到停止保存水位；禁止新大文件并明确事件未保存 |
 | `STORAGE_IO_FAILED` | Error | 视 I/O | 非事件特定的文件系统读写/刷新/重命名失败 |
 | `STORAGE_CHECKSUM_MISMATCH` | Error | 视来源 | 通用存储对象读回校验失败；隔离对象并触发恢复 |
+| `NVME_QUEUE_FULL` | Warning | 是 | 每相机两个待写块已满；拒绝当前完整普通块、记录缺口，不阻塞采集 |
+| `NVME_BLOCK_INVALID` | Error | 否 | 帧序号、相机、布局、负载或块边界违反 NVMe v1 声明；当前普通块不提交 |
+| `NVME_CACHE_UNAVAILABLE` | Error | 是 | 缓存根、容量准入或既有块恢复状态不可安全使用；降级为内存缓存 |
+| `NVME_WRITE_TIMEOUT` | Error | 是 | 单块写入未在配置总截止时间内完成；保留临时尾块并降级内存 |
+| `NVME_WRITE_FAILED` | Error | 视 I/O | 预分配、写入、flush、原子发布或正常回绕删除失败；保留原生诊断并降级内存 |
 
 ### 4.6 数据库
 

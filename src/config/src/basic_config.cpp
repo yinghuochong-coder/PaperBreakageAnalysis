@@ -708,14 +708,22 @@ Result<EdgeConfig> parse_storage(const Json& root, const std::filesystem::path& 
                                  EdgeConfig result)
 {
     const Json& storage = root.at("storage");
-    if (auto fields =
-            exact_fields(storage, "/storage",
-                         {"eventRoot", "cacheRoot", "warningFreeSpaceGiB", "criticalFreeSpaceGiB",
-                          "stopFreeSpaceGiB", "maximumEventStorageGiB"});
+    if (auto fields = exact_fields(
+            storage, "/storage",
+            {"eventRoot", "cacheRoot", "rollingCacheEnabled", "maximumCacheStorageGiB",
+             "rollingCacheWriteLimitMiBps", "rollingCacheIoTimeoutMs", "warningFreeSpaceGiB",
+             "criticalFreeSpaceGiB", "stopFreeSpaceGiB", "maximumEventStorageGiB"});
         !fields)
         return Result<EdgeConfig>::failure(fields.error());
     auto event_root = validate_path(storage, "eventRoot", "/storage", config_directory);
     auto cache_root = validate_path(storage, "cacheRoot", "/storage", config_directory);
+    auto rolling_enabled = bool_field(storage, "rollingCacheEnabled", "/storage");
+    auto maximum_cache =
+        unsigned_field<std::uint32_t>(storage, "maximumCacheStorageGiB", "/storage", 1U, 1000000U);
+    auto write_limit = unsigned_field<std::uint32_t>(storage, "rollingCacheWriteLimitMiBps",
+                                                     "/storage", 1U, 1000000U);
+    auto io_timeout = unsigned_field<std::uint32_t>(storage, "rollingCacheIoTimeoutMs", "/storage",
+                                                    100U, 600000U);
     auto warning =
         unsigned_field<std::uint32_t>(storage, "warningFreeSpaceGiB", "/storage", 1U, 1000000U);
     auto critical =
@@ -728,6 +736,14 @@ Result<EdgeConfig> parse_storage(const Json& root, const std::filesystem::path& 
         return Result<EdgeConfig>::failure(event_root.error());
     if (!cache_root)
         return Result<EdgeConfig>::failure(cache_root.error());
+    if (!rolling_enabled)
+        return Result<EdgeConfig>::failure(rolling_enabled.error());
+    if (!maximum_cache)
+        return Result<EdgeConfig>::failure(maximum_cache.error());
+    if (!write_limit)
+        return Result<EdgeConfig>::failure(write_limit.error());
+    if (!io_timeout)
+        return Result<EdgeConfig>::failure(io_timeout.error());
     if (!warning)
         return Result<EdgeConfig>::failure(warning.error());
     if (!critical)
@@ -747,6 +763,10 @@ Result<EdgeConfig> parse_storage(const Json& root, const std::filesystem::path& 
                                                           "storage-path-collision"));
     result.storage = {.event_root = std::move(event_root).value(),
                       .cache_root = std::move(cache_root).value(),
+                      .rolling_cache_enabled = rolling_enabled.value(),
+                      .maximum_cache_storage_gib = maximum_cache.value(),
+                      .rolling_cache_write_limit_mibps = write_limit.value(),
+                      .rolling_cache_io_timeout_ms = io_timeout.value(),
                       .warning_free_space_gib = warning.value(),
                       .critical_free_space_gib = critical.value(),
                       .stop_free_space_gib = stop.value(),
@@ -1057,6 +1077,10 @@ std::string serialize_config(const EdgeConfig& config)
                  {"storage",
                   {{"eventRoot", config.storage.event_root},
                    {"cacheRoot", config.storage.cache_root},
+                   {"rollingCacheEnabled", config.storage.rolling_cache_enabled},
+                   {"maximumCacheStorageGiB", config.storage.maximum_cache_storage_gib},
+                   {"rollingCacheWriteLimitMiBps", config.storage.rolling_cache_write_limit_mibps},
+                   {"rollingCacheIoTimeoutMs", config.storage.rolling_cache_io_timeout_ms},
                    {"warningFreeSpaceGiB", config.storage.warning_free_space_gib},
                    {"criticalFreeSpaceGiB", config.storage.critical_free_space_gib},
                    {"stopFreeSpaceGiB", config.storage.stop_free_space_gib},
@@ -1157,7 +1181,17 @@ std::vector<std::string> changed_config_paths(const EdgeConfig& current,
     if (current.storage.event_root != candidate.storage.event_root ||
         current.storage.cache_root != candidate.storage.cache_root)
         paths.emplace_back("/storage/roots");
-    if (current.storage != candidate.storage)
+    if (current.storage.rolling_cache_enabled != candidate.storage.rolling_cache_enabled ||
+        current.storage.maximum_cache_storage_gib != candidate.storage.maximum_cache_storage_gib ||
+        current.storage.rolling_cache_write_limit_mibps !=
+            candidate.storage.rolling_cache_write_limit_mibps ||
+        current.storage.rolling_cache_io_timeout_ms !=
+            candidate.storage.rolling_cache_io_timeout_ms)
+        paths.emplace_back("/storage/nvme");
+    if (current.storage.warning_free_space_gib != candidate.storage.warning_free_space_gib ||
+        current.storage.critical_free_space_gib != candidate.storage.critical_free_space_gib ||
+        current.storage.stop_free_space_gib != candidate.storage.stop_free_space_gib ||
+        current.storage.maximum_event_storage_gib != candidate.storage.maximum_event_storage_gib)
         paths.emplace_back("/storage/watermarks");
     if (current.uplink.server_url != candidate.uplink.server_url ||
         current.uplink.credential_reference != candidate.uplink.credential_reference ||
@@ -1185,8 +1219,8 @@ bool is_restart_required_path(const std::string_view json_pointer) noexcept
 {
     return json_pointer == "/system" || json_pointer == "/cameras" ||
            json_pointer == "/acquisition" || json_pointer == "/storage/roots" ||
-           json_pointer == "/uplink/transport" || json_pointer == "/plantIo" ||
-           json_pointer == "/logging/runtime";
+           json_pointer == "/storage/nvme" || json_pointer == "/uplink/transport" ||
+           json_pointer == "/plantIo" || json_pointer == "/logging/runtime";
 }
 
 } // namespace paperbreak::config

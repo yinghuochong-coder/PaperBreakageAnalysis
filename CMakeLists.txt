@@ -103,7 +103,9 @@ install(FILES
 
 install(FILES config/default-config.json
     DESTINATION "${CMAKE_INSTALL_DATADIR}/PaperBreakEdge/config")
-install(FILES config/schemas/edge-config-v1.schema.json
+install(FILES
+    config/schemas/edge-config-v1.schema.json
+    config/schemas/edge-config-v2.schema.json
     DESTINATION "${CMAKE_INSTALL_DATADIR}/PaperBreakEdge/config/schemas")
 
 set(CPACK_PACKAGE_NAME "PaperBreakEdge")

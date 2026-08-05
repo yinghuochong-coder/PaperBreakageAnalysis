@@ -156,6 +156,10 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
              .acquisition_queue_capacity = configuration.acquisition.queue_capacity,
              .algorithm_queue_capacity = frame_queue_capacity,
              .preview_slot_count = configuration.preview.enabled ? 1U : 0U,
+             .nvme_queue_frames =
+                 configuration.storage.rolling_cache_enabled
+                     ? (static_cast<std::size_t>(std::ceil(camera.frame_rate)) + 2U) * 4U
+                     : 0U,
              .post_event_seconds = static_cast<double>(configuration.event.post_event_seconds),
              .maximum_concurrent_events = 1U,
              .configured_frame_pool_capacity = configuration.acquisition.frame_pool_capacity,

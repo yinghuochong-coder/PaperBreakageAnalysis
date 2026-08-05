@@ -212,7 +212,7 @@ JSON、IPC、事件清单、审计导出和网络协议的规范输出统一为 
 
 ```json
 {
-  "configSchemaVersion": 1,
+  "configSchemaVersion": 2,
   "configRevision": 42,
   "modifiedAt": "2026-07-30T05:47:00.123Z"
 }

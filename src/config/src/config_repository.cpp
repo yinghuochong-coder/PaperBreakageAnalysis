@@ -40,6 +40,14 @@ void restore_restart_section(EdgeConfig& target, const EdgeConfig& effective,
         target.storage.event_root = effective.storage.event_root;
         target.storage.cache_root = effective.storage.cache_root;
     }
+    else if (path == "/storage/nvme")
+    {
+        target.storage.rolling_cache_enabled = effective.storage.rolling_cache_enabled;
+        target.storage.maximum_cache_storage_gib = effective.storage.maximum_cache_storage_gib;
+        target.storage.rolling_cache_write_limit_mibps =
+            effective.storage.rolling_cache_write_limit_mibps;
+        target.storage.rolling_cache_io_timeout_ms = effective.storage.rolling_cache_io_timeout_ms;
+    }
     else if (path == "/uplink/transport")
     {
         target.uplink.server_url = effective.uplink.server_url;

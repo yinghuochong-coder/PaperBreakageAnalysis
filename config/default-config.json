@@ -47,7 +47,7 @@
     }
   ],
   "configRevision": 11,
-  "configSchemaVersion": 1,
+  "configSchemaVersion": 2,
   "event": {
     "generatePreviewVideo": true,
     "keyFrameCount": 7,
@@ -93,7 +93,11 @@
     "cacheRoot": "data/cache",
     "criticalFreeSpaceGiB": 60,
     "eventRoot": "data/事件 数据",
+    "maximumCacheStorageGiB": 1000,
     "maximumEventStorageGiB": 1000,
+    "rollingCacheEnabled": false,
+    "rollingCacheIoTimeoutMs": 10000,
+    "rollingCacheWriteLimitMiBps": 600,
     "stopFreeSpaceGiB": 20,
     "warningFreeSpaceGiB": 100
   },

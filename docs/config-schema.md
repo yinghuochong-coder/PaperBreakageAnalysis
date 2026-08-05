@@ -1,6 +1,6 @@
 # 配置格式
 
-当前配置格式为 `configSchemaVersion = 1`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v1.schema.json`，可部署起点见 `config/default-config.json`。
+当前配置格式为 `configSchemaVersion = 2`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v2.schema.json`，可部署起点见 `config/default-config.json`。v1 合同继续归档，但当前程序不静默迁移 v1；部署升级必须先生成并验证完整 v2 配置。
 
 配置根对象包含 system、cameras、acquisition、preview、algorithm、event、storage、uplink、plantIo、logging 和 health。最多配置四路相机，逻辑编号限定为 CAM01～CAM04；启用相机必须具有唯一序列号。相机数值在 M1 只应用安全结构上限，M3 还必须按真实设备能力回读校验。
 
@@ -10,7 +10,7 @@
 
 - 更新命令携带 `expectedConfigRevision`；冲突返回 `SYS_CONFIG_VERSION_CONFLICT`。
 - 内容未变化时返回当前修订；成功修改严格递增修订。
-- system、相机拓扑、acquisition、存储根目录、日志运行时、uplink 传输和 Plant IO 适配器变更等待重启。
+- system、相机拓扑、acquisition、存储根目录、NVMe 滚动缓存、日志运行时、uplink 传输和 Plant IO 适配器变更等待重启。
 - 相机参数、preview、algorithm、event、存储水位、日志等级/保留和 health 可立即应用。
 - 返回值同时包含存储修订、有效修订和 `pendingRestartPaths`。
 
@@ -46,20 +46,23 @@
 - `debugOverlay` 控制 Qt 单帧测试图上的 ROI/检测结果叠加。单帧测试结果和 JPEG 只存在于
   运行时，不写入配置或事件目录。
 
-## M7 NVMe 滚动缓存设计
+## M7 NVMe 滚动缓存
 
-M7-01 只接受块格式和容量合同，不提前修改当前 `configSchemaVersion = 1`。在 M7-02 存在实际
-运行时消费者时，配置 schema 新版本应一次性加入：
+M7-02 将配置升级为 schema v2，并加入实际运行时消费者：
 
 - `storage.rollingCacheEnabled`：普通 NVMe 滚动缓存开关；
 - `storage.maximumCacheStorageGiB`：已提交块和单个在写临时块的总物理容量上限；
 - `storage.rollingCacheWriteLimitMiBps`：普通滚动写限速，既不能低于完整原始输入需求，也不能
   高于目标卷实测持续写带宽的 80%。
+- `storage.rollingCacheIoTimeoutMs`：单个块从开始写入到完成提交的总截止时间，范围 100～600000 ms。
 
 NVMe v1 块时长固定为 1000 ms，不作为可任意修改的配置字段。块上限必须从服务已校验并回读
 的相机数、最大帧率、stride、height 和像素格式计算；`warningFreeSpaceGiB`、
 `criticalFreeSpaceGiB`、`stopFreeSpaceGiB` 与最大缓存容量同时生效，取更严格的准入结果。
 完整格式和计算公式见 `docs/architecture/decisions/adr-011-nvme-rolling-cache-format-capacity.md`。
+四个字段均需重启应用；水位字段仍可热应用。默认 `rollingCacheEnabled=false`，在生产 ROI、
+stride 和目标 NVMe 持续写能力未验收前不自动启用。启用时，每相机当前组装块、两个排队块和
+写线程当前块共最多四块的共享帧引用会计入 `acquisition.framePoolCapacity` 启动门禁。
 
 ## 原子保存和恢复
 

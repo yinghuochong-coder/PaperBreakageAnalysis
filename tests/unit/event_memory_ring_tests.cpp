@@ -124,6 +124,23 @@ TEST(EventMemoryRingPlan, HandlesDifferentFrameRatesAndRejectsUnsafePlans)
     EXPECT_EQ(plan.error().details.front().value, "ring-frame-overflow");
 }
 
+TEST(EventMemoryRingPlan, IncludesCurrentAndQueuedNvmeFrameReferences)
+{
+    auto request = valid_plan_request();
+    request.nvme_queue_frames = 12U;
+    request.configured_frame_pool_capacity = 42U;
+    request.memory_budget_bytes = 168U;
+    auto plan = plan_memory_ring(request);
+    ASSERT_TRUE(plan);
+    EXPECT_EQ(plan.value().pipeline_frames, 18U);
+    EXPECT_EQ(plan.value().required_frame_pool_capacity, 42U);
+
+    request.configured_frame_pool_capacity = 41U;
+    plan = plan_memory_ring(request);
+    ASSERT_FALSE(plan);
+    EXPECT_EQ(plan.error().details.front().value, "frame-pool-insufficient");
+}
+
 TEST(EventMemoryRingBuffer, WrapsAtFixedCapacityAndIncludesExactWindowBoundaries)
 {
     FrameBufferPool pool{4U, 4U};

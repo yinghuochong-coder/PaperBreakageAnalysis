@@ -16,6 +16,7 @@
 #include "paperbreak/service/windows/scm_host.hpp"
 #include "paperbreak/storage/event_inspector.hpp"
 #include "paperbreak/storage/metadata_database.hpp"
+#include "paperbreak/storage/nvme_cache.hpp"
 #include "paperbreak/storage/storage_policy.hpp"
 
 #include <QCoreApplication>
@@ -25,6 +26,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <filesystem>
 #include <iostream>
@@ -472,13 +474,49 @@ class EventLifecycleComponent final : public paperbreak::service::ILifecycleComp
     std::shared_ptr<paperbreak::service::EventRuntime> runtime_;
 };
 
+class NvmeLifecycleComponent final : public paperbreak::service::ILifecycleComponent
+{
+  public:
+    explicit NvmeLifecycleComponent(std::shared_ptr<paperbreak::storage::NvmeRollingCache> runtime)
+        : runtime_(std::move(runtime))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "nvme-cache";
+    }
+    [[nodiscard]] paperbreak::service::ShutdownPhase shutdown_phase() const noexcept override
+    {
+        return paperbreak::service::ShutdownPhase::event;
+    }
+    [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
+    {
+        return runtime_->start();
+    }
+    [[nodiscard]] paperbreak::Result<void> request_stop(paperbreak::service::StopReason) override
+    {
+        runtime_->request_stop();
+        return paperbreak::Result<void>::success();
+    }
+    [[nodiscard]] paperbreak::Result<void> join(
+        const std::chrono::steady_clock::time_point deadline) override
+    {
+        return runtime_->join(deadline);
+    }
+
+  private:
+    std::shared_ptr<paperbreak::storage::NvmeRollingCache> runtime_;
+};
+
 class StorageMaintenanceLifecycleComponent final : public paperbreak::service::ILifecycleComponent
 {
   public:
     StorageMaintenanceLifecycleComponent(
         std::shared_ptr<paperbreak::storage::StoragePolicyManager> manager,
-        std::shared_ptr<paperbreak::monitoring::AlarmRegistry> alarms)
-        : manager_(std::move(manager)), alarms_(std::move(alarms))
+        std::shared_ptr<paperbreak::monitoring::AlarmRegistry> alarms,
+        std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme)
+        : manager_(std::move(manager)), alarms_(std::move(alarms)), nvme_(std::move(nvme))
     {
     }
 
@@ -552,6 +590,11 @@ class StorageMaintenanceLifecycleComponent final : public paperbreak::service::I
             {
                 static_cast<void>(alarms_->clear("STORAGE_LOW_SPACE", "storage"));
             }
+            if (maintenance)
+            {
+                if (auto nvme = nvme_.lock())
+                    nvme->set_storage_watermark(maintenance.value().snapshot.watermark);
+            }
 
             std::unique_lock lock{mutex_};
             condition_.wait_for(lock, token, std::chrono::seconds{30}, [] { return false; });
@@ -560,6 +603,7 @@ class StorageMaintenanceLifecycleComponent final : public paperbreak::service::I
 
     std::shared_ptr<paperbreak::storage::StoragePolicyManager> manager_;
     std::shared_ptr<paperbreak::monitoring::AlarmRegistry> alarms_;
+    std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme_;
     std::mutex mutex_;
     std::condition_variable_any condition_;
     std::jthread worker_;
@@ -942,8 +986,9 @@ class EventMetricSource final : public paperbreak::monitoring::IMetricSource
 {
   public:
     EventMetricSource(std::weak_ptr<paperbreak::service::EventRuntime> runtime,
-                      std::weak_ptr<paperbreak::storage::StoragePolicyManager> storage)
-        : runtime_(std::move(runtime)), storage_(std::move(storage))
+                      std::weak_ptr<paperbreak::storage::StoragePolicyManager> storage,
+                      std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme)
+        : runtime_(std::move(runtime)), storage_(std::move(storage)), nvme_(std::move(nvme))
     {
     }
 
@@ -961,11 +1006,38 @@ class EventMetricSource final : public paperbreak::monitoring::IMetricSource
             runtime ? runtime->snapshot() : paperbreak::service::EventRuntimeSnapshot{};
         const auto policy =
             storage ? storage->snapshot() : paperbreak::storage::StoragePolicySnapshot{};
+        const auto nvme = nvme_.lock();
+        const auto cache =
+            nvme ? nvme->snapshot() : paperbreak::storage::NvmeRollingCacheSnapshot{};
         return paperbreak::Result<std::vector<Point>>::success(
             {{.name = "system.nvme_write_bytes_per_second",
-              .value = 0.0,
+              .value = cache.write_bytes_per_second,
               .unit = "bytes/second",
-              .available = false},
+              .available = nvme != nullptr},
+             {.name = "storage.nvme.state",
+              .value = std::string{paperbreak::storage::to_string(cache.state)},
+              .unit = "state",
+              .available = nvme != nullptr},
+             {.name = "storage.nvme.queue.depth",
+              .value = static_cast<std::uint64_t>(cache.queue_depth),
+              .unit = "count",
+              .available = nvme != nullptr},
+             {.name = "storage.nvme.queue.capacity",
+              .value = static_cast<std::uint64_t>(cache.queue_capacity),
+              .unit = "count",
+              .available = nvme != nullptr},
+             {.name = "storage.nvme.queue.high_watermark",
+              .value = static_cast<std::uint64_t>(cache.queue_high_watermark),
+              .unit = "count",
+              .available = nvme != nullptr},
+             {.name = "storage.nvme.cache_bytes",
+              .value = cache.current_cache_bytes,
+              .unit = "bytes",
+              .available = nvme != nullptr},
+             {.name = "storage.nvme.rejected_blocks_total",
+              .value = cache.rejected_blocks,
+              .unit = "count",
+              .available = nvme != nullptr},
              {.name = "uplink.state",
               .value = std::string{"not-initialized"},
               .unit = "state",
@@ -1003,6 +1075,7 @@ class EventMetricSource final : public paperbreak::monitoring::IMetricSource
   private:
     std::weak_ptr<paperbreak::service::EventRuntime> runtime_;
     std::weak_ptr<paperbreak::storage::StoragePolicyManager> storage_;
+    std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme_;
 };
 
 class CameraMetricSource final : public paperbreak::monitoring::IMetricSource
@@ -1390,6 +1463,78 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         std::move(storage_policy_result).value()};
     const std::weak_ptr<paperbreak::monitoring::AlarmRegistry> weak_event_alarms = alarms;
     const std::weak_ptr<paperbreak::logging::LoggingRuntime> weak_event_logging = logging;
+    std::shared_ptr<paperbreak::storage::NvmeRollingCache> nvme_cache;
+    if (loaded.value().effective->storage.rolling_cache_enabled)
+    {
+        std::vector<paperbreak::storage::NvmeCameraLayout> layouts;
+        for (const auto& camera : loaded.value().effective->cameras)
+        {
+            if (!camera.enabled)
+                continue;
+            const std::uint64_t bytes_per_pixel =
+                camera.pixel_format == paperbreak::config::PixelFormat::mono10 ||
+                        camera.pixel_format == paperbreak::config::PixelFormat::mono12
+                    ? 2U
+                    : 1U;
+            const auto maximum_frame_bytes =
+                static_cast<std::uint64_t>(camera.roi.width) * camera.roi.height * bytes_per_pixel;
+            const auto index_capacity =
+                static_cast<std::uint32_t>(std::ceil(camera.frame_rate)) + 2U;
+            const auto required_payload = static_cast<std::uint64_t>(
+                std::ceil(static_cast<long double>(maximum_frame_bytes) * camera.frame_rate));
+            const auto required_metadata =
+                static_cast<std::uint64_t>(std::ceil(camera.frame_rate)) *
+                    paperbreak::storage::nvme_index_entry_bytes +
+                2U * paperbreak::storage::nvme_page_bytes;
+            layouts.push_back(
+                {.camera_id = camera.id,
+                 .maximum_frame_bytes = static_cast<std::uint32_t>(maximum_frame_bytes),
+                 .index_capacity = index_capacity,
+                 .required_input_bytes_per_second = required_payload + required_metadata});
+        }
+        auto cache_result = paperbreak::storage::NvmeRollingCache::create(
+            {.root = cache_root,
+             .maximum_cache_bytes =
+                 loaded.value().effective->storage.maximum_cache_storage_gib * gibibyte,
+             .write_limit_bytes_per_second =
+                 loaded.value().effective->storage.rolling_cache_write_limit_mibps * 1024ULL *
+                 1024ULL,
+             .io_timeout =
+                 std::chrono::milliseconds{
+                     loaded.value().effective->storage.rolling_cache_io_timeout_ms},
+             .cameras = std::move(layouts),
+             .error_observer = [weak_event_alarms,
+                                weak_event_logging](const paperbreak::Error& error) {
+                 if (auto alarm_registry = weak_event_alarms.lock())
+                 {
+                     static_cast<void>(
+                         alarm_registry->raise_alarm({.code = error.business_code,
+                                                      .severity = error.severity,
+                                                      .source = error.source_id.value_or("nvme"),
+                                                      .message = error.message,
+                                                      .details = error.details}));
+                 }
+                 if (auto log_runtime = weak_event_logging.lock())
+                 {
+                     static_cast<void>(
+                         log_runtime->log(paperbreak::logging::Category::storage,
+                                          error.severity == paperbreak::Severity::critical
+                                              ? paperbreak::logging::Level::critical
+                                          : error.severity == paperbreak::Severity::warning
+                                              ? paperbreak::logging::Level::warning
+                                              : paperbreak::logging::Level::error,
+                                          error.business_code + ": " + error.message));
+                 }
+             }});
+        if (!cache_result)
+        {
+            static_cast<void>(logging->shutdown());
+            return paperbreak::
+                Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::failure(
+                    cache_result.error());
+        }
+        nvme_cache = std::move(cache_result).value();
+    }
     auto event_runtime_result = paperbreak::service::EventRuntime::create(
         {.configuration = *loaded.value().effective,
          .event_root = event_root,
@@ -1458,6 +1603,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     }
     const std::weak_ptr<paperbreak::pipeline::PreviewRuntime> weak_preview = preview;
     const std::weak_ptr<paperbreak::service::EventRuntime> weak_event_runtime = event_runtime;
+    const std::weak_ptr<paperbreak::storage::NvmeRollingCache> weak_nvme_cache = nvme_cache;
     paperbreak::camera::CameraFrameDeliveryOptions delivery_options{
         .frame_pool_capacity = loaded.value().effective->acquisition.frame_pool_capacity,
         .queue_capacity = loaded.value().effective->acquisition.queue_capacity,
@@ -1465,8 +1611,10 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
             std::chrono::milliseconds{loaded.value().effective->acquisition.receive_timeout_ms}};
     cameras = std::make_shared<paperbreak::camera::CameraControlRuntime>(
         std::move(camera_provider),
-        [weak_preview, weak_event_runtime](paperbreak::camera::FrameView frame) {
+        [weak_preview, weak_event_runtime, weak_nvme_cache](paperbreak::camera::FrameView frame) {
             if (auto runtime = weak_event_runtime.lock())
+                static_cast<void>(runtime->submit_frame(frame));
+            if (auto runtime = weak_nvme_cache.lock())
                 static_cast<void>(runtime->submit_frame(frame));
             if (auto runtime = weak_preview.lock())
                 runtime->submit(std::move(frame), {.camera_status = "acquiring"});
@@ -1497,7 +1645,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         paperbreak::platform::make_windows_system_metric_source(std::move(disk_paths)),
         std::make_shared<IpcMetricSource>(ipc_server),
         std::make_shared<DatabaseMetricSource>(event_database),
-        std::make_shared<EventMetricSource>(event_runtime, storage_policy),
+        std::make_shared<EventMetricSource>(event_runtime, storage_policy, nvme_cache),
         std::make_shared<CameraMetricSource>(configuration, cameras),
         std::make_shared<AlgorithmMetricSource>(event_runtime)};
     for (const auto& source : sources)
@@ -1566,8 +1714,10 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     if (preview)
         components.push_back(std::make_unique<PreviewLifecycleComponent>(preview));
     components.push_back(std::make_unique<EventLifecycleComponent>(event_runtime));
+    if (nvme_cache)
+        components.push_back(std::make_unique<NvmeLifecycleComponent>(nvme_cache));
     components.push_back(
-        std::make_unique<StorageMaintenanceLifecycleComponent>(storage_policy, alarms));
+        std::make_unique<StorageMaintenanceLifecycleComponent>(storage_policy, alarms, nvme_cache));
     components.push_back(std::make_unique<IpcLifecycleComponent>(ipc_server));
     components.push_back(std::make_unique<MonitoringLifecycleComponent>(monitor));
     return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::

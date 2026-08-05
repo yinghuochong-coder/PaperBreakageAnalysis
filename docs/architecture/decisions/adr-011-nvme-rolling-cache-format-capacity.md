@@ -211,14 +211,15 @@ minimumMeasuredSustainedWriteBps = ceil(rollingWriteBps / 0.80)
 
 ### 后续运行时配置合同
 
-M7-02 存在实际消费者时，应通过配置 schema 新版本一次性加入：
+M7-02 已通过配置 schema v2 一次性加入：
 
 - `storage.rollingCacheEnabled`：是否启用普通 NVMe 滚动缓存；
 - `storage.maximumCacheStorageGiB`：滚动块及单个在写临时块的总物理上限；
 - `storage.rollingCacheWriteLimitMiBps`：普通滚动写令牌桶上限，必须同时满足输入需求和目标盘 80% 预算；
+- `storage.rollingCacheIoTimeoutMs`：单块写入、双 flush 和原子发布共享的总截止时间；
 - 块时长 v1 固定为 1000 ms，不暴露可任意修改字段；格式/索引容量来自已应用相机配置快照。
 
-当前 `configSchemaVersion=1` 不提前接受这些尚未执行的字段。水位仍沿用现有 warning/critical/stop 免费空间阈值；容量上限和免费空间门禁取更严格者。
+schema v1 保持历史合同，当前程序严格接受 v2；升级需显式生成完整 v2 配置，不猜测旧字段。水位仍沿用 warning/critical/stop 免费空间阈值；容量上限和免费空间门禁取更严格者。
 
 ## 结果
 

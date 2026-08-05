@@ -22,6 +22,7 @@ add_executable(PaperBreakTests
     unit/mock_camera_tests.cpp
     unit/pipeline_tests.cpp
     unit/storage_metadata_database_tests.cpp
+    unit/storage_nvme_cache_tests.cpp
     unit/storage_event_store_tests.cpp
     unit/storage_policy_tests.cpp
     unit/service_runtime_tests.cpp

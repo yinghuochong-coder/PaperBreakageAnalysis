@@ -33,6 +33,7 @@ struct MemoryRingPlanRequest final
     std::size_t acquisition_queue_capacity{};
     std::size_t algorithm_queue_capacity{};
     std::size_t preview_slot_count{};
+    std::size_t nvme_queue_frames{};
     double post_event_seconds{};
     std::size_t maximum_concurrent_events{1U};
     std::size_t configured_frame_pool_capacity{};

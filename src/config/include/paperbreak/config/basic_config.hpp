@@ -12,7 +12,7 @@ namespace paperbreak::config
 {
 
 inline constexpr std::size_t config_max_bytes = 1024U * 1024U;
-inline constexpr std::uint32_t config_schema_version = 1U;
+inline constexpr std::uint32_t config_schema_version = 2U;
 inline constexpr std::size_t maximum_camera_count = 4U;
 
 enum class PixelFormat
@@ -129,6 +129,10 @@ struct StorageConfig final
 {
     std::string event_root;
     std::string cache_root;
+    bool rolling_cache_enabled{};
+    std::uint32_t maximum_cache_storage_gib{1000U};
+    std::uint32_t rolling_cache_write_limit_mibps{600U};
+    std::uint32_t rolling_cache_io_timeout_ms{10000U};
     std::uint32_t warning_free_space_gib{200U};
     std::uint32_t critical_free_space_gib{100U};
     std::uint32_t stop_free_space_gib{20U};
@@ -203,7 +207,7 @@ struct BasicConfigInfo final
     std::size_t file_size_bytes{};
 };
 
-/// Parses strict schema v1 and resolves/validates paths against config_directory.
+/// Parses strict schema v2 and resolves/validates paths against config_directory.
 [[nodiscard]] Result<EdgeConfig> parse_config(
     std::string_view contents, const std::filesystem::path& config_directory) noexcept;
 [[nodiscard]] std::string serialize_config(const EdgeConfig& config);

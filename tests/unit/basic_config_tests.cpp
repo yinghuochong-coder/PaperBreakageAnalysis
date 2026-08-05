@@ -165,13 +165,13 @@ class FailingAtomicFileSystem final : public paperbreak::platform::IAtomicFileSy
 
 } // namespace
 
-TEST(BasicConfig, AcceptsCompleteVersionOneAtUnicodeAndSpacePath)
+TEST(BasicConfig, AcceptsCompleteVersionTwoAtUnicodeAndSpacePath)
 {
     const TemporaryDirectory directory;
     const auto path = directory.write("纸机 配置.json", valid_config());
     const auto result = paperbreak::config::validate_basic_config(path);
     ASSERT_TRUE(result) << result.error().message;
-    EXPECT_EQ(result.value().schema_version, 1U);
+    EXPECT_EQ(result.value().schema_version, 2U);
     EXPECT_EQ(result.value().config_revision, 1U);
 }
 
@@ -186,8 +186,8 @@ TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
                                                     "\"serverUrl\": \"\", \"token\": \"raw\""));
     const auto malformed = directory.write("truncated.json", R"({"configSchemaVersion":1)");
     const auto future =
-        directory.write("future.json", replace_once(valid_config(), "\"configSchemaVersion\": 1",
-                                                    "\"configSchemaVersion\": 2"));
+        directory.write("future.json", replace_once(valid_config(), "\"configSchemaVersion\": 2",
+                                                    "\"configSchemaVersion\": 3"));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(unknown));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(sensitive));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(malformed));
@@ -211,6 +211,31 @@ TEST(BasicConfig, RejectsCrossFieldAndPathViolations)
     EXPECT_FALSE(paperbreak::config::validate_basic_config(event));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(watermarks));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(path));
+}
+
+TEST(BasicConfig, ValidatesAndSerializesVersionTwoNvmeSettings)
+{
+    const TemporaryDirectory directory;
+    auto parsed = paperbreak::config::parse_config(valid_config(), directory.path());
+    ASSERT_TRUE(parsed);
+    EXPECT_FALSE(parsed.value().storage.rolling_cache_enabled);
+    EXPECT_EQ(parsed.value().storage.maximum_cache_storage_gib, 1000U);
+    EXPECT_EQ(parsed.value().storage.rolling_cache_write_limit_mibps, 600U);
+    EXPECT_EQ(parsed.value().storage.rolling_cache_io_timeout_ms, 10000U);
+    EXPECT_NE(paperbreak::config::serialize_config(parsed.value())
+                  .find("\"rollingCacheIoTimeoutMs\": 10000"),
+              std::string::npos);
+
+    const auto invalid = directory.write(
+        "invalid-timeout.json", replace_once(valid_config(), "\"rollingCacheIoTimeoutMs\": 10000",
+                                             "\"rollingCacheIoTimeoutMs\": 99"));
+    EXPECT_FALSE(paperbreak::config::validate_basic_config(invalid));
+
+    auto changed = parsed.value();
+    changed.storage.rolling_cache_enabled = true;
+    const auto paths = paperbreak::config::changed_config_paths(parsed.value(), changed);
+    EXPECT_NE(std::ranges::find(paths, "/storage/nvme"), paths.end());
+    EXPECT_TRUE(paperbreak::config::is_restart_required_path("/storage/nvme"));
 }
 
 TEST(BasicConfig, RejectsEmptyMissingDirectoryAndOversizedFiles)
