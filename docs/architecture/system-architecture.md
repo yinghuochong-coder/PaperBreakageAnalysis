@@ -46,7 +46,6 @@
 
 以下内容是扩展点，不在本文档中臆定：
 
-- 上位机 REST/WebSocket 端点、认证和文件上传协议；
 - PLC/现场 IO 的生产协议；
 - 正式断纸算法、模型运行时和业务验收阈值；
 - 目标机内存、相机最终 ROI、NVMe 性能对应的最终容量参数；
@@ -60,7 +59,7 @@
                               中心/上位机
                          状态、报警、配置、事件
                                   ⇅
-┌──────────────┐         TLS 网络适配器          ┌────────────────────┐
+┌──────────────┐      明文、无鉴权网络适配器      ┌────────────────────┐
 │ PLC / 现场 IO │ ⇄ PlantIoAdapter ⇄             │                    │
 └──────────────┘                                  │ PaperBreakEdge     │
                                                   │ Service            │
@@ -138,6 +137,7 @@ Qt 桌面客户端只承担：
 
 - `camera-simulator`：控制模拟帧和故障注入；
 - `event-inspector`：只读校验已提交事件；
+- `PaperBreakUplinkSimulator`：Uplink v1 参考上位机，提供 GUI/headless、持久工作区、远程命令和故障注入；默认构建但仅进入独立 `UplinkSimulator` 安装组件，不进入 PaperBreakEdge 生产包；
 - `service-installer`：若安装器需要独立帮助程序，只包装受控的服务安装操作。
 
 辅助工具不属于长期运行的第三个业务进程。
@@ -193,9 +193,10 @@ Qt 桌面客户端只承担：
 | `paperbreak_event` | 候选状态机、窗口冻结、合并、关键帧策略、事件模型 | common、camera 帧视图、algorithm 接口 | MVS、具体数据库/网络 |
 | `paperbreak_event_codec` | 关键帧 JPEG 图像编解码适配 | event、批准的 OpenCV core/imgproc/imgcodecs | MVS、UI、SQLite、网络；公开接口不得暴露 OpenCV 类型 |
 | `paperbreak_storage` | 事件事务、SQLite、迁移、NVMe 块、保留策略 | common、event、SQLite、可选 zstd | UI、MVS、上传协议 |
-| `paperbreak_uplink` | `IUplinkTransport`、上传调度领域接口 | common、event 接口 | Qt Widgets、MVS |
+| `paperbreak_uplink` | `IUplinkTransport`、Uplink v1 DTO/校验、上传调度领域接口 | common、event 接口 | Qt Widgets、MVS |
 | `paperbreak_uplink_mock` | 离线/慢速/失败脚本化传输 | uplink | 生产凭据 |
-| `paperbreak_uplink_transport` | 批准后的 TLS/REST/WebSocket/HTTP 实现 | uplink、Qt Network 或批准网络库 | 相机、UI |
+| `paperbreak_uplink_transport` | Uplink v1 明文 REST/WebSocket/HTTP 边缘适配器（M8-01～M8-04） | uplink、Qt Network 或批准网络库 | 相机、UI |
+| `paperbreak_uplink_simulator_core` | Uplink v1 参考服务端、SQLite 工作区、命令与故障模型 | uplink、Qt HttpServer/WebSockets、SQLite | 生产服务、MVS |
 | `paperbreak_plant_io` | `IPlantIoAdapter` 和生产信号模型 | common | 具体未批准协议 |
 | `paperbreak_monitoring` | 指标、报警、健康快照和诊断接口 | common、logging 接口 | UI、MVS |
 | `paperbreak_ipc` | 版本化 IPC 编解码、Server/Client 传输 | common、platform_windows、Qt Core/Network、nlohmann/json | Widgets、MVS、业务实现 |
@@ -830,8 +831,8 @@ timestamp         墙上时间
 
 ### 16.2 网络与凭据
 
-- 上位机通信使用 TLS；
-- 证书和密钥存于 Windows 安全存储或批准的受限位置；
+- Uplink v1 正式使用明文 HTTP/WS 且无应用鉴权；部署必须隔离网络并限制端口来源，明确接受窃听、伪造命令和中间人风险；
+- 若未来其他协议或 Uplink 新版本使用证书和密钥，必须存于 Windows 安全存储或批准的受限位置；
 - 普通 JSON 只保存 secret reference；
 - 网络消息、文件名、URL、分块范围和响应大小全部校验；
 - 重放保护和幂等语义在 M8 协议评审中固定。
@@ -984,7 +985,7 @@ timestamp         墙上时间
 | ADR-009 | Accepted | 本机 IPC 使用 QLocalServer/QLocalSocket | Qt 集成和本机命名管道 |
 | ADR-010 | Proposed | 初版算法采用进程内接口实现，保留以后隔离进程的可能 | M6 在 ABI/故障隔离评审时确认 |
 | ADR-011 | Accepted | 每相机 1 秒原始块、显式小端头/索引/提交尾页、CRC32C、上界容量和 80% 持续带宽准入 | `decisions/adr-011-nvme-rolling-cache-format-capacity.md` |
-| ADR-012 | Deferred | 上位机具体协议、认证和断点续传契约 | M8-00 |
+| [ADR-012](decisions/adr-012-uplink-v1-plaintext-protocol.md) | Accepted | Uplink v1 明文无鉴权协议、断点续传与参考模拟器 | M8-00 |
 | ADR-013 | Deferred | Plant IO 生产协议 | DEC-005/另行批准 |
 | ADR-014 | Deferred | 安装器技术 | M9-01 |
 | ADR-015 | Accepted | VS 2026/v145、CMake 4.2、外部 SDK 与 vcpkg manifest 基线 | `decisions/adr-015-windows-toolchain-dependencies.md` |

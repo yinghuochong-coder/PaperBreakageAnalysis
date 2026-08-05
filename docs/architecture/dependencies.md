@@ -43,7 +43,7 @@ Qt 6.10 官方 Windows 支持表只列 MSVC 2022。项目使用 Qt 官方 `msvc2
 
 | 依赖 | 固定版本 | 允许组件/功能 | 获取与发现 | 许可证/发布约束 |
 | --- | --- | --- | --- | --- |
-| Qt | 6.10.2 `msvc2022_64` | 必需：Core、Gui、Widgets、Network；Concurrent 仅在具体 target 有批准用途时启用 | Qt 官方安装器；由 `PAPERBREAK_QT_ROOT` 或用户预设加入 `CMAKE_PREFIX_PATH` | 商业许可，或满足适用模块 LGPLv3/GPLv3 条款；未确认许可路径前不得发布 |
+| Qt | 6.10.2 `msvc2022_64` | 必需：Core、Gui、Widgets、Network、HttpServer、WebSockets；后两者用于独立 Uplink v1 参考模拟器，Concurrent 仅在具体 target 有批准用途时启用 | Qt 官方安装器；由 `PAPERBREAK_QT_ROOT` 或用户预设加入 `CMAKE_PREFIX_PATH` | 商业许可，或满足适用模块 LGPLv3/GPLv3 条款；未确认许可路径前不得发布 |
 | OpenCV | 4.12.0 | 首期只批准 core、imgproc、imgcodecs；新增模块需记录理由 | OpenCV 官方 Windows SDK/批准的内部镜像；通过 `OpenCV_DIR` 注入 | Apache-2.0；发布时保留 NOTICE/许可证及实际打包模块的第三方通知 |
 | Hikrobot MVS SDK | Development/Runtime 4.8.0.3 | 枚举、参数、取流、错误翻译；运行时仅部署核心控制与 GigE 传输组件；仅限 Hikrobot 适配器 | 供应商安装器/批准的内部镜像；通过 `PAPERBREAK_MVS_ROOT` 和 `PAPERBREAK_MVS_RUNTIME_DIR` 分别注入 Development 与 x64 Runtime | 供应商专有条款；随安装器提供的第三方许可通知必须保留，SDK 与 Runtime 分发权必须在 M9 发布前书面确认 |
 

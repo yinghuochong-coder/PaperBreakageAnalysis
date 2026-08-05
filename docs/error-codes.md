@@ -232,6 +232,8 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | --- | --- | ---: | --- |
 | `UPLINK_DISCONNECTED` | Warning | 是 | 上位机连接不可用；上传任务持久排队，本地业务继续 |
 | `UPLINK_PROTOCOL_ERROR` | Error | 视协商 | 上位机响应或消息不符合已批准协议；保留受限响应摘要 |
+| `UPLINK_PROTOCOL_VERSION_UNSUPPORTED` | Error | 否 | 对端没有共同的 Uplink 协议版本；拒绝建立会话并报告双方版本 |
+| `UPLINK_SERVER_BUSY` | Warning | 是 | 设备、活动上传、存储任务或设备命令队列达到有界容量；按服务端提示退避 |
 | `UPLINK_AUTH_FAILED` | Error | 否 | 认证/证书拒绝；不得记录凭据，不以紧循环重试 |
 | `UPLOAD_ENQUEUE_FAILED` | Critical | 是 | 已提交事件无法建立持久上传任务；事件保持本地并报警 |
 | `UPLOAD_TRANSFER_FAILED` | Error | 是 | 受限传输尝试失败；保持 checkpoint 并按策略退避 |

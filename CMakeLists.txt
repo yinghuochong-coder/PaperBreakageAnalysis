@@ -54,6 +54,7 @@ add_subdirectory(src/ipc)
 add_subdirectory(src/service)
 add_subdirectory(src/console)
 add_subdirectory(tools/hardware)
+add_subdirectory(tools/uplink-simulator)
 
 file(GLOB_RECURSE PAPERBREAK_FORMAT_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"

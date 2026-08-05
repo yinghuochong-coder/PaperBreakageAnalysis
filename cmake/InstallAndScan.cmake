@@ -26,6 +26,16 @@ if(DEFINED REQUIRED_FILES AND NOT REQUIRED_FILES STREQUAL "")
     endforeach()
 endif()
 
+if(DEFINED FORBIDDEN_FILES AND NOT FORBIDDEN_FILES STREQUAL "")
+    string(REPLACE "|" ";" forbidden_files "${FORBIDDEN_FILES}")
+    foreach(forbidden_file IN LISTS forbidden_files)
+        if(EXISTS "${INSTALL_DIR}/${forbidden_file}")
+            message(FATAL_ERROR
+                "Unexpected runtime file was installed: '${INSTALL_DIR}/${forbidden_file}'.")
+        endif()
+    endforeach()
+endif()
+
 string(REPLACE "|" ";" forbidden_paths "${FORBIDDEN_PATHS}")
 file(GLOB_RECURSE installed_files LIST_DIRECTORIES FALSE "${INSTALL_DIR}/*")
 foreach(installed_file IN LISTS installed_files)

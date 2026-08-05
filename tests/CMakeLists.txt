@@ -29,6 +29,8 @@ add_executable(PaperBreakTests
     unit/storage_policy_tests.cpp
     unit/service_runtime_tests.cpp
     unit/system_command_tests.cpp
+    unit/uplink_protocol_tests.cpp
+    unit/uplink_simulator_tests.cpp
     unit/windows_control_tests.cpp
     unit/windows_scm_tests.cpp
     simulation/simulation_baseline_tests.cpp
@@ -51,11 +53,14 @@ target_link_libraries(PaperBreakTests
         paperbreak_ipc
         paperbreak_service_core
         paperbreak_storage
+        paperbreak_uplink
+        paperbreak_uplink_simulator_core
         paperbreak_windows_service
         paperbreak_compiler_options
         Qt6::Core
         Qt6::Gui
         Qt6::Network
+        Qt6::WebSockets
         nlohmann_json::nlohmann_json
         SQLite3::SQLite3
         GTest::gtest
@@ -82,7 +87,7 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Algorithm*:Camera*:Pipeline*:Event*:Storage*:Common*:Result*:Version*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:WindowsControl*:WindowsScm*)
+    COMMAND PaperBreakTests --gtest_filter=Algorithm*:Camera*:Pipeline*:Event*:Storage*:Common*:Result*:Version*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:Uplink*:WindowsControl*:WindowsScm*)
 set_tests_properties(unit PROPERTIES
     LABELS "unit"
     ENVIRONMENT "PATH=$<TARGET_FILE_DIR:Qt6::Core>\\;$<TARGET_FILE_DIR:opencv_core>\\;$ENV{PATH}")
@@ -173,6 +178,29 @@ set_tests_properties(qt_console_smoke PROPERTIES
     LABELS "integration"
     TIMEOUT 10)
 
+add_test(NAME uplink_simulator_headless_smoke
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"
+        "$<TARGET_FILE:PaperBreakUplinkSimulator>"
+        --headless --listen 127.0.0.1 --port 0
+        --workspace "${PROJECT_BINARY_DIR}/test-uplink-headless-$<CONFIG>"
+        --run-for-ms 50)
+set_tests_properties(uplink_simulator_headless_smoke PROPERTIES
+    LABELS "integration;uplink-simulator"
+    TIMEOUT 10)
+
+add_test(NAME qt_uplink_simulator_smoke
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "QT_QPA_PLATFORM=offscreen"
+        "PATH=$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}"
+        "$<TARGET_FILE:PaperBreakUplinkSimulator>"
+        --listen 127.0.0.1 --port 0
+        --workspace "${PROJECT_BINARY_DIR}/test-uplink-gui-$<CONFIG>"
+        --smoke-test)
+set_tests_properties(qt_uplink_simulator_smoke PROPERTIES
+    LABELS "integration;uplink-simulator"
+    TIMEOUT 10)
+
 add_test(NAME version_output_matches
     COMMAND "${CMAKE_COMMAND}"
         "-DSERVICE=$<TARGET_FILE:PaperBreakEdgeService>"
@@ -261,7 +289,18 @@ add_test(NAME install_tree_no_sdk_path_leaks
         "-DCONFIG=$<CONFIG>"
         "-DFORBIDDEN_PATHS=${path_scan_inputs}"
         "-DREQUIRED_FILES=${required_install_files}"
+        "-DFORBIDDEN_FILES=${CMAKE_INSTALL_BINDIR}/PaperBreakUplinkSimulator.exe|${CMAKE_INSTALL_BINDIR}/Qt6HttpServer.dll|${CMAKE_INSTALL_BINDIR}/Qt6WebSockets.dll"
         "-DSERVICE_RELATIVE=${CMAKE_INSTALL_BINDIR}/PaperBreakEdgeService.exe"
         "-DCONSOLE_RELATIVE=${CMAKE_INSTALL_BINDIR}/PaperBreakEdgeConsole.exe"
         -P "${PROJECT_SOURCE_DIR}/cmake/InstallAndScan.cmake")
 set_tests_properties(install_tree_no_sdk_path_leaks PROPERTIES LABELS "integration")
+
+add_test(NAME uplink_simulator_standalone_install
+    COMMAND "${CMAKE_COMMAND}"
+        "-DBUILD_DIR=${PROJECT_BINARY_DIR}"
+        "-DINSTALL_DIR=${PROJECT_BINARY_DIR}/test-uplink-install-$<CONFIG>"
+        "-DCONFIG=$<CONFIG>"
+        -P "${PROJECT_SOURCE_DIR}/cmake/InstallUplinkSimulator.cmake")
+set_tests_properties(uplink_simulator_standalone_install PROPERTIES
+    LABELS "integration;uplink-simulator"
+    TIMEOUT 60)

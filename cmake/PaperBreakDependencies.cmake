@@ -3,7 +3,8 @@ macro(paperbreak_resolve_dependencies)
         list(PREPEND CMAKE_PREFIX_PATH "$ENV{PAPERBREAK_QT_ROOT}")
     endif()
 
-    find_package(Qt6 6.10.2 EXACT REQUIRED COMPONENTS Core Gui Widgets Network)
+    find_package(Qt6 6.10.2 EXACT REQUIRED COMPONENTS
+        Core Gui Widgets Network HttpServer WebSockets)
     find_package(OpenCV 4.12.0 EXACT REQUIRED COMPONENTS core imgproc imgcodecs)
     find_package(spdlog 1.17.0 CONFIG REQUIRED)
     find_package(nlohmann_json 3.12.0 CONFIG REQUIRED)
