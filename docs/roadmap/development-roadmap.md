@@ -1218,6 +1218,16 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 ### M8-00 协议评审门禁
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-05
+
+完成日期：2026-08-05
+
+执行记录：`.agent/plans/m8-00-uplink-protocol-simulator.md`
+
 M8-00 已确认：
 
 - REST/WebSocket 端点采用明文、无鉴权方案，不使用 TLS 或证书轮换；
