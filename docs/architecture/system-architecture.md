@@ -195,7 +195,7 @@ Qt 桌面客户端只承担：
 | `paperbreak_storage` | 事件事务、SQLite、迁移、NVMe 块、保留策略 | common、event、SQLite、可选 zstd | UI、MVS、上传协议 |
 | `paperbreak_uplink` | `IUplinkTransport`、Uplink v1 DTO/校验、上传调度领域接口 | common、event 接口 | Qt Widgets、MVS |
 | `paperbreak_uplink_mock` | 离线/慢速/失败脚本化传输 | uplink | 生产凭据 |
-| `paperbreak_uplink_transport` | Uplink v1 明文 REST/WebSocket/HTTP 边缘适配器（M8-01～M8-04） | uplink、Qt Network 或批准网络库 | 相机、UI |
+| `paperbreak_uplink_transport` | Uplink v1 明文 REST/WebSocket/HTTP 边缘适配器（M8-04） | uplink、Qt Network 或批准网络库 | 相机、UI |
 | `paperbreak_uplink_simulator_core` | Uplink v1 参考服务端、SQLite 工作区、命令与故障模型 | uplink、Qt HttpServer/WebSockets、SQLite | 生产服务、MVS |
 | `paperbreak_plant_io` | `IPlantIoAdapter` 和生产信号模型 | common | 具体未批准协议 |
 | `paperbreak_monitoring` | 指标、报警、健康快照和诊断接口 | common、logging 接口 | UI、MVS |

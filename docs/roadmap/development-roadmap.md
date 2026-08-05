@@ -1241,7 +1241,19 @@ M8-00 已确认：
 
 ### M8-01 传输抽象和 Mock
 
+状态：`completed`
+
+负责人：Codex
+
+开始日期：2026-08-05
+
+完成日期：2026-08-05
+
+执行记录：`.agent/plans/m8-01-uplink-transport-mock.md`
+
 实现 `IUplinkTransport` 和 `MockUplinkTransport`；业务层不依赖 HTTP/WebSocket 类型。Mock 可脚本化模拟离线、慢速、失败、重复确认和校验错误。
+
+实现证据（2026-08-05）：`paperbreak_uplink` 新增强类型同步传输端口、连接状态、会话、事件元数据、文件请求和有界重复确认模型，公开头文件只依赖 C++ 标准库与领域 `Result`/Uplink v1 DTO；`BUILD_TESTING` 下新增 `paperbreak_uplink_mock`，以容量受限的 FIFO 故障脚本和覆盖式调用历史模拟离线、有上限慢响应、可重试/永久失败、重复确认及校验错误，并支持锁外命令注入和确定性断开。6 项定向测试及 Debug/Release 全量构建和 CTest 已通过。该证据只完成 M8-01；未实现 M8-02 心跳/命令编排、M8-03 持久上传调度、M8-04 Qt HTTP/WebSocket/分块适配器，也未执行真实上位机或网络联调。
 
 ### M8-02 心跳、状态和命令
 

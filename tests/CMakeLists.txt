@@ -30,6 +30,7 @@ add_executable(PaperBreakTests
     unit/service_runtime_tests.cpp
     unit/system_command_tests.cpp
     unit/uplink_protocol_tests.cpp
+    unit/uplink_mock_transport_tests.cpp
     unit/uplink_simulator_tests.cpp
     unit/windows_control_tests.cpp
     unit/windows_scm_tests.cpp
@@ -54,6 +55,7 @@ target_link_libraries(PaperBreakTests
         paperbreak_service_core
         paperbreak_storage
         paperbreak_uplink
+        paperbreak_uplink_mock
         paperbreak_uplink_simulator_core
         paperbreak_windows_service
         paperbreak_compiler_options

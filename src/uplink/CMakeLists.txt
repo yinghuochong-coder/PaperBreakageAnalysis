@@ -10,3 +10,7 @@ target_include_directories(paperbreak_uplink PUBLIC
 set_target_properties(paperbreak_uplink PROPERTIES FOLDER "PaperBreak/Libraries")
 install(TARGETS paperbreak_uplink ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+
+if(BUILD_TESTING)
+    add_subdirectory(mock)
+endif()
