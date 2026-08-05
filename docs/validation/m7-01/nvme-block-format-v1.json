@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "designStatus": "accepted",
+  "hardwareValidationStatus": "not-validated",
+  "format": {
+    "name": "PaperBreak NVMe raw rolling block",
+    "formatVersion": 1,
+    "byteOrder": "little-endian",
+    "blockDurationMs": 1000,
+    "pageAlignmentBytes": 4096,
+    "headerBytes": 4096,
+    "indexEntryBytes": 96,
+    "footerBytes": 4096,
+    "compression": "none",
+    "payload": "raw-frame-view-bytes",
+    "indexCapacitySafetyEntries": 2,
+    "headerMagicAsciiEscaped": "PBNVME1\\0",
+    "footerMagicAscii": "PBCOMMIT",
+    "commitMarkerAsciiEscaped": "COMMIT1\\0"
+  },
+  "stableIds": {
+    "pixelFormats": {
+      "Mono8": 1,
+      "Mono10LE16": 2,
+      "Mono12LE16": 3,
+      "BayerRG8": 4
+    },
+    "headerFlags": {
+      "wallClockDiscontinuityObservedBit": 0,
+      "cameraTimestampPresentBit": 1,
+      "cameraTimestampSynchronizedBit": 2,
+      "externalTriggerBit": 3
+    },
+    "indexFlags": {
+      "incompleteBit": 0,
+      "cameraTimestampPresentBit": 1,
+      "cameraTimestampSynchronizedBit": 2,
+      "cameraTimestampUnsynchronizedBit": 3
+    }
+  },
+  "integrity": {
+    "algorithm": "CRC-32C",
+    "polynomialNormalHex": "1EDC6F41",
+    "polynomialReflectedHex": "82F63B78",
+    "initialHex": "FFFFFFFF",
+    "xorOutHex": "FFFFFFFF",
+    "reflectInput": true,
+    "reflectOutput": true,
+    "checkInputAscii": "123456789",
+    "checkValueHex": "E3069283",
+    "cryptographicAuthentication": false
+  },
+  "layout": {
+    "headerOffset": 0,
+    "headerCrc32cOffset": 128,
+    "indexOffset": 4096,
+    "indexPayloadCrc32cOffset": 76,
+    "indexEntryCrc32cOffset": 80,
+    "indexRegionFormula": "align4096(indexCapacity * indexEntryBytes)",
+    "dataRegionFormula": "align4096(indexCapacity * maxFrameBytes)",
+    "footerPlacement": "fixed-after-maximum-data-region",
+    "footerCrc32cOffsetWithinFooter": 4084,
+    "commitMarkerOffsetWithinFooter": 4088,
+    "maximumBlockBytesFormula": "headerBytes + indexRegionBytes + dataRegionBytes + footerBytes"
+  },
+  "capacityPolicy": {
+    "maximumRollingShareOfMeasuredSustainedWritePercent": 80,
+    "minimumInProgressBlockReserveSlots": 1,
+    "capacityUnit": "GiB",
+    "gibibyteBytes": 1073741824,
+    "eviction": "oldest-unprotected-committed-block-first",
+    "protectedBlockOverwriteAllowed": false
+  },
+  "referenceWorkload": {
+    "purpose": "formula-check-only-not-hardware-acceptance",
+    "cameraCount": 4,
+    "widthPixels": 1624,
+    "heightPixels": 1240,
+    "strideBytes": 1624,
+    "pixelFormat": "Mono8",
+    "maximumAppliedFramesPerSecond": 60,
+    "maxFrameBytes": 2013760,
+    "indexCapacity": 62,
+    "indexRegionBytes": 8192,
+    "dataRegionBytes": 124854272,
+    "maximumBlockBytes": 124870656,
+    "rawPayloadBytesPerSecondAllCameras": 483302400,
+    "metadataBytesPerSecondAllCameras": 55808,
+    "rollingWriteBytesPerSecondAllCameras": 483358208,
+    "minimumMeasuredSustainedWriteBytesPerSecond": 604197760,
+    "maximumCacheStorageGiBExample": 1000,
+    "physicalSlotCount": 8598,
+    "usableCommittedSlotCount": 8597,
+    "balancedRetentionSeconds": 2149,
+    "rawPayloadBytesPerDayAllCameras": 41757327360000
+  },
+  "deploymentEvidenceRequired": [
+    "final-camera-count-roi-stride-pixel-format-and-frame-rate",
+    "target-nvme-model-firmware-capacity-and-filesystem",
+    "sustained-hot-near-full-write-bandwidth",
+    "concurrent-event-write-and-flush-budget",
+    "four-camera-acquisition-statistics-through-capacity-wrap"
+  ]
+}

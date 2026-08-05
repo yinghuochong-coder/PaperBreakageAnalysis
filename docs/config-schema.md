@@ -46,6 +46,21 @@
 - `debugOverlay` 控制 Qt 单帧测试图上的 ROI/检测结果叠加。单帧测试结果和 JPEG 只存在于
   运行时，不写入配置或事件目录。
 
+## M7 NVMe 滚动缓存设计
+
+M7-01 只接受块格式和容量合同，不提前修改当前 `configSchemaVersion = 1`。在 M7-02 存在实际
+运行时消费者时，配置 schema 新版本应一次性加入：
+
+- `storage.rollingCacheEnabled`：普通 NVMe 滚动缓存开关；
+- `storage.maximumCacheStorageGiB`：已提交块和单个在写临时块的总物理容量上限；
+- `storage.rollingCacheWriteLimitMiBps`：普通滚动写限速，既不能低于完整原始输入需求，也不能
+  高于目标卷实测持续写带宽的 80%。
+
+NVMe v1 块时长固定为 1000 ms，不作为可任意修改的配置字段。块上限必须从服务已校验并回读
+的相机数、最大帧率、stride、height 和像素格式计算；`warningFreeSpaceGiB`、
+`criticalFreeSpaceGiB`、`stopFreeSpaceGiB` 与最大缓存容量同时生效，取更严格的准入结果。
+完整格式和计算公式见 `docs/architecture/decisions/adr-011-nvme-rolling-cache-format-capacity.md`。
+
 ## 原子保存和恢复
 
 服务在目标目录创建唯一临时文件，完整写入并刷新后使用 Windows 原子替换。最近 5 份有效配置保存在 `<配置文件名>.history/`，文件名为 20 位修订号。主配置损坏时只从可完整验证的最新历史恢复；残留临时文件不会被采用。选择历史回滚时会创建新的修订，不会复用历史修订号。
