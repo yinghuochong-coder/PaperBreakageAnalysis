@@ -2028,11 +2028,10 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
         if (!cameras_)
             return Result<ipc::CommandResponse>::failure(
                 camera_provider_required("ipc.camera.dispatch"));
-        if (is_camera_write_command(request.command) &&
-            (!peer.local || !peer.authenticated || !peer.administrator))
+        if (!peer.local || !peer.authenticated)
             return Result<ipc::CommandResponse>::failure(
-                command_error("IPC_UNAUTHORIZED", Severity::error,
-                              "相机控制操作要求提升后的本机管理员身份", "ipc.camera.dispatch"));
+                command_error("IPC_UNAUTHORIZED", Severity::error, "相机操作只允许已认证本机用户",
+                              "ipc.camera.dispatch"));
         if (is_camera_write_command(request.command) && stop_token.stop_requested())
             return Result<ipc::CommandResponse>::failure(
                 command_error("SYS_SERVICE_STOPPING", Severity::warning,
