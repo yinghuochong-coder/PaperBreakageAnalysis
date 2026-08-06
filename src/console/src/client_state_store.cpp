@@ -417,7 +417,7 @@ void ClientStateStore::synchronize_status(const std::uint64_t generation)
         [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
             status_completed(std::move(handle), std::move(result));
         },
-        std::chrono::seconds{2});
+        std::chrono::seconds{5});
     if (!request)
     {
         snapshot_.synchronization_error = request.error();
@@ -441,7 +441,7 @@ void ClientStateStore::synchronize_version(const std::uint64_t generation)
         [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
             version_completed(std::move(handle), std::move(result));
         },
-        std::chrono::seconds{2});
+        std::chrono::seconds{5});
     if (!request)
     {
         snapshot_.version_error = request.error();
@@ -466,7 +466,7 @@ void ClientStateStore::synchronize_metrics(const std::uint64_t generation)
         [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
             metrics_completed(std::move(handle), std::move(result));
         },
-        std::chrono::seconds{2});
+        std::chrono::seconds{5});
     if (!request)
     {
         snapshot_.metrics_error = request.error();
@@ -490,7 +490,7 @@ void ClientStateStore::synchronize_alarms(const std::uint64_t generation)
         [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
             alarms_completed(std::move(handle), std::move(result));
         },
-        std::chrono::seconds{2});
+        std::chrono::seconds{5});
     if (!request)
     {
         snapshot_.alarms_error = request.error();
@@ -512,7 +512,7 @@ void ClientStateStore::synchronize_locations(const std::uint64_t generation)
         [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
             locations_completed(std::move(handle), std::move(result));
         },
-        std::chrono::seconds{2});
+        std::chrono::seconds{5});
     if (!request)
     {
         snapshot_.locations_error = request.error();
