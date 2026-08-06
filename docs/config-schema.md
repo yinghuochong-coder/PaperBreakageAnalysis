@@ -19,8 +19,9 @@
 - `acquisition.framePoolCapacity` 是每路相机固定原始图像缓冲数，不只是转发队列长度。
   服务启动会按启用相机帧率、`event.preEventSeconds`、`event.postEventSeconds`、采集队列、
   事件队列、预览槽和事件租约计算下限；不足时以稳定配置错误拒绝启动，不在运行中扩容。
-  默认单路 60 fps、前后各 10 秒的配置使用 2048 槽，最终四路生产容量仍须按实际 ROI 和
-  工控机内存实测校准。
+  当前可部署配置为单路 60 fps、前后各 10 秒，并启用 NVMe 滚动缓存；其启动下限为
+  2187 槽（环缓存 601、采集/算法/预览/NVMe 管线 385、单事件租约 1201）。最终四路生产
+  容量仍须按实际 ROI 和工控机内存实测校准。
 - `event` 完整对象包含 `preEventSeconds`、`postEventSeconds`、`maxEventSeconds`、
   `mergeGapSeconds`、`keyFrameCount`、`saveRaw`、`generatePreviewVideo`、`uploadPolicy` 和
   `retentionDays`。事件页更新必须提交完整对象并携带 `expectedConfigRevision`。
@@ -60,9 +61,10 @@ NVMe v1 块时长固定为 1000 ms，不作为可任意修改的配置字段。�
 的相机数、最大帧率、stride、height 和像素格式计算；`warningFreeSpaceGiB`、
 `criticalFreeSpaceGiB`、`stopFreeSpaceGiB` 与最大缓存容量同时生效，取更严格的准入结果。
 完整格式和计算公式见 `docs/architecture/decisions/adr-011-nvme-rolling-cache-format-capacity.md`。
-四个字段均需重启应用；水位字段仍可热应用。默认 `rollingCacheEnabled=false`，在生产 ROI、
-stride 和目标 NVMe 持续写能力未验收前不自动启用。启用时，每相机当前组装块、两个排队块和
-写线程当前块共最多四块的共享帧引用会计入 `acquisition.framePoolCapacity` 启动门禁。
+四个字段均需重启应用；水位字段仍可热应用。可部署配置当前启用 `rollingCacheEnabled`；在生产
+ROI、stride 和目标 NVMe 持续写能力未验收前，不应直接作为生产参数。启用时，每相机当前组装
+块、两个排队块和写线程当前块共最多四块的共享帧引用会计入
+`acquisition.framePoolCapacity` 启动门禁。
 
 M7-04 启动恢复不新增 schema v2 配置字段，采用固定安全上限：最多扫描 100000 个
 `.pbnvme`/`.partial` 候选、恢复摘要最多 64 MiB、总截止时间 5 分钟，并用固定 1 MiB 缓冲流式

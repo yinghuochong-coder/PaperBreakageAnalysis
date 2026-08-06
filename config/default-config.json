@@ -1,6 +1,6 @@
 {
   "acquisition": {
-    "framePoolCapacity": 2048,
+    "framePoolCapacity": 2187,
     "queueCapacity": 128,
     "receiveTimeoutMs": 1000,
     "threadPriority": "normal"
@@ -46,7 +46,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 18,
+  "configRevision": 19,
   "configSchemaVersion": 2,
   "event": {
     "generatePreviewVideo": true,
@@ -74,7 +74,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-05T09:00:14.813Z",
+  "modifiedAt": "2026-08-06T00:00:00.000Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

@@ -250,6 +250,31 @@ TEST(EventRuntimeIntegration, ManualTriggerPersistsContinuousWindowWithoutBlocki
     EXPECT_EQ(errors.load(), 0U);
 }
 
+TEST(EventRuntimeIntegration, DeployableDefaultConfigurationSatisfiesPoolBudget)
+{
+    const auto configuration_path = std::filesystem::path{PAPERBREAK_TEST_SOURCE_DIR}.parent_path() /
+                                    "config" / "default-config.json";
+    std::ifstream stream{configuration_path, std::ios::binary};
+    ASSERT_TRUE(stream);
+    const std::string contents{std::istreambuf_iterator<char>{stream},
+                               std::istreambuf_iterator<char>{}};
+    auto configuration = config::parse_config(contents, configuration_path.parent_path());
+    ASSERT_TRUE(configuration) << configuration.error().message;
+
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto runtime = EventRuntime::create({.configuration = std::move(configuration).value(),
+                                         .event_root = event_root,
+                                         .database = std::move(shared_database)});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+}
+
 TEST(EventRuntimeNvme, SuccessfulEventCommitReleasesProtectedBlocks)
 {
     TemporaryDirectory temporary;
