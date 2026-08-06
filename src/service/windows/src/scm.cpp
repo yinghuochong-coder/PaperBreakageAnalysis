@@ -83,6 +83,25 @@ Result<InstallOutcome> ServiceManager::install(const ServiceDefinition& definiti
         return Result<InstallOutcome>::failure(std::move(error));
     }
 
+    auto runtime_access_result = api_.configure_runtime_access(definition.name);
+    if (!runtime_access_result)
+    {
+        Error error = operation_failure(runtime_access_result.error(), "SYS_SERVICE_INSTALL_FAILED",
+                                        "service.scm.install.runtimeAccess");
+        if (created)
+        {
+            auto rollback_result = api_.remove(definition.name);
+            error.details.push_back(
+                {.key = "rollback", .value = rollback_result ? "removed" : "remove_failed"});
+            if (!rollback_result)
+            {
+                error.details.push_back({.key = "rollbackBusinessCode",
+                                         .value = rollback_result.error().business_code});
+            }
+        }
+        return Result<InstallOutcome>::failure(std::move(error));
+    }
+
     return Result<InstallOutcome>::success(created ? InstallOutcome::created
                                                    : InstallOutcome::converged);
 }

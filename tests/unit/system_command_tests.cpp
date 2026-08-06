@@ -155,8 +155,6 @@ class AlgorithmRuntimeConfigApplier final : public paperbreak::config::IConfigAp
 
 const paperbreak::ipc::PeerIdentity reader{
     .actor_sid = "S-1-5-21-reader", .local = true, .authenticated = true, .administrator = false};
-const paperbreak::ipc::PeerIdentity administrator{
-    .actor_sid = "S-1-5-21-admin", .local = true, .authenticated = true, .administrator = true};
 
 paperbreak::storage::EventPersistenceRequest command_event_request(const std::string& event_id)
 {
@@ -275,13 +273,8 @@ TEST(SystemCommand, ReadsAndUpdatesCompleteStorageConfigurationWithRestartSemant
     storage["stopFreeSpaceGiB"] = 21U;
     storage["maximumEventStorageGiB"] = 900U;
     const Json update{{"expectedConfigRevision", 1U}, {"storage", storage}};
-    auto denied =
+    auto updated =
         fixture.commands.handle(fixture.request("storage.updateConfig", update.dump()), reader, {});
-    ASSERT_FALSE(denied);
-    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
-
-    auto updated = fixture.commands.handle(fixture.request("storage.updateConfig", update.dump()),
-                                           administrator, {});
     ASSERT_TRUE(updated) << updated.error().message;
     const Json response = Json::parse(updated.value().payload_json);
     EXPECT_EQ(response["storedConfigRevision"], 2U);
@@ -305,7 +298,7 @@ TEST(SystemCommand, ReadsAndUpdatesCompleteStorageConfigurationWithRestartSemant
     auto invalid = fixture.commands.handle(
         fixture.request("storage.updateConfig",
                         Json{{"expectedConfigRevision", 2U}, {"storage", invalid_storage}}.dump()),
-        administrator, {});
+        reader, {});
     ASSERT_FALSE(invalid);
     EXPECT_EQ(invalid.error().business_code, "SYS_CONFIG_INVALID");
 }
@@ -327,17 +320,10 @@ TEST(SystemCommand, ReadsAndUpdatesCompleteUplinkConfigurationWithRestartSemanti
     uplink["chunkBytes"] = 524288U;
     uplink["ioTimeoutMs"] = 12000U;
     uplink["uploadLimitMiBps"] = 40U;
-    auto denied = fixture.commands.handle(
-        fixture.request("uplink.updateConfig",
-                        Json{{"expectedConfigRevision", 1U}, {"uplink", uplink}}.dump()),
-        reader, {});
-    ASSERT_FALSE(denied);
-    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
-
     auto updated = fixture.commands.handle(
         fixture.request("uplink.updateConfig",
                         Json{{"expectedConfigRevision", 1U}, {"uplink", uplink}}.dump()),
-        administrator, {});
+        reader, {});
     ASSERT_TRUE(updated) << updated.error().message;
     const Json result = Json::parse(updated.value().payload_json);
     EXPECT_EQ(result["storedConfigRevision"], 2U);
@@ -350,7 +336,7 @@ TEST(SystemCommand, ReadsAndUpdatesCompleteUplinkConfigurationWithRestartSemanti
     auto conflict = fixture.commands.handle(
         fixture.request("uplink.updateConfig",
                         Json{{"expectedConfigRevision", 1U}, {"uplink", uplink}}.dump()),
-        administrator, {});
+        reader, {});
     ASSERT_FALSE(conflict);
     EXPECT_EQ(conflict.error().business_code, "SYS_CONFIG_VERSION_CONFLICT");
     auto invalid = fixture.commands.handle(fixture.request("uplink.getConfig", R"({"extra":true})"),
@@ -438,12 +424,8 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
                          {"debugOverlay", true}};
     const Json update{
         {"cameraId", "CAM01"}, {"expectedConfigRevision", 2U}, {"algorithm", algorithm}};
-    auto denied =
+    auto updated =
         commands.handle(fixture.request("algorithm.updateConfig", update.dump()), reader, {});
-    ASSERT_FALSE(denied);
-    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
-    auto updated = commands.handle(fixture.request("algorithm.updateConfig", update.dump()),
-                                   administrator, {});
     ASSERT_TRUE(updated) << updated.error().message;
     const Json updated_json = Json::parse(updated.value().payload_json);
     EXPECT_EQ(updated_json["storedConfigRevision"], 3U);
@@ -470,13 +452,8 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
     ASSERT_TRUE(runtime.value()->submit_frame(std::move(current).value()));
     const auto candidates_before = runtime.value()->snapshot().candidates_created;
 
-    auto test_denied = commands.handle(
+    auto tested = commands.handle(
         fixture.request("algorithm.testCurrentFrame", R"({"cameraId":"CAM01"})"), reader, {});
-    ASSERT_FALSE(test_denied);
-    EXPECT_EQ(test_denied.error().business_code, "IPC_UNAUTHORIZED");
-    auto tested =
-        commands.handle(fixture.request("algorithm.testCurrentFrame", R"({"cameraId":"CAM01"})"),
-                        administrator, {});
     ASSERT_TRUE(tested) << tested.error().message;
     const Json tested_json = Json::parse(tested.value().payload_json);
     EXPECT_TRUE(tested_json["isolated"].get<bool>());
@@ -491,8 +468,8 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
     EXPECT_FALSE(tested.value().binary.empty());
     EXPECT_EQ(runtime.value()->snapshot().candidates_created, candidates_before);
 
-    auto conflict = commands.handle(fixture.request("algorithm.updateConfig", update.dump()),
-                                    administrator, {});
+    auto conflict =
+        commands.handle(fixture.request("algorithm.updateConfig", update.dump()), reader, {});
     ASSERT_FALSE(conflict);
     EXPECT_EQ(conflict.error().business_code, "SYS_CONFIG_VERSION_CONFLICT");
     auto invalid = commands.handle(
@@ -571,23 +548,18 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
     EXPECT_EQ(Json::parse(manifest_text)["eventId"], event_id);
 
     const auto review_payload = Json{{"eventId", event_id}, {"expectedReviewRevision", 1U}}.dump();
-    auto denied = commands.handle(fixture.request("event.confirm", review_payload), reader, {});
-    ASSERT_FALSE(denied);
-    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
-    auto confirmed =
-        commands.handle(fixture.request("event.confirm", review_payload), administrator, {});
+    auto confirmed = commands.handle(fixture.request("event.confirm", review_payload), reader, {});
     ASSERT_TRUE(confirmed);
     const Json confirmed_json = Json::parse(confirmed.value().payload_json);
     EXPECT_EQ(confirmed_json["event"]["eventState"], "Confirmed");
     EXPECT_EQ(confirmed_json["event"]["reviewRevision"], 2U);
     EXPECT_EQ(reviewed_events, 1U);
-    auto conflicting =
-        commands.handle(fixture.request("event.reject", review_payload), administrator, {});
+    auto conflicting = commands.handle(fixture.request("event.reject", review_payload), reader, {});
     ASSERT_FALSE(conflicting);
     EXPECT_EQ(conflicting.error().business_code, "EVENT_VERSION_CONFLICT");
 
     auto exported = commands.handle(
-        fixture.request("event.export", Json{{"eventId", event_id}}.dump()), administrator, {});
+        fixture.request("event.export", Json{{"eventId", event_id}}.dump()), reader, {});
     ASSERT_TRUE(exported) << exported.error().message;
     const auto export_json = Json::parse(exported.value().payload_json);
     EXPECT_EQ(export_json["verified"], true);
@@ -613,7 +585,7 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
         fixture.request(
             "event.updateConfig",
             Json{{"expectedConfigRevision", 1U}, {"event", config_json["event"]}}.dump()),
-        administrator, {});
+        reader, {});
     ASSERT_TRUE(updated) << updated.error().message;
     EXPECT_EQ(Json::parse(updated.value().payload_json)["event"]["preEventSeconds"], 9U);
     ASSERT_TRUE(
@@ -632,9 +604,8 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
     ASSERT_TRUE(database->fail_upload_job(
         upload.value()->job_id, paperbreak::storage::UploadFailureClass::manual_intervention,
         "UPLOAD_CHECKSUM_MISMATCH", "{}", std::nullopt, 2));
-    auto retry =
-        commands.handle(fixture.request("event.retryUpload", Json{{"eventId", event_id}}.dump()),
-                        administrator, {});
+    auto retry = commands.handle(
+        fixture.request("event.retryUpload", Json{{"eventId", event_id}}.dump()), reader, {});
     ASSERT_TRUE(retry);
     EXPECT_EQ(Json::parse(retry.value().payload_json)["requeuedJobs"], 1U);
     auto retried = database->get_upload_job("event-retry:" + event_id);
@@ -697,14 +668,14 @@ TEST(SystemCommand, ReturnsResolvedEventLocationAndRejectsFields)
     EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
 }
 
-TEST(SystemCommand, RequiresElevatedAdministratorForReload)
+TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToReloadConfiguration)
 {
     CommandFixture fixture;
     auto result = fixture.commands.handle(
         fixture.request("system.reloadConfig", R"({"expectedConfigRevision":1})"), reader, {});
 
-    ASSERT_FALSE(result);
-    EXPECT_EQ(result.error().business_code, "IPC_UNAUTHORIZED");
+    ASSERT_TRUE(result);
+    EXPECT_EQ(Json::parse(result.value().payload_json).at("storedConfigRevision"), 1U);
 }
 
 TEST(SystemCommand, ReloadsThroughRepositoryAndRecordsPeerAuditContext)
@@ -719,8 +690,7 @@ TEST(SystemCommand, ReloadsThroughRepositoryAndRecordsPeerAuditContext)
     output.close();
 
     auto result = fixture.commands.handle(
-        fixture.request("system.reloadConfig", R"({"expectedConfigRevision":1})"), administrator,
-        {});
+        fixture.request("system.reloadConfig", R"({"expectedConfigRevision":1})"), reader, {});
 
     ASSERT_TRUE(result);
     const Json payload = Json::parse(result.value().payload_json);
@@ -728,7 +698,7 @@ TEST(SystemCommand, ReloadsThroughRepositoryAndRecordsPeerAuditContext)
     ASSERT_EQ(fixture.audit.records.size(), 1U);
     EXPECT_EQ(fixture.audit.records.front().source,
               paperbreak::config::ConfigChangeSource::local_ipc);
-    EXPECT_EQ(fixture.audit.records.front().actor, administrator.actor_sid);
+    EXPECT_EQ(fixture.audit.records.front().actor, reader.actor_sid);
     EXPECT_EQ(fixture.audit.records.front().correlation_id, "019870f2-6c80-7a31-9b52-6e3b9ca1d88f");
 }
 
@@ -736,8 +706,7 @@ TEST(SystemCommand, PreservesConfigConflictAndRejectsUnknownOrBinaryCommands)
 {
     CommandFixture fixture;
     auto conflict = fixture.commands.handle(
-        fixture.request("system.reloadConfig", R"({"expectedConfigRevision":42})"), administrator,
-        {});
+        fixture.request("system.reloadConfig", R"({"expectedConfigRevision":42})"), reader, {});
     ASSERT_FALSE(conflict);
     EXPECT_EQ(conflict.error().business_code, "SYS_CONFIG_VERSION_CONFLICT");
 
@@ -956,8 +925,8 @@ TEST(SystemCommand, KeepsCameraConnectedWhenSavedParametersDoNotMatchDeviceCapab
                                                        {},
                                                        runtime};
 
-    auto connected = commands.handle(fixture.request("camera.connect", R"({"cameraId":"CAM01"})"),
-                                     administrator, {});
+    auto connected =
+        commands.handle(fixture.request("camera.connect", R"({"cameraId":"CAM01"})"), reader, {});
     ASSERT_TRUE(connected);
     const Json response = Json::parse(connected.value().payload_json);
     EXPECT_EQ(response["state"], "connected");
@@ -1034,7 +1003,7 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToBindApprovedCamera
     EXPECT_TRUE(after_json["topologyRestartRequired"].get<bool>());
     EXPECT_EQ(after_json["cameras"].size(), 1U);
 
-    auto conflict = commands.handle(fixture.request("camera.bind", request), administrator, {});
+    auto conflict = commands.handle(fixture.request("camera.bind", request), reader, {});
     ASSERT_FALSE(conflict);
     EXPECT_EQ(conflict.error().business_code, "SYS_CONFIG_VERSION_CONFLICT");
 
@@ -1042,21 +1011,21 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToBindApprovedCamera
         fixture.request(
             "camera.bind",
             R"({"cameraId":"CAM01","serialNumber":"OTHER","location":"出口","expectedConfigRevision":2})"),
-        administrator, {});
+        reader, {});
     ASSERT_FALSE(duplicate_slot);
     EXPECT_EQ(duplicate_slot.error().business_code, "CAMERA_CONFIG_FAILED");
     auto duplicate_serial = commands.handle(
         fixture.request(
             "camera.bind",
             R"({"cameraId":"CAM02","serialNumber":"MOCK-BIND-01","location":"出口","expectedConfigRevision":2})"),
-        administrator, {});
+        reader, {});
     ASSERT_FALSE(duplicate_serial);
     EXPECT_EQ(duplicate_serial.error().business_code, "CAMERA_CONFIG_FAILED");
     auto invalid_slot = commands.handle(
         fixture.request(
             "camera.bind",
             R"({"cameraId":"CAM05","serialNumber":"OTHER","location":"出口","expectedConfigRevision":2})"),
-        administrator, {});
+        reader, {});
     ASSERT_FALSE(invalid_slot);
     EXPECT_EQ(invalid_slot.error().business_code, "IPC_REQUEST_INVALID");
     ASSERT_TRUE(fixture.repository.snapshot());
@@ -1112,7 +1081,7 @@ TEST(SystemCommand, RejectsOccupiedOrUnapprovedCameraBindingWithoutChangingConfi
             fixture.request(
                 "camera.bind",
                 R"({"cameraId":"CAM01","serialNumber":"MOCK-BIND-02","location":"入口","expectedConfigRevision":1})"),
-            administrator, {});
+            reader, {});
         ASSERT_FALSE(result);
         EXPECT_EQ(result.error().business_code, expected_code);
         const auto stored = fixture.repository.snapshot();
@@ -1139,8 +1108,7 @@ TEST(SystemCommand, ReloadIsIdempotentAndInvalidConfigPreservesActiveSnapshot)
 {
     CommandFixture fixture;
     auto unchanged = fixture.commands.handle(
-        fixture.request("system.reloadConfig", R"({"expectedConfigRevision":1})"), administrator,
-        {});
+        fixture.request("system.reloadConfig", R"({"expectedConfigRevision":1})"), reader, {});
     ASSERT_TRUE(unchanged);
     const Json unchanged_payload = Json::parse(unchanged.value().payload_json);
     EXPECT_EQ(unchanged_payload.at("storedConfigRevision"), 1);
@@ -1150,8 +1118,7 @@ TEST(SystemCommand, ReloadIsIdempotentAndInvalidConfigPreservesActiveSnapshot)
     invalid << R"({"configSchemaVersion":1})";
     invalid.close();
     auto rejected = fixture.commands.handle(
-        fixture.request("system.reloadConfig", R"({"expectedConfigRevision":1})"), administrator,
-        {});
+        fixture.request("system.reloadConfig", R"({"expectedConfigRevision":1})"), reader, {});
     ASSERT_FALSE(rejected);
     EXPECT_EQ(rejected.error().business_code, "SYS_CONFIG_INVALID");
 
@@ -1161,7 +1128,7 @@ TEST(SystemCommand, ReloadIsIdempotentAndInvalidConfigPreservesActiveSnapshot)
     EXPECT_EQ(snapshot.value().effective_config_revision, 1U);
 }
 
-TEST(SystemCommand, QueriesMetricsAlarmsLogsAndRequiresAdministratorToAcknowledge)
+TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToAcknowledgeAlarm)
 {
     CommandFixture fixture;
     auto metrics = std::make_shared<paperbreak::monitoring::MetricRegistry>();
@@ -1201,12 +1168,8 @@ TEST(SystemCommand, QueriesMetricsAlarmsLogsAndRequiresAdministratorToAcknowledg
     EXPECT_FALSE(alarm_list.at("alarms").front().at("acknowledged").get<bool>());
 
     const std::string acknowledge_payload = Json{{"alarmId", raised.value().alarm_id}}.dump();
-    auto denied =
+    auto acknowledged =
         commands.handle(fixture.request("alarm.acknowledge", acknowledge_payload), reader, {});
-    ASSERT_FALSE(denied);
-    EXPECT_EQ(denied.error().business_code, "IPC_UNAUTHORIZED");
-    auto acknowledged = commands.handle(fixture.request("alarm.acknowledge", acknowledge_payload),
-                                        administrator, {});
     ASSERT_TRUE(acknowledged);
     EXPECT_TRUE(Json::parse(acknowledged.value().payload_json).at("acknowledged").get<bool>());
 
@@ -1233,7 +1196,7 @@ TEST(SystemCommand, QueriesMetricsAlarmsLogsAndRequiresAdministratorToAcknowledg
          acknowledge_payload.substr(0, acknowledge_payload.size() - 1U) + R"(,"extra":true})"}};
     for (const auto& [command, payload] : invalid_requests)
     {
-        const auto result = commands.handle(fixture.request(command, payload), administrator, {});
+        const auto result = commands.handle(fixture.request(command, payload), reader, {});
         ASSERT_FALSE(result) << command << ' ' << payload;
         EXPECT_EQ(result.error().business_code, "IPC_REQUEST_INVALID");
     }

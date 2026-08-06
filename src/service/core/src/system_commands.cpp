@@ -1337,6 +1337,10 @@ Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMess
                                                           const ipc::PeerIdentity& peer,
                                                           const std::stop_token stop_token)
 {
+    if (!peer.local || !peer.authenticated)
+        return Result<ipc::CommandResponse>::failure(
+            command_error("IPC_UNAUTHORIZED", Severity::error, "本机 IPC 功能只允许已认证本机用户",
+                          "ipc.dispatch"));
     return handle_with_source(request, peer, stop_token, config::ConfigChangeSource::local_ipc);
 }
 
@@ -1479,8 +1483,7 @@ Result<std::string> SystemCommandService::handle_uplink_command(
     const ipc::PeerIdentity peer{.actor_sid = "uplink:" + command.command_id,
                                  .connection_id = 0U,
                                  .local = true,
-                                 .authenticated = true,
-                                 .administrator = true};
+                                 .authenticated = true};
     auto handled =
         handle_with_source(request, peer, stop_token, config::ConfigChangeSource::uplink);
     if (!handled)
@@ -1527,10 +1530,6 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                 command_error("IPC_UNAUTHORIZED", Severity::error,
                               "上位机配置读取只允许已认证本机用户", "ipc.uplink.dispatch"));
         const bool write_command = request.command == "uplink.updateConfig";
-        if (write_command && !peer.administrator)
-            return Result<ipc::CommandResponse>::failure(
-                command_error("IPC_UNAUTHORIZED", Severity::error,
-                              "上位机配置修改要求提升后的本机管理员身份", "ipc.uplink.dispatch"));
         if (write_command && stop_token.stop_requested())
             return Result<ipc::CommandResponse>::failure(
                 command_error("SYS_SERVICE_STOPPING", Severity::warning,
@@ -1601,10 +1600,6 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                 command_error("IPC_UNAUTHORIZED", Severity::error,
                               "存储配置读取只允许已认证本机用户", "ipc.storage.dispatch"));
         const bool write_command = request.command == "storage.updateConfig";
-        if (write_command && !peer.administrator)
-            return Result<ipc::CommandResponse>::failure(
-                command_error("IPC_UNAUTHORIZED", Severity::error,
-                              "存储配置修改要求提升后的本机管理员身份", "ipc.storage.dispatch"));
         if (write_command && stop_token.stop_requested())
             return Result<ipc::CommandResponse>::failure(
                 command_error("SYS_SERVICE_STOPPING", Severity::warning,
@@ -1672,10 +1667,6 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
     {
         const bool write_command = request.command == "algorithm.updateConfig" ||
                                    request.command == "algorithm.testCurrentFrame";
-        if (write_command && (!peer.local || !peer.authenticated || !peer.administrator))
-            return Result<ipc::CommandResponse>::failure(command_error(
-                "IPC_UNAUTHORIZED", Severity::error, "算法配置和调试操作要求提升后的本机管理员身份",
-                "ipc.algorithm.dispatch"));
         if (write_command && stop_token.stop_requested())
             return Result<ipc::CommandResponse>::failure(command_error(
                 "SYS_SERVICE_STOPPING", Severity::warning, "服务正在停止，拒绝算法配置和调试操作",
@@ -1765,10 +1756,6 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             request.command == "event.manualTrigger" || request.command == "event.confirm" ||
             request.command == "event.reject" || request.command == "event.updateConfig" ||
             request.command == "event.export" || request.command == "event.retryUpload";
-        if (write_command && (!peer.local || !peer.authenticated || !peer.administrator))
-            return Result<ipc::CommandResponse>::failure(
-                command_error("IPC_UNAUTHORIZED", Severity::error,
-                              "事件写操作要求提升后的本机管理员身份", "ipc.event.dispatch"));
         if (write_command && stop_token.stop_requested())
             return Result<ipc::CommandResponse>::failure(
                 command_error("SYS_SERVICE_STOPPING", Severity::warning,
@@ -2488,10 +2475,6 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
     }
     if (request.command == "alarm.acknowledge")
     {
-        if (!peer.local || !peer.authenticated || !peer.administrator)
-            return Result<ipc::CommandResponse>::failure(command_error(
-                "IPC_UNAUTHORIZED", Severity::error, "alarm.acknowledge 要求提升后的本机管理员身份",
-                "ipc.alarm.acknowledge"));
         if (stop_token.stop_requested())
             return Result<ipc::CommandResponse>::failure(
                 command_error("SYS_SERVICE_STOPPING", Severity::warning,
@@ -2515,12 +2498,6 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
     {
         return Result<ipc::CommandResponse>::failure(command_error(
             "IPC_REQUEST_INVALID", Severity::error, "未知 IPC 命令", "ipc.system.dispatch"));
-    }
-    if (!peer.local || !peer.authenticated || !peer.administrator)
-    {
-        return Result<ipc::CommandResponse>::failure(command_error(
-            "IPC_UNAUTHORIZED", Severity::error, "system.reloadConfig 要求提升后的本机管理员身份",
-            "ipc.system.reloadConfig"));
     }
     if (stop_token.stop_requested())
     {

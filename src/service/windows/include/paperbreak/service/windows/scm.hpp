@@ -71,6 +71,7 @@ class IServiceManagerApi
     [[nodiscard]] virtual Result<void> create(const ServiceDefinition& definition) = 0;
     [[nodiscard]] virtual Result<void> update(const ServiceDefinition& definition) = 0;
     [[nodiscard]] virtual Result<void> configure(const ServiceDefinition& definition) = 0;
+    [[nodiscard]] virtual Result<void> configure_runtime_access(std::string_view name) = 0;
     [[nodiscard]] virtual Result<ManagedServiceState> query_state(std::string_view name) = 0;
     [[nodiscard]] virtual Result<void> request_stop(std::string_view name) = 0;
     [[nodiscard]] virtual Result<void> request_start(std::string_view name) = 0;

@@ -91,6 +91,17 @@ class FakeServiceManagerApi final : public paperbreak::service::windows::IServic
         return paperbreak::Result<void>::success();
     }
 
+    [[nodiscard]] paperbreak::Result<void> configure_runtime_access(std::string_view) override
+    {
+        ++configure_runtime_access_calls;
+        if (fail_configure_runtime_access)
+        {
+            return paperbreak::Result<void>::failure(
+                fake_error("SYS_SERVICE_INSTALL_FAILED", "fake.configureRuntimeAccess"));
+        }
+        return paperbreak::Result<void>::success();
+    }
+
     [[nodiscard]] paperbreak::Result<paperbreak::service::windows::ManagedServiceState> query_state(
         std::string_view) override
     {
@@ -147,6 +158,7 @@ class FakeServiceManagerApi final : public paperbreak::service::windows::IServic
     int verify_access_calls{0};
     int update_calls{0};
     int configure_calls{0};
+    int configure_runtime_access_calls{0};
     int query_state_calls{0};
     int stop_calls{0};
     int start_calls{0};
@@ -158,6 +170,7 @@ class FakeServiceManagerApi final : public paperbreak::service::windows::IServic
     bool fail_create{false};
     bool fail_update{false};
     bool fail_configure{false};
+    bool fail_configure_runtime_access{false};
     bool fail_remove{false};
     bool fail_start{false};
     bool stop_transitions{true};
@@ -206,6 +219,7 @@ TEST(WindowsScmManager, CreatesAndConfiguresTheServiceDefinition)
     EXPECT_EQ(api.create_calls, 1);
     EXPECT_EQ(api.update_calls, 0);
     EXPECT_EQ(api.configure_calls, 1);
+    EXPECT_EQ(api.configure_runtime_access_calls, 1);
     EXPECT_EQ(api.last_definition.account, "NT AUTHORITY\\LocalService");
     ASSERT_EQ(api.last_definition.restart_delays.size(), 3U);
     EXPECT_EQ(api.last_definition.restart_delays[0], std::chrono::seconds{5});
@@ -279,6 +293,7 @@ TEST(WindowsScmManager, RepeatedInstallConvergesExistingConfiguration)
     EXPECT_EQ(api.create_calls, 0);
     EXPECT_EQ(api.update_calls, 1);
     EXPECT_EQ(api.configure_calls, 1);
+    EXPECT_EQ(api.configure_runtime_access_calls, 1);
 }
 
 TEST(WindowsScmManager, RollsBackANewServiceWhenExtendedConfigurationFails)
@@ -291,6 +306,24 @@ TEST(WindowsScmManager, RollsBackANewServiceWhenExtendedConfigurationFails)
 
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().business_code, "SYS_SERVICE_INSTALL_FAILED");
+    EXPECT_EQ(api.remove_calls, 1);
+    ASSERT_FALSE(result.error().details.empty());
+    EXPECT_EQ(result.error().details[0].value, "removed");
+}
+
+TEST(WindowsScmManager, RollsBackANewServiceWhenRuntimeAccessConfigurationFails)
+{
+    FakeServiceManagerApi api;
+    api.fail_configure_runtime_access = true;
+    paperbreak::service::windows::ServiceManager manager{api};
+
+    auto result = manager.install({});
+
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().business_code, "SYS_SERVICE_INSTALL_FAILED");
+    EXPECT_EQ(result.error().operation, "service.scm.install.runtimeAccess");
+    EXPECT_EQ(api.configure_calls, 1);
+    EXPECT_EQ(api.configure_runtime_access_calls, 1);
     EXPECT_EQ(api.remove_calls, 1);
     ASSERT_FALSE(result.error().details.empty());
     EXPECT_EQ(result.error().details[0].value, "removed");

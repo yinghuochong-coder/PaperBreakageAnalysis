@@ -1,5 +1,7 @@
 #include "paperbreak/service/windows/scm.hpp"
 
+#include <AccCtrl.h>
+#include <Aclapi.h>
 #include <Windows.h>
 
 #include <algorithm>
@@ -328,6 +330,72 @@ class WindowsServiceManagerApi final : public IServiceManagerApi
             return Result<void>::failure(
                 win32_error("SYS_SERVICE_INSTALL_FAILED", "无法配置服务预关机时限",
                             "service.scm.install.preshutdown", GetLastError()));
+        }
+        return Result<void>::success();
+    }
+
+    [[nodiscard]] Result<void> configure_runtime_access(const std::string_view name) override
+    {
+        auto manager = open_manager(SC_MANAGER_CONNECT, "SYS_SERVICE_INSTALL_FAILED",
+                                    "service.scm.install.runtimeAccess.openManager");
+        if (!manager)
+            return Result<void>::failure(manager.error());
+        auto service = open_service(manager.value(), name, READ_CONTROL | WRITE_DAC,
+                                    "SYS_SERVICE_INSTALL_FAILED",
+                                    "service.scm.install.runtimeAccess.openService");
+        if (!service)
+            return Result<void>::failure(service.error());
+
+        PACL current_dacl = nullptr;
+        PSECURITY_DESCRIPTOR raw_descriptor = nullptr;
+        const DWORD security_result =
+            GetSecurityInfo(service.value().get(), SE_SERVICE, DACL_SECURITY_INFORMATION, nullptr,
+                            nullptr, &current_dacl, nullptr, &raw_descriptor);
+        const std::unique_ptr<void, decltype(&LocalFree)> descriptor{raw_descriptor, &LocalFree};
+        if (security_result != ERROR_SUCCESS)
+        {
+            return Result<void>::failure(
+                win32_error("SYS_SERVICE_INSTALL_FAILED", "无法读取服务运行控制访问权限",
+                            "service.scm.install.runtimeAccess.read", security_result));
+        }
+
+        SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY;
+        PSID raw_interactive_users = nullptr;
+        if (AllocateAndInitializeSid(&authority, 1, SECURITY_INTERACTIVE_RID, 0, 0, 0, 0, 0, 0, 0,
+                                     &raw_interactive_users) == FALSE)
+        {
+            return Result<void>::failure(
+                win32_error("SYS_SERVICE_INSTALL_FAILED", "无法构造交互式用户安全标识",
+                            "service.scm.install.runtimeAccess.sid", GetLastError()));
+        }
+        const std::unique_ptr<void, decltype(&FreeSid)> interactive_users{raw_interactive_users,
+                                                                          &FreeSid};
+
+        EXPLICIT_ACCESSW access{};
+        access.grfAccessPermissions = SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP;
+        access.grfAccessMode = SET_ACCESS;
+        access.grfInheritance = NO_INHERITANCE;
+        BuildTrusteeWithSidW(&access.Trustee, interactive_users.get());
+
+        PACL raw_updated_dacl = nullptr;
+        const DWORD acl_result = SetEntriesInAclW(1, &access, current_dacl, &raw_updated_dacl);
+        const std::unique_ptr<void, decltype(&LocalFree)> updated_dacl{raw_updated_dacl,
+                                                                       &LocalFree};
+        if (acl_result != ERROR_SUCCESS)
+        {
+            return Result<void>::failure(
+                win32_error("SYS_SERVICE_INSTALL_FAILED", "无法生成服务运行控制访问权限",
+                            "service.scm.install.runtimeAccess.build", acl_result));
+        }
+
+        const DWORD update_result =
+            SetSecurityInfo(service.value().get(), SE_SERVICE, DACL_SECURITY_INFORMATION, nullptr,
+                            nullptr, static_cast<PACL>(updated_dacl.get()), nullptr);
+        if (update_result != ERROR_SUCCESS)
+        {
+            return Result<void>::failure(
+                win32_error("SYS_SERVICE_INSTALL_FAILED", "无法写入服务运行控制访问权限",
+                            "service.scm.install.runtimeAccess.write", update_result));
         }
         return Result<void>::success();
     }

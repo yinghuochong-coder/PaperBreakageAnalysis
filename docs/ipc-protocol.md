@@ -3,8 +3,11 @@
 ## 1. 边界
 
 `PaperBreakEdgeService` 通过 `QLocalServer` 监听固定名称
-`PaperBreakEdgeService.Ipc`。Windows 下仅已认证的本机用户可执行请求：普通用户只能查询，
-提升后的管理员可执行 `system.reloadConfig`、`alarm.acknowledge` 和相机写操作。无法确认身份、匿名或远程连接不会进入业务命令处理。
+`PaperBreakEdgeService.Ipc`。Windows 下仅已认证的本机用户可执行请求；运行期查询和变更命令均不
+要求管理员组身份或 UAC 提升。无法确认身份、匿名或远程连接不会进入业务命令处理。
+
+控制台托盘的后台服务重启不经过 IPC；管理员首次安装或收敛服务配置时，会把该服务对象的查询、
+启动和停止权限授予交互式登录用户，但不会授予修改服务配置、删除服务或安装其他服务的权限。
 
 IPC v1 不持久化请求和推送。客户端断线重连后必须重新查询状态；服务端不重放断线期间的推送。
 
@@ -126,7 +129,7 @@ nlohmann/json 和 SQLite 版本。
 
 ### `system.reloadConfig`
 
-权限：提升后的本机管理员。
+权限：已认证本机用户。
 
 ```json
 {"expectedConfigRevision": 42}
@@ -207,7 +210,7 @@ version.json
 
 ### `alarm.acknowledge`
 
-权限：提升后的本机管理员。
+权限：已认证本机用户。
 
 ```json
 {"alarmId":123}
@@ -329,8 +332,8 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 
 ### 存储配置与实际生效值
 
-`storage.getConfig` 只允许已认证本机用户；`storage.updateConfig` 要求提升后的本机管理员，
-服务停止写入阶段拒绝更新。两项命令均不接受二进制负载。
+`storage.getConfig` 和 `storage.updateConfig` 均只要求已认证本机用户，服务停止写入阶段拒绝更新。
+两项命令均不接受二进制负载。
 
 - `storage.getConfig`：payload 为空。返回完整保存配置 `storage`、实际生效配置
   `effectiveStorage`、`storedConfigRevision`、`effectiveConfigRevision` 和
@@ -350,8 +353,8 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 
 ### 算法配置、实际状态与当前图像测试
 
-`algorithm.getConfig` 要求已认证本机用户；`algorithm.updateConfig` 和
-`algorithm.testCurrentFrame` 要求提升后的本机管理员。三项命令均只接受 CAM01～CAM04，
+`algorithm.getConfig`、`algorithm.updateConfig` 和 `algorithm.testCurrentFrame` 均只要求已认证
+本机用户。三项命令均只接受 CAM01～CAM04，
 未知字段被拒绝；服务停止写入阶段拒绝后两项命令。
 
 - `algorithm.getConfig`：payload 为 `{"cameraId":"CAM01"}`。返回完整保存配置
@@ -376,8 +379,8 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
 
 ### 事件配置、查询、复核与导出
 
-事件读取命令要求已认证本机用户；`event.updateConfig`、`event.manualTrigger`、
-`event.confirm`、`event.reject`、`event.export` 和 `event.retryUpload` 要求本机管理员。
+事件读取和写入命令均只要求已认证本机用户，包括 `event.updateConfig`、`event.manualTrigger`、
+`event.confirm`、`event.reject`、`event.export` 和 `event.retryUpload`。
 事件目录只有在 manifest 写完并完成同卷原子提交后才对这些命令可见。
 
 - `event.getConfig`：payload 为空。返回完整 `event` 配置、存储/有效配置修订，及
@@ -458,6 +461,6 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
 - 当前只支持 `protocolVersion=1`；其他版本返回 `IPC_PROTOCOL_VERSION_UNSUPPORTED`，写完响应后关闭；
 - 未知命令或字段返回 `IPC_REQUEST_INVALID`；重复 ID 返回 `IPC_REQUEST_CONFLICT`；
 - 命令队列或在途请求达到上限返回 `IPC_BUSY`；
-- 非管理员执行重载或报警确认返回 `IPC_UNAUTHORIZED`；服务停止后拒绝新写请求并返回
+- 未认证或非本机请求返回 `IPC_UNAUTHORIZED`；服务停止后拒绝新写请求并返回
   `SYS_SERVICE_STOPPING`；
 - 同一版本只通过 `extensions` 增加可忽略扩展；改名、删除、语义变化或新增必需字段必须提升版本。
