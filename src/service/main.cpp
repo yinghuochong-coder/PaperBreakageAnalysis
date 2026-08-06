@@ -2291,7 +2291,7 @@ int run_service(const Arguments& arguments)
 
 int main(int argc, char* argv[])
 {
-    system("chcp 65001");
+    // system("chcp 65001");
 
     QCoreApplication application{argc, argv};
     auto parsed = parse_arguments(argc, argv);
