@@ -24,7 +24,7 @@ constexpr std::string_view implementation_version = "1.0.0-prototype";
 struct ClassicalConfig final
 {
     DetectionRegion roi;
-    std::uint8_t paper_grayscale_threshold{128U};
+    std::uint8_t paper_grayscale_threshold{16U};
     double minimum_paper_ratio{0.75};
     double maximum_mean_grayscale_change{0.20};
     double maximum_background_change{0.15};
