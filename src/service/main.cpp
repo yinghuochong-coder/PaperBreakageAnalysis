@@ -8,6 +8,7 @@
 #include "paperbreak/pipeline/preview.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/platform/system_metrics.hpp"
+#include "paperbreak/service/algorithm_metrics.hpp"
 #include "paperbreak/service/event_runtime.hpp"
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/service/system_commands.hpp"
@@ -1435,85 +1436,6 @@ class CameraMetricSource final : public paperbreak::monitoring::IMetricSource
     std::weak_ptr<paperbreak::camera::CameraControlRuntime> cameras_;
 };
 
-class AlgorithmMetricSource final : public paperbreak::monitoring::IMetricSource
-{
-  public:
-    explicit AlgorithmMetricSource(std::weak_ptr<paperbreak::service::EventRuntime> runtime)
-        : runtime_(std::move(runtime))
-    {
-    }
-
-    [[nodiscard]] std::string_view source_name() const noexcept override
-    {
-        return "algorithm";
-    }
-
-    [[nodiscard]] paperbreak::Result<std::vector<paperbreak::monitoring::MetricPoint>> collect(
-        std::stop_token) noexcept override
-    {
-        using Point = paperbreak::monitoring::MetricPoint;
-        const auto runtime = runtime_.lock();
-        const auto snapshot =
-            runtime ? runtime->snapshot() : paperbreak::service::EventRuntimeSnapshot{};
-        const bool available = runtime != nullptr;
-        const auto milliseconds = [](const std::chrono::microseconds value) {
-            return static_cast<double>(value.count()) / 1000.0;
-        };
-        return paperbreak::Result<std::vector<Point>>::success(
-            {{.name = "algorithm.state",
-              .value = std::string{paperbreak::service::to_string(snapshot.algorithm_state)},
-              .unit = "state",
-              .available = available},
-             {.name = "algorithm.frame_duration.current_ms",
-              .value = milliseconds(snapshot.last_algorithm_processing_time),
-              .unit = "milliseconds",
-              .available = available && snapshot.detector_process_calls > 0U},
-             {.name = "algorithm.frame_duration.average_ms",
-              .value = milliseconds(snapshot.average_algorithm_processing_time),
-              .unit = "milliseconds",
-              .available = available && snapshot.detector_process_calls > 0U},
-             {.name = "algorithm.frame_duration.maximum_ms",
-              .value = milliseconds(snapshot.maximum_algorithm_processing_time),
-              .unit = "milliseconds",
-              .available = available && snapshot.detector_process_calls > 0U},
-             {.name = "algorithm.queue.depth",
-              .value = static_cast<std::uint64_t>(snapshot.frame_queue_depth),
-              .unit = "count",
-              .available = available},
-             {.name = "algorithm.queue.capacity",
-              .value = static_cast<std::uint64_t>(snapshot.frame_queue_capacity),
-              .unit = "count",
-              .available = available},
-             {.name = "algorithm.queue.high_watermark",
-              .value = static_cast<std::uint64_t>(snapshot.frame_queue_high_watermark),
-              .unit = "count",
-              .available = available},
-             {.name = "algorithm.skipped_frames_total",
-              .value = snapshot.skipped_frames,
-              .unit = "count",
-              .available = available},
-             {.name = "algorithm.failures_total",
-              .value = snapshot.detector_failures,
-              .unit = "count",
-              .available = available},
-             {.name = "algorithm.candidates_total",
-              .value = snapshot.candidates_created,
-              .unit = "count",
-              .available = available},
-             {.name = "algorithm.confirmed_total",
-              .value = snapshot.confirmed_events,
-              .unit = "count",
-              .available = available},
-             {.name = "algorithm.false_positives_total",
-              .value = snapshot.rejected_candidates,
-              .unit = "count",
-              .available = available}});
-    }
-
-  private:
-    std::weak_ptr<paperbreak::service::EventRuntime> runtime_;
-};
-
 nlohmann::json alarm_push_json(const paperbreak::monitoring::AlarmChange& change)
 {
     nlohmann::json details = nlohmann::json::object();
@@ -2238,7 +2160,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         std::make_shared<EventMetricSource>(event_runtime, storage_policy, nvme_cache,
                                             uplink_runtime, event_database),
         std::make_shared<CameraMetricSource>(configuration, cameras),
-        std::make_shared<AlgorithmMetricSource>(event_runtime)};
+        paperbreak::service::make_algorithm_metric_source(event_runtime)};
     for (const auto& source : sources)
     {
         auto registered = monitor->register_source(source);

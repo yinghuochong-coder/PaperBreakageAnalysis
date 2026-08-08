@@ -21,6 +21,7 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -65,17 +66,45 @@ std::filesystem::path resolve_config_path(const std::string_view value)
     return path.lexically_normal();
 }
 
+struct AlgorithmResultEnvelope final
+{
+    camera::FrameView frame;
+    std::optional<algorithm::DetectionResult> detection;
+};
+
 struct Lane final
 {
     std::string camera_id;
     std::unique_ptr<event::MemoryRing> ring;
     std::unique_ptr<algorithm::DetectorHost> detector;
     std::optional<algorithm::DetectorInfo> detector_info;
+    mutable std::mutex mutex;
+    std::condition_variable condition;
+    std::deque<camera::FrameView> frames;
+    std::optional<camera::MonotonicTime> in_flight_time;
+    std::jthread worker;
+    bool stop_requested{};
     std::optional<camera::FrameView> latest_frame;
     std::uint64_t latest_submitted_sequence{};
     std::uint64_t manual_after_sequence{};
     std::optional<std::uint64_t> manual_target_sequence;
     bool manual_pending{};
+    std::size_t frame_high_watermark{};
+    std::atomic_bool degraded{};
+    std::atomic_uint64_t submitted_frames{};
+    std::atomic_uint64_t processed_frames{};
+    std::atomic_uint64_t skipped_frames{};
+    std::atomic_uint64_t detector_failures{};
+    std::atomic_uint64_t consecutive_detector_failures{};
+    std::atomic_uint64_t consecutive_backlog_events{};
+    std::atomic_uint64_t detector_process_calls{};
+    std::atomic_int64_t last_algorithm_processing_us{};
+    std::atomic_int64_t total_algorithm_processing_us{};
+    std::atomic_int64_t maximum_algorithm_processing_us{};
+    std::atomic_uint64_t result_queue_rejected{};
+    std::atomic_uint64_t candidates_created{};
+    std::atomic_uint64_t confirmed_events{};
+    std::atomic_uint64_t rejected_candidates{};
 };
 
 std::string detector_plugin_id(const config::AlgorithmConfig& configuration)
@@ -111,20 +140,36 @@ struct EventPipelineState final
 {
     config::EdgeConfig configuration;
     std::unique_ptr<algorithm::DetectorPluginRegistry> registry;
-    std::vector<Lane> lanes;
+    std::vector<std::unique_ptr<Lane>> lanes;
     std::unique_ptr<event::CandidateEventManager> candidates;
     std::unique_ptr<event::EventWindowManager> windows;
     std::map<std::string, std::string> source_to_canonical;
+    std::set<std::string> counted_confirmed_events;
     camera::MonotonicTime last_monotonic_time{};
-    std::atomic_bool degraded{};
+    camera::WallClockTime last_wall_clock_time{};
+    std::mutex result_mutex;
+    std::condition_variable result_condition;
+    std::deque<AlgorithmResultEnvelope> results;
+    std::size_t result_capacity{algorithm_result_queue_default_capacity};
+    std::size_t result_high_watermark{};
+    std::uint64_t result_generation{};
+    std::jthread event_worker;
+    bool event_stop_requested{};
+
+    std::mutex start_mutex;
+    std::condition_variable start_condition;
+    bool start_gate_open{};
+    bool start_cancelled{};
 };
 
 Result<std::unique_ptr<EventPipelineState>> build_pipeline(
     const config::EdgeConfig& configuration, const std::size_t frame_queue_capacity,
+    const std::size_t result_queue_capacity,
     const std::function<Result<void>(algorithm::DetectorPluginRegistry&)>& registry_configurer)
 {
     auto state = std::make_unique<EventPipelineState>();
     state->configuration = configuration;
+    state->result_capacity = result_queue_capacity;
     state->registry = std::make_unique<algorithm::DetectorPluginRegistry>();
     if (auto registered = algorithm::mock::register_mock_trigger_detector(*state->registry);
         !registered)
@@ -185,17 +230,17 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
         // algorithm queue. The pool plan already budgets these queue-held frame buffers.
         const auto ring_capacity = plan.value().ring_capacity_frames + frame_queue_capacity;
         const auto maximum_references = plan.value().ring_capacity_frames * 8U;
-        state->lanes.push_back(
-            {.camera_id = camera.id,
-             .ring = std::make_unique<event::MemoryRing>(event::MemoryRingOptions{
-                 .camera_id = camera.id,
-                 .capacity_frames = ring_capacity,
-                 .required_history_seconds =
-                     static_cast<double>(configuration.event.pre_event_seconds),
-                 .maximum_active_leases = 8U,
-                 .maximum_leased_frame_references = maximum_references}),
-             .detector = std::move(detector),
-             .detector_info = std::move(detector_information)});
+        auto lane = std::make_unique<Lane>();
+        lane->camera_id = camera.id;
+        lane->ring = std::make_unique<event::MemoryRing>(event::MemoryRingOptions{
+            .camera_id = camera.id,
+            .capacity_frames = ring_capacity,
+            .required_history_seconds = static_cast<double>(configuration.event.pre_event_seconds),
+            .maximum_active_leases = 8U,
+            .maximum_leased_frame_references = maximum_references});
+        lane->detector = std::move(detector);
+        lane->detector_info = std::move(detector_information);
+        state->lanes.push_back(std::move(lane));
     }
     if (state->lanes.empty())
         return Result<std::unique_ptr<EventPipelineState>>::success(std::move(state));
@@ -204,8 +249,9 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
     std::vector<event::EventWindowCameraBinding> window_bindings;
     for (auto& lane : state->lanes)
     {
-        candidate_bindings.push_back({.camera_id = lane.camera_id, .memory_ring = lane.ring.get()});
-        window_bindings.push_back({.camera_id = lane.camera_id, .memory_ring = lane.ring.get()});
+        candidate_bindings.push_back(
+            {.camera_id = lane->camera_id, .memory_ring = lane->ring.get()});
+        window_bindings.push_back({.camera_id = lane->camera_id, .memory_ring = lane->ring.get()});
     }
     auto candidates = event::CandidateEventManager::create(
         {.cameras = std::move(candidate_bindings),
@@ -238,15 +284,15 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
 Lane* find_lane(EventPipelineState& state, const std::string_view camera_id)
 {
     const auto found = std::ranges::find_if(
-        state.lanes, [camera_id](const Lane& lane) { return lane.camera_id == camera_id; });
-    return found == state.lanes.end() ? nullptr : &*found;
+        state.lanes, [camera_id](const auto& lane) { return lane->camera_id == camera_id; });
+    return found == state.lanes.end() ? nullptr : found->get();
 }
 
 const Lane* find_lane(const EventPipelineState& state, const std::string_view camera_id)
 {
     const auto found = std::ranges::find_if(
-        state.lanes, [camera_id](const Lane& lane) { return lane.camera_id == camera_id; });
-    return found == state.lanes.end() ? nullptr : &*found;
+        state.lanes, [camera_id](const auto& lane) { return lane->camera_id == camera_id; });
+    return found == state.lanes.end() ? nullptr : found->get();
 }
 
 std::string trigger_reason(const algorithm::TriggerResult& trigger)
@@ -302,6 +348,8 @@ std::string_view to_string(const AlgorithmRuntimeState state) noexcept
         return "disabled";
     case AlgorithmRuntimeState::active:
         return "active";
+    case AlgorithmRuntimeState::partially_degraded:
+        return "partially-degraded";
     case AlgorithmRuntimeState::manual_trigger_only:
         return "manual-trigger-only";
     }
@@ -322,30 +370,16 @@ struct EventRuntimeImpl final
 
     EventRuntimeOptions options;
     mutable std::mutex mutex;
-    std::condition_variable_any condition;
-    std::deque<camera::FrameView> frames;
+    std::mutex reconfigure_mutex;
     std::unique_ptr<EventPipelineState> pipeline;
     std::map<std::string, PendingEvent> pending;
     std::set<std::string> nvme_lease_sources;
     std::map<std::string, std::vector<std::string>> nvme_leases_awaiting_commit;
     std::unique_ptr<event::KeyFrameJpegRuntime> jpeg;
     std::unique_ptr<storage::EventPersistenceRuntime> persistence;
-    std::jthread worker;
     bool started{};
     bool accepting{};
-    bool stop_requested{};
-    std::size_t frame_high_watermark{};
-    std::atomic_uint64_t submitted_frames{};
-    std::atomic_uint64_t processed_frames{};
     std::atomic_uint64_t rejected_frames{};
-    std::atomic_uint64_t skipped_frames{};
-    std::atomic_uint64_t detector_failures{};
-    std::atomic_uint64_t consecutive_detector_failures{};
-    std::atomic_uint64_t consecutive_backlog_events{};
-    std::atomic_uint64_t detector_process_calls{};
-    std::atomic_int64_t last_algorithm_processing_us{};
-    std::atomic_int64_t total_algorithm_processing_us{};
-    std::atomic_int64_t maximum_algorithm_processing_us{};
     std::atomic_uint64_t events_started{};
     std::atomic_uint64_t events_frozen{};
     std::atomic_uint64_t events_committed{};
@@ -363,16 +397,16 @@ struct EventRuntimeImpl final
         }
     }
 
-    [[nodiscard]] std::optional<Error> enter_degraded(const std::string_view reason,
-                                                      const std::string_view source_id) noexcept
+    [[nodiscard]] std::optional<Error> enter_degraded(Lane& lane,
+                                                      const std::string_view reason) noexcept
     {
         bool expected = false;
-        if (!pipeline->degraded.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        if (!lane.degraded.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
             return std::nullopt;
         auto error = runtime_error("ALGORITHM_DEGRADED", Severity::error,
                                    "自动视觉检测已降级为仅人工触发", "algorithm.runtime.degrade");
         error.module = "algorithm";
-        error.source_id = std::string{source_id};
+        error.source_id = lane.camera_id;
         error.details.push_back({"reason", std::string{reason}});
         error.details.push_back(
             {"failureLimit", std::to_string(options.consecutive_failure_limit)});
@@ -381,17 +415,60 @@ struct EventRuntimeImpl final
         return error;
     }
 
-    void record_processing_time(const std::chrono::microseconds elapsed) noexcept
+    static void record_processing_time(Lane& lane, const std::chrono::microseconds elapsed) noexcept
     {
-        ++detector_process_calls;
-        last_algorithm_processing_us.store(elapsed.count(), std::memory_order_relaxed);
-        total_algorithm_processing_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
-        auto maximum = maximum_algorithm_processing_us.load(std::memory_order_relaxed);
+        ++lane.detector_process_calls;
+        lane.last_algorithm_processing_us.store(elapsed.count(), std::memory_order_relaxed);
+        lane.total_algorithm_processing_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+        auto maximum = lane.maximum_algorithm_processing_us.load(std::memory_order_relaxed);
         while (maximum < elapsed.count() &&
-               !maximum_algorithm_processing_us.compare_exchange_weak(maximum, elapsed.count(),
-                                                                      std::memory_order_relaxed))
+               !lane.maximum_algorithm_processing_us.compare_exchange_weak(
+                   maximum, elapsed.count(), std::memory_order_relaxed))
         {
         }
+    }
+
+    [[nodiscard]] AlgorithmRuntimeSnapshot lane_snapshot(const EventPipelineState& state,
+                                                         const Lane& lane) const
+    {
+        std::scoped_lock lane_lock{lane.mutex};
+        const auto process_calls = lane.detector_process_calls.load();
+        const auto total_processing = lane.total_algorithm_processing_us.load();
+        const auto runtime_state = !state.configuration.algorithm.enabled
+                                       ? AlgorithmRuntimeState::disabled
+                                       : (lane.degraded.load(std::memory_order_acquire)
+                                              ? AlgorithmRuntimeState::manual_trigger_only
+                                              : AlgorithmRuntimeState::active);
+        return {
+            .camera_id = lane.camera_id,
+            .config_revision = state.configuration.config_revision,
+            .state = runtime_state,
+            .has_current_frame = lane.latest_frame.has_value(),
+            .latest_sequence_number = lane.latest_frame ? lane.latest_frame->sequence_number() : 0U,
+            .detector_info = lane.detector_info,
+            .metrics = {.frame_queue_depth = lane.frames.size(),
+                        .frame_queue_capacity = options.frame_queue_capacity,
+                        .frame_queue_high_watermark = lane.frame_high_watermark,
+                        .submitted_frames = lane.submitted_frames.load(),
+                        .processed_frames = lane.processed_frames.load(),
+                        .skipped_frames = lane.skipped_frames.load(),
+                        .detector_failures = lane.detector_failures.load(),
+                        .consecutive_detector_failures = lane.consecutive_detector_failures.load(),
+                        .consecutive_backlog_events = lane.consecutive_backlog_events.load(),
+                        .detector_process_calls = process_calls,
+                        .last_algorithm_processing_time =
+                            std::chrono::microseconds{lane.last_algorithm_processing_us.load()},
+                        .average_algorithm_processing_time =
+                            std::chrono::microseconds{
+                                process_calls == 0U
+                                    ? 0
+                                    : total_processing / static_cast<std::int64_t>(process_calls)},
+                        .maximum_algorithm_processing_time =
+                            std::chrono::microseconds{lane.maximum_algorithm_processing_us.load()},
+                        .result_queue_rejected = lane.result_queue_rejected.load(),
+                        .candidates_created = lane.candidates_created.load(),
+                        .confirmed_events = lane.confirmed_events.load(),
+                        .rejected_candidates = lane.rejected_candidates.load()}};
     }
 
     void persistence_completed(storage::EventPersistenceCompletion completion)
@@ -542,7 +619,7 @@ struct EventRuntimeImpl final
             submit_persistence(std::move(*complete));
     }
 
-    void freeze(event::FrozenEventWindow window)
+    void freeze(EventPipelineState& state, event::FrozenEventWindow window)
     {
         if (window.triggers.empty() || window.camera_windows.empty())
             return;
@@ -568,8 +645,8 @@ struct EventRuntimeImpl final
             report(selected.error());
             return;
         }
-        if (selected.value().frames.size() > pipeline->configuration.event.key_frame_count)
-            selected.value().frames.resize(pipeline->configuration.event.key_frame_count);
+        if (selected.value().frames.size() > state.configuration.event.key_frame_count)
+            selected.value().frames.resize(state.configuration.event.key_frame_count);
         const auto& trigger = window.triggers.front().trigger;
         std::vector<std::string> camera_ids;
         for (const auto& camera : window.camera_windows)
@@ -586,25 +663,25 @@ struct EventRuntimeImpl final
                          .trigger_reason = trigger_reason(trigger),
                          .confidence = trigger.confidence,
                          .pre_event_duration =
-                             std::chrono::seconds{pipeline->configuration.event.pre_event_seconds},
+                             std::chrono::seconds{state.configuration.event.pre_event_seconds},
                          .post_event_duration =
-                             std::chrono::seconds{pipeline->configuration.event.post_event_seconds},
+                             std::chrono::seconds{state.configuration.event.post_event_seconds},
                          .algorithm_name =
                              trigger.trigger_source == algorithm::TriggerSource::manual_test
                                  ? "manual-trigger"
-                                 : pipeline->configuration.algorithm.type,
+                                 : state.configuration.algorithm.type,
                          .algorithm_version = trigger.detector_version.empty()
                                                   ? "not-reported"
                                                   : trigger.detector_version,
-                         .config_version = std::to_string(pipeline->configuration.config_revision),
-                         .machine_id = pipeline->configuration.system.machine_id,
-                         .production_line_id = pipeline->configuration.system.production_line_id,
+                         .config_version = std::to_string(state.configuration.config_revision),
+                         .machine_id = state.configuration.system.machine_id,
+                         .production_line_id = state.configuration.system.production_line_id,
                          .paper_type = "not-configured",
                          .upload_state = "Pending",
                          .time_quality = "Normal"},
             .window = std::move(window),
             .remaining = selected.value().frames.size(),
-            .save_raw = pipeline->configuration.event.save_raw};
+            .save_raw = state.configuration.event.save_raw};
         for (const auto& trigger_item : pending_event.window.triggers)
         {
             std::scoped_lock lock{mutex};
@@ -664,164 +741,417 @@ struct EventRuntimeImpl final
         }
     }
 
-    void process_frame(camera::FrameView frame)
+    [[nodiscard]] std::vector<Error> enqueue_result(EventPipelineState& state, Lane& lane,
+                                                    AlgorithmResultEnvelope envelope)
     {
-        auto* lane = find_lane(*pipeline, frame.camera_id());
-        if (lane == nullptr || !pipeline->windows || !pipeline->candidates)
+        std::vector<Error> errors;
+        {
+            std::scoped_lock lock{state.result_mutex};
+            if (state.results.size() < state.result_capacity)
+            {
+                state.results.push_back(std::move(envelope));
+                state.result_high_watermark =
+                    std::max(state.result_high_watermark, state.results.size());
+                ++state.result_generation;
+                state.result_condition.notify_one();
+                return errors;
+            }
+        }
+
+        ++lane.result_queue_rejected;
+        auto full = algorithm_runtime_error("ALGORITHM_RESULT_QUEUE_FULL", Severity::error,
+                                            "算法结果入口已满，候选结果无法可靠交付",
+                                            "algorithm.runtime.resultQueue", lane.camera_id, true);
+        full.details.push_back({"queue", "algorithm.results"});
+        full.details.push_back({"capacity", std::to_string(state.result_capacity)});
+        errors.push_back(std::move(full));
+        if (auto degraded = enter_degraded(lane, "result-queue-rejected"))
+            errors.push_back(std::move(*degraded));
+        return errors;
+    }
+
+    void notify_result_progress(EventPipelineState& state)
+    {
+        std::scoped_lock lock{state.result_mutex};
+        ++state.result_generation;
+        state.result_condition.notify_one();
+    }
+
+    void process_result(EventPipelineState& state, AlgorithmResultEnvelope envelope)
+    {
+        auto* lane = find_lane(state, envelope.frame.camera_id());
+        if (lane == nullptr || !state.windows || !state.candidates)
             return;
-        pipeline->last_monotonic_time = frame.received_monotonic_time();
-        bool manual_pending = false;
+
+        std::vector<event::FrozenEventWindow> frozen_windows;
         {
-            std::scoped_lock lock{mutex};
-            if (lane->manual_pending && lane->manual_target_sequence &&
-                frame.sequence_number() == *lane->manual_target_sequence)
+            state.last_monotonic_time = envelope.frame.received_monotonic_time();
+            state.last_wall_clock_time = envelope.frame.received_wall_clock_time();
+            if (envelope.detection)
             {
-                lane->manual_pending = false;
-                lane->manual_target_sequence.reset();
-                manual_pending = true;
-            }
-        }
-        std::optional<Result<algorithm::DetectionResult>> detection;
-        if (manual_pending)
-        {
-            detection.emplace(Result<algorithm::DetectionResult>::success(manual_detection(frame)));
-        }
-        else if (pipeline->configuration.algorithm.enabled && lane->detector &&
-                 !pipeline->degraded.load(std::memory_order_acquire))
-        {
-            const auto processing_started = std::chrono::steady_clock::now();
-            detection.emplace(lane->detector->process(frame));
-            record_processing_time(std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - processing_started));
-        }
-        if (detection && !*detection)
-        {
-            ++detector_failures;
-            const auto failures = consecutive_detector_failures.fetch_add(1U) + 1U;
-            report(detection->error());
-            if (failures >= options.consecutive_failure_limit)
-            {
-                if (auto degraded =
-                        enter_degraded("consecutive-detector-failures", frame.camera_id()))
-                    report(*degraded);
-            }
-        }
-        else if (detection)
-        {
-            if (options.diagnostics.enabled && options.diagnostics.enabled() &&
-                options.diagnostics.record)
-                options.diagnostics.record(
-                    "operation=algorithm.detect result=success cameraId=" + frame.camera_id() +
-                    " sequenceNumber=" + std::to_string(frame.sequence_number()) +
-                    " durationUs=" + std::to_string(detection->value().processing_time.count()) +
-                    " confidence=" + std::to_string(detection->value().confidence) + " candidate=" +
-                    (detection->value().triggered ? "true" : "false") + " businessCode=OK");
-            consecutive_detector_failures.store(0U);
-            auto candidate = pipeline->candidates->process(detection->value());
-            if (!candidate)
-            {
-                ++event_failures;
-                report(candidate.error());
-            }
-            else if (candidate.value().camera.event && detection->value().triggered)
-            {
-                const auto& source = candidate.value().camera.event->event_id;
-                if (!pipeline->source_to_canonical.contains(source))
+                auto candidate = state.candidates->process(*envelope.detection);
+                if (!candidate)
                 {
-                    auto window_started =
-                        pipeline->windows->start_or_merge(source, detection->value());
-                    if (!window_started)
+                    ++event_failures;
+                    report(candidate.error());
+                }
+                else if (candidate.value().camera.event)
+                {
+                    const auto& candidate_event = *candidate.value().camera.event;
+                    if (candidate_event.decision_state == event::CandidateEventState::confirmed &&
+                        state.counted_confirmed_events.insert(candidate_event.event_id).second)
+                        ++lane->confirmed_events;
+                    if (envelope.detection->triggered &&
+                        !state.source_to_canonical.contains(candidate_event.event_id))
                     {
-                        ++event_failures;
-                        report(window_started.error());
-                    }
-                    else
-                    {
-                        pipeline->source_to_canonical[source] =
-                            window_started.value().event.event_id;
-                        bool lease_exists = false;
+                        auto window_started = state.windows->start_or_merge(
+                            candidate_event.event_id, *envelope.detection);
+                        if (!window_started)
                         {
-                            std::scoped_lock lock{mutex};
-                            lease_exists = nvme_lease_sources.contains(source);
+                            ++event_failures;
+                            report(window_started.error());
                         }
-                        if (options.nvme_cache && !lease_exists)
+                        else
                         {
-                            std::vector<std::string> camera_ids;
-                            camera_ids.reserve(pipeline->lanes.size());
-                            for (const auto& camera_lane : pipeline->lanes)
-                                camera_ids.push_back(camera_lane.camera_id);
-                            const auto pre = std::chrono::seconds{
-                                pipeline->configuration.event.pre_event_seconds};
-                            const auto post = std::chrono::seconds{
-                                pipeline->configuration.event.post_event_seconds};
-                            auto protected_window = options.nvme_cache->protect_event_window(
-                                {.event_id = source,
-                                 .camera_ids = std::move(camera_ids),
-                                 .start_monotonic_time = detection->value().monotonic_time - pre,
-                                 .end_monotonic_time = detection->value().monotonic_time + post,
-                                 .start_wall_clock_time = detection->value().wall_clock_time - pre,
-                                 .end_wall_clock_time = detection->value().wall_clock_time + post});
-                            if (!protected_window)
-                                report(protected_window.error());
-                            else
+                            state.source_to_canonical[candidate_event.event_id] =
+                                window_started.value().event.event_id;
+                            ++lane->candidates_created;
+                            ++events_started;
+
+                            bool lease_exists = false;
                             {
                                 std::scoped_lock lock{mutex};
-                                nvme_lease_sources.insert(source);
+                                lease_exists =
+                                    nvme_lease_sources.contains(candidate_event.event_id);
+                            }
+                            if (options.nvme_cache && !lease_exists)
+                            {
+                                std::vector<std::string> camera_ids;
+                                camera_ids.reserve(state.lanes.size());
+                                for (const auto& camera_lane : state.lanes)
+                                    camera_ids.push_back(camera_lane->camera_id);
+                                const auto pre = std::chrono::seconds{
+                                    state.configuration.event.pre_event_seconds};
+                                const auto post = std::chrono::seconds{
+                                    state.configuration.event.post_event_seconds};
+                                auto protected_window = options.nvme_cache->protect_event_window(
+                                    {.event_id = candidate_event.event_id,
+                                     .camera_ids = std::move(camera_ids),
+                                     .start_monotonic_time =
+                                         envelope.detection->monotonic_time - pre,
+                                     .end_monotonic_time =
+                                         envelope.detection->monotonic_time + post,
+                                     .start_wall_clock_time =
+                                         envelope.detection->wall_clock_time - pre,
+                                     .end_wall_clock_time =
+                                         envelope.detection->wall_clock_time + post});
+                                if (!protected_window)
+                                    report(protected_window.error());
+                                else
+                                {
+                                    std::scoped_lock lock{mutex};
+                                    nvme_lease_sources.insert(candidate_event.event_id);
+                                }
                             }
                         }
-                        ++events_started;
                     }
                 }
             }
+            static_cast<void>(
+                state.candidates->advance_time(envelope.frame.received_monotonic_time(),
+                                               envelope.frame.received_wall_clock_time()));
+            frozen_windows = state.windows->advance_time(envelope.frame.received_monotonic_time());
         }
-        static_cast<void>(pipeline->candidates->advance_time(frame.received_monotonic_time(),
-                                                             frame.received_wall_clock_time()));
-        for (auto& frozen : pipeline->windows->advance_time(frame.received_monotonic_time()))
-            freeze(std::move(frozen));
+        for (auto& frozen : frozen_windows)
+            freeze(state, std::move(frozen));
     }
 
-    void run(const std::stop_token token)
+    static bool envelope_less(const AlgorithmResultEnvelope& left,
+                              const AlgorithmResultEnvelope& right)
     {
-        const auto thread_registration =
-            options.register_thread ? options.register_thread("event-processing") : nullptr;
+        return std::tuple{left.frame.received_monotonic_time(), left.frame.camera_id(),
+                          left.frame.sequence_number()} <
+               std::tuple{right.frame.received_monotonic_time(), right.frame.camera_id(),
+                          right.frame.sequence_number()};
+    }
+
+    static std::optional<camera::MonotonicTime> safe_watermark(EventPipelineState& state)
+    {
+        std::optional<camera::MonotonicTime> watermark;
+        for (const auto& lane : state.lanes)
+        {
+            std::scoped_lock lock{lane->mutex};
+            std::optional<camera::MonotonicTime> earliest = lane->in_flight_time;
+            if (!lane->frames.empty())
+            {
+                const auto queued = lane->frames.front().received_monotonic_time();
+                earliest = earliest ? std::min(*earliest, queued) : queued;
+            }
+            if (earliest)
+                watermark = watermark ? std::min(*watermark, *earliest) : earliest;
+        }
+        return watermark;
+    }
+
+    bool wait_for_start_gate(EventPipelineState& state)
+    {
+        std::unique_lock lock{state.start_mutex};
+        state.start_condition.wait(lock,
+                                   [&] { return state.start_gate_open || state.start_cancelled; });
+        return !state.start_cancelled;
+    }
+
+    void run_lane(EventPipelineState& state, Lane& lane)
+    {
+        if (!wait_for_start_gate(state))
+            return;
+        const auto registration =
+            options.register_thread ? options.register_thread("algorithm-worker-" + lane.camera_id)
+                                    : nullptr;
         while (true)
         {
             std::optional<camera::FrameView> frame;
+            bool manual = false;
             {
-                std::unique_lock lock{mutex};
-                condition.wait(lock, token, [&] { return stop_requested || !frames.empty(); });
-                if (frames.empty() && (stop_requested || token.stop_requested()))
+                std::unique_lock lock{lane.mutex};
+                lane.condition.wait(lock,
+                                    [&] { return lane.stop_requested || !lane.frames.empty(); });
+                if (lane.frames.empty() && lane.stop_requested)
                     break;
-                if (frames.empty())
-                    continue;
-                frame.emplace(std::move(frames.front()));
-                frames.pop_front();
+                frame.emplace(std::move(lane.frames.front()));
+                lane.frames.pop_front();
+                lane.in_flight_time = frame->received_monotonic_time();
+                if (lane.manual_pending && lane.manual_target_sequence &&
+                    frame->sequence_number() == *lane.manual_target_sequence)
+                {
+                    lane.manual_pending = false;
+                    lane.manual_target_sequence.reset();
+                    manual = true;
+                }
             }
-            process_frame(std::move(*frame));
+            notify_result_progress(state);
+
+            std::optional<algorithm::DetectionResult> completed_detection;
+            std::optional<Error> detector_error;
+            if (manual)
+                completed_detection = manual_detection(*frame);
+            else if (state.configuration.algorithm.enabled && lane.detector &&
+                     !lane.degraded.load(std::memory_order_acquire))
             {
-                std::scoped_lock lock{mutex};
-                ++processed_frames;
+                const auto processing_started = std::chrono::steady_clock::now();
+                auto detection = lane.detector->process(*frame);
+                record_processing_time(lane,
+                                       std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - processing_started));
+                if (!detection)
+                {
+                    ++lane.detector_failures;
+                    const auto failures = lane.consecutive_detector_failures.fetch_add(1U) + 1U;
+                    detector_error = detection.error();
+                    detector_error->source_id = lane.camera_id;
+                    if (failures >= options.consecutive_failure_limit)
+                        if (auto degraded = enter_degraded(lane, "consecutive-detector-failures"))
+                            report(*degraded);
+                }
+                else
+                {
+                    lane.consecutive_detector_failures.store(0U);
+                    completed_detection = std::move(detection).value();
+                    if (options.diagnostics.enabled && options.diagnostics.enabled() &&
+                        options.diagnostics.record)
+                        options.diagnostics.record(
+                            "operation=algorithm.detect result=success cameraId=" + lane.camera_id +
+                            " sequenceNumber=" + std::to_string(frame->sequence_number()) +
+                            " durationUs=" +
+                            std::to_string(completed_detection->processing_time.count()) +
+                            " confidence=" + std::to_string(completed_detection->confidence) +
+                            " candidate=" + (completed_detection->triggered ? "true" : "false") +
+                            " businessCode=OK");
+                }
+            }
+
+            auto delivery_errors = enqueue_result(
+                state, lane, {.frame = *frame, .detection = std::move(completed_detection)});
+            {
+                std::scoped_lock lock{lane.mutex};
+                lane.in_flight_time.reset();
+                ++lane.processed_frames;
+            }
+            notify_result_progress(state);
+            if (detector_error)
+                report(*detector_error);
+            for (const auto& error : delivery_errors)
+                report(error);
+        }
+    }
+
+    void run_events(EventPipelineState& state)
+    {
+        if (!wait_for_start_gate(state))
+            return;
+        const auto registration =
+            options.register_thread ? options.register_thread("event-processing") : nullptr;
+        if (options.result_consumer_start_gate)
+            options.result_consumer_start_gate();
+        while (true)
+        {
+            std::uint64_t watermark_generation{};
+            {
+                std::scoped_lock lock{state.result_mutex};
+                watermark_generation = state.result_generation;
+            }
+            const auto watermark = safe_watermark(state);
+            std::optional<AlgorithmResultEnvelope> envelope;
+            {
+                std::unique_lock lock{state.result_mutex};
+                if (state.result_generation != watermark_generation)
+                    continue;
+                std::ranges::sort(state.results, envelope_less);
+                if (!state.results.empty() &&
+                    (!watermark ||
+                     state.results.front().frame.received_monotonic_time() < *watermark))
+                {
+                    envelope.emplace(std::move(state.results.front()));
+                    state.results.pop_front();
+                }
+                else if (state.event_stop_requested && state.results.empty())
+                    break;
+                else
+                {
+                    state.result_condition.wait(
+                        lock, [&] { return state.result_generation != watermark_generation; });
+                }
+            }
+            if (envelope)
+                process_result(state, std::move(*envelope));
+        }
+
+        std::vector<event::FrozenEventWindow> frozen_windows;
+        {
+            if (state.candidates)
+                static_cast<void>(
+                    state.candidates->stop(state.last_monotonic_time, state.last_wall_clock_time));
+            if (state.windows)
+                frozen_windows = state.windows->stop(state.last_monotonic_time);
+        }
+        for (auto& frozen : frozen_windows)
+            freeze(state, std::move(frozen));
+    }
+
+    [[nodiscard]] Result<void> allow_thread_start(const std::string_view name) const
+    {
+        return options.thread_start_gate ? options.thread_start_gate(name)
+                                         : Result<void>::success();
+    }
+
+    void cancel_prepared_threads(EventPipelineState& state) noexcept
+    {
+        {
+            std::scoped_lock lock{state.start_mutex};
+            state.start_cancelled = true;
+        }
+        state.start_condition.notify_all();
+        for (auto& lane : state.lanes)
+        {
+            {
+                std::scoped_lock lock{lane->mutex};
+                lane->stop_requested = true;
+            }
+            lane->condition.notify_all();
+        }
+        {
+            std::scoped_lock lock{state.result_mutex};
+            state.event_stop_requested = true;
+            ++state.result_generation;
+        }
+        state.result_condition.notify_all();
+        for (auto& lane : state.lanes)
+            if (lane->worker.joinable())
+                lane->worker.join();
+        if (state.event_worker.joinable())
+            state.event_worker.join();
+    }
+
+    [[nodiscard]] Result<void> prepare_threads(EventPipelineState& state)
+    {
+        try
+        {
+            auto allowed = allow_thread_start("event-processing");
+            if (!allowed)
+                return allowed;
+            state.event_worker = std::jthread{[this, &state] { run_events(state); }};
+            for (auto& lane : state.lanes)
+            {
+                const auto name = "algorithm-worker-" + lane->camera_id;
+                allowed = allow_thread_start(name);
+                if (!allowed)
+                {
+                    cancel_prepared_threads(state);
+                    return allowed;
+                }
+                auto* lane_pointer = lane.get();
+                lane->worker =
+                    std::jthread{[this, &state, lane_pointer] { run_lane(state, *lane_pointer); }};
             }
         }
-        if (pipeline->windows)
-            for (auto& frozen : pipeline->windows->stop(pipeline->last_monotonic_time))
-                freeze(std::move(frozen));
-        for (auto& lane : pipeline->lanes)
-            lane.ring->close();
+        catch (const std::exception&)
+        {
+            cancel_prepared_threads(state);
+            return Result<void>::failure(runtime_error("SYS_INTERNAL_ERROR", Severity::critical,
+                                                       "无法创建算法线程组",
+                                                       "event.runtime.prepareThreads"));
+        }
+        return Result<void>::success();
+    }
+
+    static void release_start_gate(EventPipelineState& state)
+    {
+        {
+            std::scoped_lock lock{state.start_mutex};
+            state.start_gate_open = true;
+        }
+        state.start_condition.notify_all();
+    }
+
+    void stop_and_drain(EventPipelineState& state) noexcept
+    {
+        for (auto& lane : state.lanes)
+        {
+            {
+                std::scoped_lock lock{lane->mutex};
+                lane->stop_requested = true;
+            }
+            lane->condition.notify_all();
+        }
+        for (auto& lane : state.lanes)
+            if (lane->worker.joinable())
+                lane->worker.join();
+        {
+            std::scoped_lock lock{state.result_mutex};
+            state.event_stop_requested = true;
+            ++state.result_generation;
+        }
+        state.result_condition.notify_all();
+        if (state.event_worker.joinable())
+            state.event_worker.join();
+        for (auto& lane : state.lanes)
+            lane->ring->close();
     }
 };
 
 Result<std::shared_ptr<EventRuntime>> EventRuntime::create(EventRuntimeOptions options)
 {
     if (!options.database || options.frame_queue_capacity == 0U ||
-        options.frame_queue_capacity > 256U || options.persistence_capacity == 0U ||
-        options.persistence_capacity > 64U || options.consecutive_failure_limit == 0U ||
-        options.consecutive_failure_limit > 1000U || options.consecutive_backlog_limit == 0U ||
-        options.consecutive_backlog_limit > 1000U)
+        options.frame_queue_capacity > 256U || options.result_queue_capacity == 0U ||
+        options.result_queue_capacity > algorithm_result_queue_default_capacity ||
+        options.persistence_capacity == 0U || options.persistence_capacity > 64U ||
+        options.consecutive_failure_limit == 0U || options.consecutive_failure_limit > 1000U ||
+        options.consecutive_backlog_limit == 0U || options.consecutive_backlog_limit > 1000U)
         return Result<std::shared_ptr<EventRuntime>>::failure(runtime_error(
             "SYS_CONFIG_INVALID", Severity::error, "事件运行时配置无效", "event.runtime.create"));
-    auto pipeline = build_pipeline(options.configuration, options.frame_queue_capacity,
-                                   options.detector_registry_configurer);
+    auto pipeline =
+        build_pipeline(options.configuration, options.frame_queue_capacity,
+                       options.result_queue_capacity, options.detector_registry_configurer);
     if (!pipeline)
         return Result<std::shared_ptr<EventRuntime>>::failure(std::move(pipeline).error());
     const auto event_root = options.event_root.empty()
@@ -879,7 +1209,8 @@ EventRuntime::~EventRuntime()
 
 Result<void> EventRuntime::start()
 {
-    std::scoped_lock lock{impl_->mutex};
+    std::scoped_lock transaction_lock{impl_->reconfigure_mutex};
+    std::unique_lock lock{impl_->mutex};
     if (impl_->started)
         return Result<void>::success();
     auto persistence = impl_->persistence->start();
@@ -892,31 +1223,29 @@ Result<void> EventRuntime::start()
         static_cast<void>(impl_->persistence->join(std::chrono::steady_clock::now() + 2s));
         return jpeg;
     }
-    try
-    {
-        impl_->stop_requested = false;
-        impl_->accepting = true;
-        impl_->worker = std::jthread{[this](const std::stop_token token) { impl_->run(token); }};
-        impl_->started = true;
-    }
-    catch (const std::exception&)
+    auto prepared = impl_->prepare_threads(*impl_->pipeline);
+    if (!prepared)
     {
         impl_->jpeg->request_stop();
         impl_->persistence->request_stop();
+        lock.unlock();
         static_cast<void>(impl_->jpeg->join(std::chrono::steady_clock::now() + 2s));
         static_cast<void>(impl_->persistence->join(std::chrono::steady_clock::now() + 2s));
-        return Result<void>::failure(runtime_error("SYS_INTERNAL_ERROR", Severity::critical,
-                                                   "无法创建事件管理线程", "event.runtime.start"));
+        return prepared;
     }
+    impl_->accepting = true;
+    impl_->started = true;
+    impl_->release_start_gate(*impl_->pipeline);
     return Result<void>::success();
 }
 
 Result<void> EventRuntime::submit_frame(camera::FrameView frame)
 {
     bool backlog_started = false;
-    bool degrade = false;
     std::string source_id = frame.camera_id();
     std::optional<Error> degraded_error;
+    std::optional<Error> backlog_error;
+    std::vector<Error> delivery_errors;
     std::unique_lock lock{impl_->mutex};
     if (!impl_->accepting)
     {
@@ -935,6 +1264,7 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
         error.source_id = source_id;
         return Result<void>::failure(std::move(error));
     }
+    std::unique_lock lane_lock{lane->mutex};
     auto cached = lane->ring->push(frame);
     if (!cached)
     {
@@ -945,40 +1275,46 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
     if (lane->manual_pending && !lane->manual_target_sequence &&
         frame.sequence_number() > lane->manual_after_sequence)
         lane->manual_target_sequence = frame.sequence_number();
-    const auto camera_depth = static_cast<std::size_t>(
-        std::ranges::count_if(impl_->frames, [&](const camera::FrameView& pending) {
-            return pending.camera_id() == source_id;
-        }));
     bool enqueue = true;
-    if (camera_depth >= impl_->options.frame_queue_capacity)
+    std::optional<camera::FrameView> skipped_frame;
+    if (lane->frames.size() >= impl_->options.frame_queue_capacity)
     {
         const auto oldest =
-            std::ranges::find_if(impl_->frames, [&](const camera::FrameView& pending) {
-                return pending.camera_id() == source_id &&
-                       (!lane->manual_target_sequence ||
-                        pending.sequence_number() != *lane->manual_target_sequence);
+            std::ranges::find_if(lane->frames, [&](const camera::FrameView& pending) {
+                return !lane->manual_target_sequence ||
+                       pending.sequence_number() != *lane->manual_target_sequence;
             });
-        if (oldest != impl_->frames.end())
-            impl_->frames.erase(oldest);
+        if (oldest != lane->frames.end())
+        {
+            skipped_frame.emplace(std::move(*oldest));
+            lane->frames.erase(oldest);
+        }
         else
+        {
             enqueue = false;
-        ++impl_->skipped_frames;
-        const auto backlog = impl_->consecutive_backlog_events.fetch_add(1U) + 1U;
+            skipped_frame = frame;
+        }
+        ++lane->skipped_frames;
+        const auto backlog = lane->consecutive_backlog_events.fetch_add(1U) + 1U;
         backlog_started = backlog == 1U;
-        degrade = backlog >= impl_->options.consecutive_backlog_limit;
+        if (backlog >= impl_->options.consecutive_backlog_limit)
+            degraded_error = impl_->enter_degraded(*lane, "sustained-queue-backlog");
     }
     else
-        impl_->consecutive_backlog_events.store(0U);
+        lane->consecutive_backlog_events.store(0U);
     lane->latest_submitted_sequence =
         std::max(lane->latest_submitted_sequence, frame.sequence_number());
-    ++impl_->submitted_frames;
+    ++lane->submitted_frames;
+    if (skipped_frame)
+        delivery_errors = impl_->enqueue_result(
+            *impl_->pipeline, *lane, {.frame = *skipped_frame, .detection = std::nullopt});
     if (enqueue)
     {
-        impl_->frames.push_back(std::move(frame));
-        impl_->frame_high_watermark = std::max(impl_->frame_high_watermark, impl_->frames.size());
-        impl_->condition.notify_one();
+        lane->frames.push_back(std::move(frame));
+        lane->frame_high_watermark = std::max(lane->frame_high_watermark, lane->frames.size());
+        impl_->notify_result_progress(*impl_->pipeline);
+        lane->condition.notify_one();
     }
-    std::optional<Error> backlog_error;
     if (backlog_started)
     {
         auto error =
@@ -991,13 +1327,14 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
         error.details.push_back({"overflowAction", "drop-oldest"});
         backlog_error = std::move(error);
     }
-    if (degrade)
-        degraded_error = impl_->enter_degraded("sustained-queue-backlog", source_id);
+    lane_lock.unlock();
     lock.unlock();
     if (backlog_error)
         impl_->report(*backlog_error);
     if (degraded_error)
         impl_->report(*degraded_error);
+    for (const auto& error : delivery_errors)
+        impl_->report(error);
     return Result<void>::success();
 }
 
@@ -1016,6 +1353,7 @@ Result<bool> EventRuntime::request_manual_trigger(const std::string_view camera_
         error.source_id = std::string{camera_id};
         return Result<bool>::failure(std::move(error));
     }
+    std::scoped_lock lane_lock{lane->mutex};
     if (lane->manual_pending)
         return Result<bool>::success(false);
     lane->manual_after_sequence = lane->latest_submitted_sequence;
@@ -1043,55 +1381,76 @@ Result<void> EventRuntime::update_external_confirmation(const std::string_view c
 
 Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
 {
+    std::scoped_lock transaction_lock{impl_->reconfigure_mutex};
+    bool restart_workers = false;
+    {
+        std::scoped_lock lock{impl_->mutex};
+        if (impl_->started && !impl_->accepting)
+            return Result<void>::failure(runtime_error("SYS_SERVICE_STOPPING", Severity::warning,
+                                                       "事件运行时正在停止，拒绝重配置",
+                                                       "event.runtime.reconfigure", true));
+        restart_workers = impl_->started;
+    }
     auto candidate = build_pipeline(configuration, impl_->options.frame_queue_capacity,
+                                    impl_->options.result_queue_capacity,
                                     impl_->options.detector_registry_configurer);
     if (!candidate)
         return Result<void>::failure(std::move(candidate).error());
-    bool restart_worker = false;
-    {
-        std::scoped_lock lock{impl_->mutex};
-        restart_worker = impl_->started && impl_->accepting;
-        if (restart_worker)
-        {
-            impl_->accepting = false;
-            impl_->stop_requested = true;
-            impl_->condition.notify_all();
-        }
-    }
-    if (restart_worker && impl_->worker.joinable())
-        impl_->worker.join();
     auto next = std::move(candidate).value();
+    if (restart_workers)
+    {
+        auto prepared = impl_->prepare_threads(*next);
+        if (!prepared)
+            return prepared;
+        {
+            std::scoped_lock lock{impl_->mutex};
+            if (!impl_->started || !impl_->accepting)
+            {
+                impl_->cancel_prepared_threads(*next);
+                return Result<void>::failure(runtime_error(
+                    "SYS_SERVICE_STOPPING", Severity::warning,
+                    "事件运行时在候选线程组准备期间开始停止", "event.runtime.reconfigure", true));
+            }
+            impl_->accepting = false;
+        }
+        impl_->stop_and_drain(*impl_->pipeline);
+    }
+
+    std::unique_ptr<EventPipelineState> previous;
     {
         std::scoped_lock lock{impl_->mutex};
         for (auto& lane : next->lanes)
         {
-            const auto* previous = find_lane(*impl_->pipeline, lane.camera_id);
-            if (previous != nullptr)
+            const auto* old_lane = find_lane(*impl_->pipeline, lane->camera_id);
+            if (old_lane != nullptr)
             {
-                lane.latest_frame = previous->latest_frame;
-                lane.latest_submitted_sequence = previous->latest_submitted_sequence;
+                std::scoped_lock old_lane_lock{old_lane->mutex};
+                lane->latest_frame = old_lane->latest_frame;
+                lane->latest_submitted_sequence = old_lane->latest_submitted_sequence;
+                lane->frame_high_watermark = old_lane->frame_high_watermark;
+                lane->submitted_frames.store(old_lane->submitted_frames.load());
+                lane->processed_frames.store(old_lane->processed_frames.load());
+                lane->skipped_frames.store(old_lane->skipped_frames.load());
+                lane->detector_failures.store(old_lane->detector_failures.load());
+                lane->detector_process_calls.store(old_lane->detector_process_calls.load());
+                lane->last_algorithm_processing_us.store(
+                    old_lane->last_algorithm_processing_us.load());
+                lane->total_algorithm_processing_us.store(
+                    old_lane->total_algorithm_processing_us.load());
+                lane->maximum_algorithm_processing_us.store(
+                    old_lane->maximum_algorithm_processing_us.load());
+                lane->result_queue_rejected.store(old_lane->result_queue_rejected.load());
+                lane->candidates_created.store(old_lane->candidates_created.load());
+                lane->confirmed_events.store(old_lane->confirmed_events.load());
+                lane->rejected_candidates.store(old_lane->rejected_candidates.load());
             }
         }
+        previous = std::move(impl_->pipeline);
         impl_->pipeline = std::move(next);
         impl_->options.configuration = configuration;
-        impl_->consecutive_detector_failures.store(0U);
-        impl_->consecutive_backlog_events.store(0U);
-        impl_->stop_requested = false;
-        if (restart_worker)
-        {
-            try
-            {
-                impl_->worker =
-                    std::jthread{[this](const std::stop_token token) { impl_->run(token); }};
-                impl_->accepting = true;
-            }
-            catch (const std::exception&)
-            {
-                return Result<void>::failure(runtime_error("SYS_INTERNAL_ERROR", Severity::critical,
-                                                           "无法重建事件管理线程",
-                                                           "event.runtime.reconfigure"));
-            }
-        }
+        impl_->accepting = restart_workers;
+        if (restart_workers)
+            impl_->release_start_gate(*impl_->pipeline);
     }
     return Result<void>::success();
 }
@@ -1099,7 +1458,6 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
 Result<AlgorithmRuntimeSnapshot> EventRuntime::algorithm_snapshot(
     const std::string_view camera_id) const
 {
-    const auto runtime_metrics = snapshot();
     std::scoped_lock lock{impl_->mutex};
     const auto* lane = find_lane(*impl_->pipeline, camera_id);
     if (lane == nullptr)
@@ -1108,14 +1466,17 @@ Result<AlgorithmRuntimeSnapshot> EventRuntime::algorithm_snapshot(
             algorithm_runtime_error("CAMERA_NOT_FOUND", Severity::error, "逻辑相机未启用算法运行时",
                                     "algorithm.runtime.snapshot", camera_id));
     }
-    return Result<AlgorithmRuntimeSnapshot>::success(
-        {.camera_id = lane->camera_id,
-         .config_revision = impl_->pipeline->configuration.config_revision,
-         .state = runtime_metrics.algorithm_state,
-         .has_current_frame = lane->latest_frame.has_value(),
-         .latest_sequence_number = lane->latest_frame ? lane->latest_frame->sequence_number() : 0U,
-         .detector_info = lane->detector_info,
-         .metrics = runtime_metrics});
+    return Result<AlgorithmRuntimeSnapshot>::success(impl_->lane_snapshot(*impl_->pipeline, *lane));
+}
+
+std::vector<AlgorithmRuntimeSnapshot> EventRuntime::algorithm_snapshots() const
+{
+    std::vector<AlgorithmRuntimeSnapshot> result;
+    std::scoped_lock lock{impl_->mutex};
+    result.reserve(impl_->pipeline->lanes.size());
+    for (const auto& lane : impl_->pipeline->lanes)
+        result.push_back(impl_->lane_snapshot(*impl_->pipeline, *lane));
+    return result;
 }
 
 Result<AlgorithmFrameTestResult> EventRuntime::test_current_frame(
@@ -1133,6 +1494,7 @@ Result<AlgorithmFrameTestResult> EventRuntime::test_current_frame(
                 "CAMERA_NOT_FOUND", Severity::error, "逻辑相机未启用算法运行时",
                 "algorithm.runtime.testCurrentFrame", camera_id));
         }
+        std::scoped_lock lane_lock{lane->mutex};
         if (!lane->latest_frame)
         {
             return Result<AlgorithmFrameTestResult>::failure(algorithm_runtime_error(
@@ -1183,21 +1545,29 @@ Result<AlgorithmFrameTestResult> EventRuntime::test_current_frame(
 
 void EventRuntime::request_stop() noexcept
 {
+    std::scoped_lock transaction_lock{impl_->reconfigure_mutex};
+    EventPipelineState* state{};
     {
         std::scoped_lock lock{impl_->mutex};
         impl_->accepting = false;
-        impl_->stop_requested = true;
+        state = impl_->pipeline.get();
     }
-    impl_->condition.notify_all();
-    if (impl_->worker.joinable())
-        impl_->worker.request_stop();
+    if (state == nullptr)
+        return;
+    for (auto& lane : state->lanes)
+    {
+        {
+            std::scoped_lock lock{lane->mutex};
+            lane->stop_requested = true;
+        }
+        lane->condition.notify_all();
+    }
 }
 
 Result<void> EventRuntime::join(const std::chrono::steady_clock::time_point deadline)
 {
     request_stop();
-    if (impl_->worker.joinable())
-        impl_->worker.join();
+    impl_->stop_and_drain(*impl_->pipeline);
     impl_->jpeg->request_stop();
     auto jpeg = impl_->jpeg->join(deadline);
     impl_->persistence->request_stop();
@@ -1217,44 +1587,94 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
     event::CandidateEventManagerSnapshot candidates;
     if (impl_->pipeline->candidates)
         candidates = impl_->pipeline->candidates->snapshot();
-    const auto process_calls = impl_->detector_process_calls.load();
-    const auto total_processing = impl_->total_algorithm_processing_us.load();
+    std::size_t frame_depth{};
+    std::size_t frame_capacity{};
+    std::size_t frame_high_watermark{};
+    std::uint64_t submitted{};
+    std::uint64_t processed{};
+    std::uint64_t skipped{};
+    std::uint64_t detector_failures{};
+    std::uint64_t consecutive_failures{};
+    std::uint64_t consecutive_backlogs{};
+    std::uint64_t process_calls{};
+    std::int64_t last_processing{};
+    std::int64_t total_processing{};
+    std::int64_t maximum_processing{};
+    std::uint64_t result_rejected{};
+    std::size_t degraded_lanes{};
+    for (const auto& lane : impl_->pipeline->lanes)
+    {
+        std::scoped_lock lane_lock{lane->mutex};
+        frame_depth += lane->frames.size();
+        frame_capacity += impl_->options.frame_queue_capacity;
+        frame_high_watermark += lane->frame_high_watermark;
+        submitted += lane->submitted_frames.load();
+        processed += lane->processed_frames.load();
+        skipped += lane->skipped_frames.load();
+        detector_failures += lane->detector_failures.load();
+        consecutive_failures =
+            std::max(consecutive_failures, lane->consecutive_detector_failures.load());
+        consecutive_backlogs =
+            std::max(consecutive_backlogs, lane->consecutive_backlog_events.load());
+        process_calls += lane->detector_process_calls.load();
+        last_processing = std::max(last_processing, lane->last_algorithm_processing_us.load());
+        total_processing += lane->total_algorithm_processing_us.load();
+        maximum_processing =
+            std::max(maximum_processing, lane->maximum_algorithm_processing_us.load());
+        result_rejected += lane->result_queue_rejected.load();
+        if (lane->degraded.load(std::memory_order_acquire))
+            ++degraded_lanes;
+    }
+    std::size_t result_depth{};
+    std::size_t result_high_watermark{};
+    {
+        std::scoped_lock result_lock{impl_->pipeline->result_mutex};
+        result_depth = impl_->pipeline->results.size();
+        result_high_watermark = impl_->pipeline->result_high_watermark;
+    }
     AlgorithmRuntimeState state = AlgorithmRuntimeState::disabled;
     if (impl_->pipeline->configuration.algorithm.enabled)
-        state = impl_->pipeline->degraded.load(std::memory_order_acquire)
-                    ? AlgorithmRuntimeState::manual_trigger_only
-                    : AlgorithmRuntimeState::active;
-    return {
-        .started = impl_->started,
-        .accepting = impl_->accepting,
-        .frame_queue_depth = impl_->frames.size(),
-        .frame_queue_capacity = impl_->options.frame_queue_capacity * impl_->pipeline->lanes.size(),
-        .frame_queue_high_watermark = impl_->frame_high_watermark,
-        .pending_events = impl_->pending.size(),
-        .submitted_frames = impl_->submitted_frames.load(),
-        .processed_frames = impl_->processed_frames.load(),
-        .rejected_frames = impl_->rejected_frames.load(),
-        .skipped_frames = impl_->skipped_frames.load(),
-        .detector_failures = impl_->detector_failures.load(),
-        .consecutive_detector_failures = impl_->consecutive_detector_failures.load(),
-        .consecutive_backlog_events = impl_->consecutive_backlog_events.load(),
-        .detector_process_calls = process_calls,
-        .last_algorithm_processing_time =
-            std::chrono::microseconds{impl_->last_algorithm_processing_us.load()},
-        .average_algorithm_processing_time =
-            std::chrono::microseconds{
-                process_calls == 0U ? 0
-                                    : total_processing / static_cast<std::int64_t>(process_calls)},
-        .maximum_algorithm_processing_time =
-            std::chrono::microseconds{impl_->maximum_algorithm_processing_us.load()},
-        .algorithm_state = state,
-        .events_started = impl_->events_started.load(),
-        .candidates_created = candidates.events_created,
-        .confirmed_events = candidates.confirmed_events,
-        .rejected_candidates = candidates.rejected_events,
-        .events_frozen = impl_->events_frozen.load(),
-        .events_committed = impl_->events_committed.load(),
-        .event_failures = impl_->event_failures.load()};
+    {
+        if (degraded_lanes == 0U)
+            state = AlgorithmRuntimeState::active;
+        else if (degraded_lanes == impl_->pipeline->lanes.size())
+            state = AlgorithmRuntimeState::manual_trigger_only;
+        else
+            state = AlgorithmRuntimeState::partially_degraded;
+    }
+    return {.started = impl_->started,
+            .accepting = impl_->accepting,
+            .frame_queue_depth = frame_depth,
+            .frame_queue_capacity = frame_capacity,
+            .frame_queue_high_watermark = frame_high_watermark,
+            .result_queue_depth = result_depth,
+            .result_queue_capacity = impl_->pipeline->result_capacity,
+            .result_queue_high_watermark = result_high_watermark,
+            .pending_events = impl_->pending.size(),
+            .submitted_frames = submitted,
+            .processed_frames = processed,
+            .rejected_frames = impl_->rejected_frames.load(),
+            .skipped_frames = skipped,
+            .detector_failures = detector_failures,
+            .consecutive_detector_failures = consecutive_failures,
+            .consecutive_backlog_events = consecutive_backlogs,
+            .detector_process_calls = process_calls,
+            .result_queue_rejected = result_rejected,
+            .last_algorithm_processing_time = std::chrono::microseconds{last_processing},
+            .average_algorithm_processing_time =
+                std::chrono::microseconds{process_calls == 0U
+                                              ? 0
+                                              : total_processing /
+                                                    static_cast<std::int64_t>(process_calls)},
+            .maximum_algorithm_processing_time = std::chrono::microseconds{maximum_processing},
+            .algorithm_state = state,
+            .events_started = impl_->events_started.load(),
+            .candidates_created = candidates.events_created,
+            .confirmed_events = candidates.confirmed_events,
+            .rejected_candidates = candidates.rejected_events,
+            .events_frozen = impl_->events_frozen.load(),
+            .events_committed = impl_->events_committed.load(),
+            .event_failures = impl_->event_failures.load()};
 }
 
 } // namespace paperbreak::service

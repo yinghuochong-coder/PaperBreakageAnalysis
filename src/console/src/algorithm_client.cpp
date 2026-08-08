@@ -100,6 +100,9 @@ AlgorithmRuntimeValue runtime_value(const Json& value)
             .detector_failures = metrics.value("detectorFailures", std::uint64_t{}),
             .consecutive_detector_failures =
                 metrics.value("consecutiveDetectorFailures", std::uint64_t{}),
+            .consecutive_backlog_events =
+                metrics.value("consecutiveBacklogEvents", std::uint64_t{}),
+            .result_queue_rejected = metrics.value("resultQueueRejected", std::uint64_t{}),
             .process_calls = metrics.value("processCalls", std::uint64_t{}),
             .last_processing_time_us = metrics.value("lastProcessingTimeUs", std::int64_t{}),
             .average_processing_time_us = metrics.value("averageProcessingTimeUs", std::int64_t{}),

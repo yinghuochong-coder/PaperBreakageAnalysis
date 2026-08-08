@@ -485,6 +485,8 @@ Json algorithm_runtime_json(const AlgorithmRuntimeSnapshot& value)
                   {"skippedFrames", metrics.skipped_frames},
                   {"detectorFailures", metrics.detector_failures},
                   {"consecutiveDetectorFailures", metrics.consecutive_detector_failures},
+                  {"consecutiveBacklogEvents", metrics.consecutive_backlog_events},
+                  {"resultQueueRejected", metrics.result_queue_rejected},
                   {"processCalls", metrics.detector_process_calls},
                   {"lastProcessingTimeUs", metrics.last_algorithm_processing_time.count()},
                   {"averageProcessingTimeUs", metrics.average_algorithm_processing_time.count()},

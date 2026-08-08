@@ -357,7 +357,7 @@ ProcessMain
 | IPC 事件线程 | 1 | 本机连接、解帧、请求关联和推送调度 |
 | 相机采集线程 | 每启用相机 1 个，最多 4 | 获取帧、复制/接管到池、填元数据、入队 |
 | 每相机预处理执行器 | 每启用相机 1 个，最多 4 | 保序预处理、内存缓存登记和分支路由 |
-| 算法工作线程 | 固定 1～配置上限 | 推理/检测；按相机序号恢复有序结果 |
+| 算法工作线程 | 每启用相机 1 个，最多 4 | 独占该相机的 `DetectorHost` 并串行检测；单 Lane 阻塞或降级不影响其他相机 |
 | 预览编码线程 | 固定 1～2 | 抽样、缩放、覆盖层和 JPEG |
 | 事件管理线程 | 1 | 候选状态、窗口租约、合并和事件状态串行化 |
 | 关键帧/事件写线程 | 固定有界，首期各 1 | 关键帧编码和事件事务写入 |
@@ -479,18 +479,24 @@ FrameBufferPool → FramePacket 元数据
 ### 9.2 算法与候选
 
 ```text
-algorithm.frames
+algorithm.frames[CAMxx]（每相机有界、drop-oldest）
       ▼
-IBreakDetector::process
+algorithm-worker-CAMxx（该 Lane 的 DetectorHost 串行调用）
       ▼
-DetectionResult（含 sequenceNumber、耗时、版本、原因）
+AlgorithmResultEnvelope（禁用、降级、失败和跳帧也产生时间推进信封）
       ▼
-按相机保序/缺口检测
+algorithm.results（全局有界 256，不阻塞 Lane）
+      ▼
+event-processing（单线程稳定排序和状态转换）
       ▼
 Idle → Suspicious → Candidate → Confirmed/Rejected/Timeout
                            │
                            └─ Candidate 时立即申请缓存窗口租约
 ```
+
+结果稳定顺序键为单调时间、相机 ID、序号。事件线程以所有 Lane 队列和在途帧中的最早单调时间作为安全水位，只提交水位之前的结果，避免慢 Lane 的旧结果在窗口已经冻结后到达。候选状态、跨相机合并窗口和冻结决策仍只由 `event-processing` 串行管理。`algorithm.results` 满载时拒绝来源结果、记录 `ALGORITHM_RESULT_QUEUE_FULL` 并立即把来源 Lane 降级为 `manual-trigger-only`；其他 Lane 保持自动检测。
+
+停止顺序固定为：禁止新提交，逐 Lane 排空并停止 worker，排空结果入口并冻结剩余窗口，随后关闭内存环、JPEG 和持久化运行时。重配置先构造完整检测器/Lane/队列，并创建停在启动门后的候选事件线程和 Lane worker；只有候选线程组全部准备成功，才排空旧线程组并切换。
 
 不得等到 Confirmed 才保护缓存。算法更新采用先初始化新实例、验证后原子切换；失败继续使用旧实例。
 

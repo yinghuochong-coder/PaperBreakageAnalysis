@@ -24,11 +24,13 @@ namespace paperbreak::service
 {
 
 inline constexpr std::size_t event_frame_queue_default_capacity = 8U;
+inline constexpr std::size_t algorithm_result_queue_default_capacity = 256U;
 
 enum class AlgorithmRuntimeState
 {
     disabled,
     active,
+    partially_degraded,
     manual_trigger_only,
 };
 
@@ -43,6 +45,7 @@ struct EventRuntimeOptions final
     std::shared_ptr<storage::NvmeRollingCache> nvme_cache;
     /// Per-camera algorithm frame capacity; total depth is bounded by this value times lanes.
     std::size_t frame_queue_capacity{event_frame_queue_default_capacity};
+    std::size_t result_queue_capacity{algorithm_result_queue_default_capacity};
     std::size_t persistence_capacity{8U};
     std::size_t consecutive_failure_limit{3U};
     std::size_t consecutive_backlog_limit{8U};
@@ -50,7 +53,32 @@ struct EventRuntimeOptions final
     std::function<void(const Error&)> error_observer;
     std::function<void(const storage::EventMetadataRecord&)> committed_observer;
     ThreadRegistrationFactory register_thread;
+    /// Test seam used to inject deterministic thread-creation failures before a thread is made.
+    std::function<Result<void>(std::string_view)> thread_start_gate;
+    /// Test seam used to hold the result consumer while exercising bounded overflow behavior.
+    std::function<void()> result_consumer_start_gate;
     DebugDiagnosticSink diagnostics;
+};
+
+struct AlgorithmLaneMetrics final
+{
+    std::size_t frame_queue_depth{};
+    std::size_t frame_queue_capacity{};
+    std::size_t frame_queue_high_watermark{};
+    std::uint64_t submitted_frames{};
+    std::uint64_t processed_frames{};
+    std::uint64_t skipped_frames{};
+    std::uint64_t detector_failures{};
+    std::uint64_t consecutive_detector_failures{};
+    std::uint64_t consecutive_backlog_events{};
+    std::uint64_t detector_process_calls{};
+    std::chrono::microseconds last_algorithm_processing_time{};
+    std::chrono::microseconds average_algorithm_processing_time{};
+    std::chrono::microseconds maximum_algorithm_processing_time{};
+    std::uint64_t result_queue_rejected{};
+    std::uint64_t candidates_created{};
+    std::uint64_t confirmed_events{};
+    std::uint64_t rejected_candidates{};
 };
 
 struct EventRuntimeSnapshot final
@@ -60,6 +88,9 @@ struct EventRuntimeSnapshot final
     std::size_t frame_queue_depth{};
     std::size_t frame_queue_capacity{};
     std::size_t frame_queue_high_watermark{};
+    std::size_t result_queue_depth{};
+    std::size_t result_queue_capacity{};
+    std::size_t result_queue_high_watermark{};
     std::size_t pending_events{};
     std::uint64_t submitted_frames{};
     std::uint64_t processed_frames{};
@@ -69,6 +100,7 @@ struct EventRuntimeSnapshot final
     std::uint64_t consecutive_detector_failures{};
     std::uint64_t consecutive_backlog_events{};
     std::uint64_t detector_process_calls{};
+    std::uint64_t result_queue_rejected{};
     std::chrono::microseconds last_algorithm_processing_time{};
     std::chrono::microseconds average_algorithm_processing_time{};
     std::chrono::microseconds maximum_algorithm_processing_time{};
@@ -90,7 +122,7 @@ struct AlgorithmRuntimeSnapshot final
     bool has_current_frame{};
     std::uint64_t latest_sequence_number{};
     std::optional<algorithm::DetectorInfo> detector_info;
-    EventRuntimeSnapshot metrics;
+    AlgorithmLaneMetrics metrics;
 };
 
 struct AlgorithmFrameTestResult final
@@ -135,6 +167,7 @@ class EventRuntime final
     [[nodiscard]] Result<void> reconfigure(const config::EdgeConfig& configuration);
     [[nodiscard]] Result<AlgorithmRuntimeSnapshot> algorithm_snapshot(
         std::string_view camera_id) const;
+    [[nodiscard]] std::vector<AlgorithmRuntimeSnapshot> algorithm_snapshots() const;
     [[nodiscard]] Result<AlgorithmFrameTestResult> test_current_frame(
         std::string_view camera_id) const;
     void request_stop() noexcept;

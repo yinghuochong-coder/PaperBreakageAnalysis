@@ -377,6 +377,8 @@ class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
                                            {"skippedFrames", 1},
                                            {"detectorFailures", 2},
                                            {"consecutiveDetectorFailures", 0},
+                                           {"consecutiveBacklogEvents", 3},
+                                           {"resultQueueRejected", 4},
                                            {"processCalls", 39},
                                            {"lastProcessingTimeUs", 100},
                                            {"averageProcessingTimeUs", 90},
@@ -1135,6 +1137,8 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
     EXPECT_TRUE(latest.runtime.has_current_frame);
     EXPECT_EQ(latest.runtime.metrics.queue_capacity, 8U);
     EXPECT_EQ(latest.runtime.metrics.maximum_processing_time_us, 180);
+    EXPECT_EQ(latest.runtime.metrics.consecutive_backlog_events, 3U);
+    EXPECT_EQ(latest.runtime.metrics.result_queue_rejected, 4U);
 
     auto changed = latest.configuration;
     changed.enabled = false;
@@ -1177,6 +1181,8 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
 
     ASSERT_TRUE(client.select_camera("CAM02"));
     ASSERT_TRUE(wait_until([&] { return !latest.stale && latest.runtime.camera_id == "CAM02"; }));
+    EXPECT_EQ(latest.runtime.metrics.consecutive_backlog_events, 3U);
+    EXPECT_EQ(latest.runtime.metrics.result_queue_rejected, 4U);
     auto invalid = client.select_camera("CAM99");
     ASSERT_FALSE(invalid);
     EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");

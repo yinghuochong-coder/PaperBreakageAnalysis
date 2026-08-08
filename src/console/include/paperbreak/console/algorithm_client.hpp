@@ -47,6 +47,8 @@ struct AlgorithmMetricValue final
     std::uint64_t skipped_frames{};
     std::uint64_t detector_failures{};
     std::uint64_t consecutive_detector_failures{};
+    std::uint64_t consecutive_backlog_events{};
+    std::uint64_t result_queue_rejected{};
     std::uint64_t process_calls{};
     std::int64_t last_processing_time_us{};
     std::int64_t average_processing_time_us{};

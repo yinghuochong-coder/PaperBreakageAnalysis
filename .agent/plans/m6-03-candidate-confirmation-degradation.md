@@ -172,3 +172,21 @@ git diff --check
 ## 完成摘要
 
 M6-03 已完成：候选确认合同、算法宿主接入、显式跳帧与计数、失败隔离、连续异常/积压降级、配置失败回滚以及实际监控指标均已实现并通过自动化验证。M6-00 仍为 blocked，classical 和阈值继续保留原型标记；未启动 M6-04。
+
+## 纠正实施记录：每相机独立算法 Lane（2026-08-08）
+
+- 状态：completed；本节仅追加纠正记录，不改写 2026-08-04 的历史验证证据。
+- 纠正原因：复核发现既有实现虽按相机计算队列容量，实际仍使用全局 deque、单一算法线程和全局降级/连续计数；`algorithm_snapshot(cameraId)` 也返回聚合指标，不满足单相机阻塞与故障隔离目标。
+- 已确认设计：每个启用相机独占有界 `algorithm.frames[CAMxx]`、串行 worker、DetectorHost、人工触发状态和指标；容量固定的 `algorithm.results` 由单一事件线程消费。结果按单调时间、相机 ID、序号稳定排序，以所有 Lane 队列/在途帧的最早单调时间为安全水位。
+- 生命周期约束：启动先创建事件线程、再创建 Lane worker，并在统一启动门前等待；任一候选线程准备失败即取消并回收已创建线程。停止先禁止提交并排空 Lane，再排空结果入口和冻结窗口，最后停止 JPEG/持久化。重配置完整构造候选检测器、Lane、队列和启动门后的线程组，成功后才排空旧线程组并切换。
+- 接口约束：新增 `partially-degraded`、逐 Lane 快照和结果入口指标；IPC 兼容现有 JSON 并追加 `consecutiveBacklogEvents`、`resultQueueRejected`；不修改配置 schema 或事件持久化格式。
+- 验证限制：只使用模拟检测器和内存帧；实体相机、目标工控机四路吞吐、冻结数据集准确率、PLC 和 7×24 小时测试仍未执行。
+
+### 纠正结果与验证证据
+
+- 已完成每启用相机独占 Lane、容量 256 的有界结果入口、安全水位排序、单线程事件处理、Lane 私有降级/连续计数、`partially-degraded` 聚合状态、启动/停止/重配置线程组切换、逐相机 IPC/Console/监控指标。
+- 8 项 `EventRuntimeLanes` 定向测试覆盖四路并行与相机内保序、单 Lane 积压隔离、逐 Lane 失败降级及人工触发、三种聚合状态与重配置恢复、安全水位、结果入口满载、线程准备失败回滚和重复启停；另更新 IPC、客户端状态及监控测试。
+- `EventRuntimeLanes.*` 在 Debug 下重复 20 轮，共 160 次定向测试全部通过。
+- `cmake --build --preset local-windows-vs2026-debug` 与 `ctest --preset local-windows-vs2026-debug --output-on-failure` 通过，CTest 28/28；Debug `PaperBreakTests` 共 364 项，其中 363 项通过、1 项硬件基线按设计跳过。
+- `cmake --build --preset local-windows-vs2026-release` 与 `ctest --preset local-windows-vs2026-release --output-on-failure` 通过，CTest 28/28；直接运行完整 Release `PaperBreakTests` 时发现既有 `UplinkSimulator.ServesSessionWebSocketPreviewAndPersistentResumableUpload` 时序波动，隔离重复 3 次为 2 次通过、1 次失败，不属于本次 Lane 改动。
+- `cmake --build --preset local-windows-vs2026-static-analysis --target paperbreak_service_core PaperBreakEdgeService PaperBreakEdgeConsole` 通过；任务 C++ 文件 clang-format 检查和 `git diff --check` 通过。

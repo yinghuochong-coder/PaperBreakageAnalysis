@@ -411,6 +411,8 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
     EXPECT_EQ(observed_json["runtime"]["state"], "disabled");
     EXPECT_FALSE(observed_json["runtime"]["hasCurrentFrame"].get<bool>());
     EXPECT_TRUE(observed_json["runtime"]["detector"].is_null());
+    EXPECT_EQ(observed_json["runtime"]["metrics"]["consecutiveBacklogEvents"], 0U);
+    EXPECT_EQ(observed_json["runtime"]["metrics"]["resultQueueRejected"], 0U);
 
     const Json algorithm{{"enabled", true},
                          {"type", "classical-vision"},

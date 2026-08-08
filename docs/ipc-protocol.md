@@ -363,10 +363,11 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 
 - `algorithm.getConfig`：payload 为 `{"cameraId":"CAM01"}`。返回完整保存配置
   `algorithm`、实际有效配置 `effectiveAlgorithm`、两项配置修订和 `runtime`。运行时包含实际
-  检测器信息、`active` / `disabled` / `manual-trigger-only` 状态、当前帧可用性及序号；
+  检测器信息、`active` / `partially-degraded` / `disabled` / `manual-trigger-only` 状态、当前帧可用性及序号；
   `metrics` 包含有界算法运行时的队列深度/容量/高水位、提交/处理/跳过/失败帧、处理调用与
-  最近/平均/最大耗时、候选/确认/拒绝计数。当前指标是共享算法事件运行时汇总，不伪装为单路
-  独立计数；禁用时 `detector` 为 `null`。
+  最近/平均/最大耗时、候选/确认/拒绝计数，并追加 `consecutiveBacklogEvents` 和
+  `resultQueueRejected`。状态和指标均来自请求 `cameraId` 对应的独立 Lane，不再返回共享汇总；
+  禁用时 `detector` 为 `null`。
 - `algorithm.updateConfig`：payload 必须且只能包含 `cameraId`、无符号
   `expectedConfigRevision` 和完整 `algorithm` 对象。服务复用严格 schema、乐观修订、原子
   保存、审计和事务式热应用；冲突返回 `SYS_CONFIG_VERSION_CONFLICT`，失败保留旧检测器和
