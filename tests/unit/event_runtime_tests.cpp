@@ -1199,7 +1199,7 @@ TEST(EventRuntimeLanes, PartialThreadPreparationFailureKeepsOldRuntimeActive)
          .database = shared_database,
          .detector_registry_configurer = controlled_detector_registration(behavior),
          .thread_start_gate = [&](const std::string_view name) {
-             if (fail_cam02.load() && name == "algorithm-worker-CAM02")
+             if (fail_cam02.load() && name == "algorithm-worker-cam02")
                  return Result<void>::failure(make_error("SYS_INTERNAL_ERROR", Severity::critical,
                                                          "注入的线程创建失败", "event",
                                                          "event.test.threadStart"));
@@ -1235,7 +1235,7 @@ TEST(EventRuntimeLanes, PartialThreadPreparationFailureKeepsOldRuntimeActive)
          .database = shared_database,
          .detector_registry_configurer = controlled_detector_registration(behavior),
          .thread_start_gate = [&](const std::string_view name) {
-             if (name == "algorithm-worker-CAM02")
+             if (name == "algorithm-worker-cam02")
                  return Result<void>::failure(make_error("SYS_INTERNAL_ERROR", Severity::critical,
                                                          "注入的线程创建失败", "event",
                                                          "event.test.threadStart"));
@@ -1252,6 +1252,8 @@ TEST(EventRuntimeLanes, RepeatedStartStopLeavesNoRegisteredRuntimeThreads)
 {
     TemporaryDirectory temporary;
     std::atomic_int alive_threads{};
+    std::mutex registration_names_mutex;
+    std::vector<std::string> registration_names;
     for (std::size_t iteration = 0U; iteration < 3U; ++iteration)
     {
         const auto root = temporary.path() / std::to_wstring(iteration);
@@ -1265,7 +1267,11 @@ TEST(EventRuntimeLanes, RepeatedStartStopLeavesNoRegisteredRuntimeThreads)
             EventRuntime::create({.configuration = runtime_config(),
                                   .event_root = root / "events",
                                   .database = shared_database,
-                                  .register_thread = [&](std::string_view) {
+                                  .register_thread = [&](const std::string_view name) {
+                                      {
+                                          std::scoped_lock lock{registration_names_mutex};
+                                          registration_names.emplace_back(name);
+                                      }
                                       return std::static_pointer_cast<void>(
                                           std::make_shared<ThreadRegistrationProbe>(alive_threads));
                                   }});
@@ -1276,6 +1282,9 @@ TEST(EventRuntimeLanes, RepeatedStartStopLeavesNoRegisteredRuntimeThreads)
         ASSERT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
         EXPECT_EQ(alive_threads.load(), 0);
     }
+    std::scoped_lock lock{registration_names_mutex};
+    EXPECT_EQ(std::ranges::count(registration_names, "event-processing"), 3);
+    EXPECT_EQ(std::ranges::count(registration_names, "algorithm-worker-cam01"), 3);
 }
 
 TEST(EventRuntimeLanes, PublishesAggregateAndPerCameraMonitoringMetrics)

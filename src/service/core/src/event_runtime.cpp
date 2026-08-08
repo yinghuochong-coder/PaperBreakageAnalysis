@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
@@ -56,6 +57,15 @@ std::filesystem::path path_from_utf8(const std::string_view value)
     for (const unsigned char byte : value)
         converted.push_back(static_cast<char8_t>(byte));
     return std::filesystem::path{converted};
+}
+
+std::string algorithm_worker_thread_name(const std::string_view camera_id)
+{
+    std::string camera_suffix{camera_id};
+    std::ranges::transform(camera_suffix, camera_suffix.begin(), [](const unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    return "algorithm-worker-" + camera_suffix;
 }
 
 std::filesystem::path resolve_config_path(const std::string_view value)
@@ -906,8 +916,9 @@ struct EventRuntimeImpl final
         if (!wait_for_start_gate(state))
             return;
         const auto registration =
-            options.register_thread ? options.register_thread("algorithm-worker-" + lane.camera_id)
-                                    : nullptr;
+            options.register_thread
+                ? options.register_thread(algorithm_worker_thread_name(lane.camera_id))
+                : nullptr;
         while (true)
         {
             std::optional<camera::FrameView> frame;
@@ -1082,7 +1093,7 @@ struct EventRuntimeImpl final
             state.event_worker = std::jthread{[this, &state] { run_events(state); }};
             for (auto& lane : state.lanes)
             {
-                const auto name = "algorithm-worker-" + lane->camera_id;
+                const auto name = algorithm_worker_thread_name(lane->camera_id);
                 allowed = allow_thread_start(name);
                 if (!allowed)
                 {

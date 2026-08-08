@@ -481,7 +481,7 @@ FrameBufferPool → FramePacket 元数据
 ```text
 algorithm.frames[CAMxx]（每相机有界、drop-oldest）
       ▼
-algorithm-worker-CAMxx（该 Lane 的 DetectorHost 串行调用）
+algorithm-worker-camxx（该 Lane 的 DetectorHost 串行调用；相机 ID 后缀转为小写以满足日志线程名约束）
       ▼
 AlgorithmResultEnvelope（禁用、降级、失败和跳帧也产生时间推进信封）
       ▼
