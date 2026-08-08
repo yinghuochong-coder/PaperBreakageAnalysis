@@ -16,10 +16,10 @@
     "modelReference": "",
     "modelVersion": "",
     "roi": {
-      "height": 1,
+      "height": 1240,
       "offsetX": 0,
       "offsetY": 0,
-      "width": 1
+      "width": 1624
     },
     "type": "classical-vision"
   },
