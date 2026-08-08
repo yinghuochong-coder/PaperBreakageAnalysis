@@ -2,6 +2,7 @@
 
 #include "paperbreak/camera/frame.hpp"
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/storage/nvme_index.hpp"
 #include "paperbreak/storage/nvme_recovery.hpp"
 #include "paperbreak/storage/storage_policy.hpp"
@@ -49,6 +50,8 @@ struct NvmeRollingCacheOptions final
     std::size_t queue_capacity_per_camera{nvme_default_queue_capacity_per_camera};
     std::vector<NvmeCameraLayout> cameras;
     std::function<void(const Error&)> error_observer;
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 struct NvmeBlock final

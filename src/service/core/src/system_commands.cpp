@@ -232,8 +232,29 @@ Json config_summary(const config::ConfigSnapshot& snapshot)
             {"recoveredFromHistory", snapshot.recovered_from_history}};
 }
 
+logging::Level configured_logging_level(const config::LogLevel level)
+{
+    switch (level)
+    {
+    case config::LogLevel::trace:
+        return logging::Level::trace;
+    case config::LogLevel::debug:
+        return logging::Level::debug;
+    case config::LogLevel::info:
+        return logging::Level::info;
+    case config::LogLevel::warning:
+        return logging::Level::warning;
+    case config::LogLevel::error:
+        return logging::Level::error;
+    case config::LogLevel::critical:
+        return logging::Level::critical;
+    }
+    return logging::Level::info;
+}
+
 Result<ipc::CommandResponse> status_response(config::ConfigRepository& repository,
-                                             const ServiceStatusStore& status_store)
+                                             const ServiceStatusStore& status_store,
+                                             const logging::LoggingRuntime* logging_runtime)
 {
     auto configuration = repository.snapshot();
     if (!configuration)
@@ -247,6 +268,10 @@ Result<ipc::CommandResponse> status_response(config::ConfigRepository& repositor
     payload["startedAt"] = status.started_at;
     payload["timestamp"] = current_utc_timestamp();
     payload["machineId"] = configuration.value().effective->system.machine_id;
+    payload["loggingLevel"] = std::string{
+        logging_runtime != nullptr ? logging::level_name(logging_runtime->minimum_level())
+                                   : logging::level_name(configured_logging_level(
+                                         configuration.value().effective->logging.level))};
     return Result<ipc::CommandResponse>::success({.payload_json = payload.dump(), .binary = {}});
 }
 
@@ -645,6 +670,7 @@ Json log_json(const logging::RecentLogRecord& record)
     return {{"sequence", record.sequence},
             {"timestamp", record.timestamp},
             {"threadId", record.thread_id},
+            {"threadName", record.thread_name},
             {"category", logging::category_name(record.category)},
             {"level", logging::level_name(record.level)},
             {"message", record.message}};
@@ -787,7 +813,8 @@ Result<ipc::CommandResponse> alarm_list_response(const Json& payload,
 Result<ipc::CommandResponse> log_tail_response(const Json& payload,
                                                const logging::LoggingRuntime& runtime)
 {
-    if (!has_only_fields(payload, {"afterSequence", "categories", "minimumLevel", "limit"}))
+    if (!has_only_fields(payload,
+                         {"afterSequence", "categories", "minimumLevel", "threadName", "limit"}))
     {
         return Result<ipc::CommandResponse>::failure(command_error(
             "IPC_REQUEST_INVALID", Severity::error, "log.tail 包含未知字段", "ipc.log.tail"));
@@ -834,6 +861,14 @@ Result<ipc::CommandResponse> log_tail_response(const Json& payload,
         if (!query.minimum_level.has_value())
             return Result<ipc::CommandResponse>::failure(command_error(
                 "IPC_REQUEST_INVALID", Severity::error, "minimumLevel 无效", "ipc.log.tail"));
+    }
+    if (payload.contains("threadName"))
+    {
+        if (!payload["threadName"].is_string() ||
+            !logging::valid_thread_name(payload["threadName"].get_ref<const std::string&>()))
+            return Result<ipc::CommandResponse>::failure(command_error(
+                "IPC_REQUEST_INVALID", Severity::error, "threadName 无效", "ipc.log.tail"));
+        query.thread_name = payload["threadName"].get<std::string>();
     }
     const auto result = runtime.tail(query);
     Json records = Json::array();
@@ -2379,7 +2414,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                 command_error("IPC_REQUEST_INVALID", Severity::error,
                               "system.getStatus payload 必须为空", "ipc.system.getStatus"));
         }
-        return status_response(repository_, *status_);
+        return status_response(repository_, *status_, logging_.get());
     }
     if (request.command == "system.getVersion")
     {

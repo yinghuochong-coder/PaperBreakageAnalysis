@@ -300,6 +300,8 @@ struct NvmeRollingCacheImpl final
 
     void run(const std::stop_token token) noexcept
     {
+        const auto thread_registration =
+            options.register_thread ? options.register_thread("nvme-writer") : nullptr;
         for (;;)
         {
             NvmeBlock block;
@@ -339,6 +341,14 @@ struct NvmeRollingCacheImpl final
                  .write_limit_bytes_per_second = options.write_limit_bytes_per_second,
                  .deadline = deadline},
                 token);
+            if (options.diagnostics.enabled && options.diagnostics.enabled() &&
+                options.diagnostics.record)
+                options.diagnostics.record(
+                    "operation=nvme.write cameraId=" + block.camera_id +
+                    " frameCount=" + std::to_string(block.frames.size()) +
+                    " bytes=" + std::to_string(physical.value()) +
+                    " result=" + (written ? "success" : "failure") +
+                    " businessCode=" + (written ? "OK" : written.error().business_code));
             if (!written)
             {
                 degrade(written.error());

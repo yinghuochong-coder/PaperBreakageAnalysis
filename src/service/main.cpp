@@ -230,6 +230,10 @@ class LoggingLifecycleComponent final : public paperbreak::service::ILifecycleCo
 
     [[nodiscard]] paperbreak::Result<void> start(std::stop_token) override
     {
+        auto registration = runtime_->register_current_thread("service-main");
+        if (!registration)
+            return paperbreak::Result<void>::failure(registration.error());
+        registration_ = std::move(registration).value();
         return runtime_->log(paperbreak::logging::Category::service,
                              paperbreak::logging::Level::info,
                              "PaperBreakEdgeService lifecycle started");
@@ -252,11 +256,13 @@ class LoggingLifecycleComponent final : public paperbreak::service::ILifecycleCo
         static_cast<void>(runtime_->log(paperbreak::logging::Category::service,
                                         paperbreak::logging::Level::info,
                                         "PaperBreakEdgeService lifecycle stopping"));
+        registration_.reset();
         return runtime_->shutdown();
     }
 
   private:
     std::shared_ptr<paperbreak::logging::LoggingRuntime> runtime_;
+    std::optional<paperbreak::logging::LoggingRuntime::ThreadRegistration> registration_;
 };
 
 class BufferedConfigAuditSink final : public paperbreak::config::IConfigAuditSink
@@ -574,8 +580,10 @@ class StorageMaintenanceLifecycleComponent final : public paperbreak::service::I
     StorageMaintenanceLifecycleComponent(
         std::shared_ptr<paperbreak::storage::StoragePolicyManager> manager,
         std::shared_ptr<paperbreak::monitoring::AlarmRegistry> alarms,
-        std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme)
-        : manager_(std::move(manager)), alarms_(std::move(alarms)), nvme_(std::move(nvme))
+        std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme,
+        paperbreak::ThreadRegistrationFactory register_thread)
+        : manager_(std::move(manager)), alarms_(std::move(alarms)), nvme_(std::move(nvme)),
+          register_thread_(std::move(register_thread))
     {
     }
 
@@ -616,6 +624,8 @@ class StorageMaintenanceLifecycleComponent final : public paperbreak::service::I
   private:
     void run(const std::stop_token token) noexcept
     {
+        const auto thread_registration =
+            register_thread_ ? register_thread_("storage-maintenance") : nullptr;
         while (!token.stop_requested())
         {
             auto maintenance = manager_->run_maintenance(std::chrono::system_clock::now());
@@ -663,6 +673,7 @@ class StorageMaintenanceLifecycleComponent final : public paperbreak::service::I
     std::shared_ptr<paperbreak::storage::StoragePolicyManager> manager_;
     std::shared_ptr<paperbreak::monitoring::AlarmRegistry> alarms_;
     std::weak_ptr<paperbreak::storage::NvmeRollingCache> nvme_;
+    paperbreak::ThreadRegistrationFactory register_thread_;
     std::mutex mutex_;
     std::condition_variable_any condition_;
     std::jthread worker_;
@@ -807,6 +818,8 @@ paperbreak::monitoring::HealthMonitorOptions monitoring_options_from_config(
     return options;
 }
 
+paperbreak::logging::Level logging_level_from_config(paperbreak::config::LogLevel level) noexcept;
+
 class MonitoringConfigApplier final : public paperbreak::config::IConfigApplier
 {
   public:
@@ -857,6 +870,96 @@ class MonitoringConfigApplier final : public paperbreak::config::IConfigApplier
     std::shared_ptr<paperbreak::monitoring::HealthMonitor> monitor_;
     std::optional<paperbreak::monitoring::HealthMonitorOptions> previous_;
     std::optional<paperbreak::monitoring::HealthMonitorOptions> candidate_;
+};
+
+class LoggingConfigApplier final : public paperbreak::config::IConfigApplier
+{
+  public:
+    explicit LoggingConfigApplier(std::shared_ptr<paperbreak::logging::LoggingRuntime> runtime)
+        : runtime_(std::move(runtime))
+    {
+    }
+
+    [[nodiscard]] std::string_view name() const noexcept override
+    {
+        return "logging";
+    }
+
+    [[nodiscard]] paperbreak::Result<void> prepare(
+        const paperbreak::config::EdgeConfig& current,
+        const paperbreak::config::EdgeConfig& candidate,
+        const std::vector<std::string>& changed_paths) override
+    {
+        relevant_ = std::ranges::find(changed_paths, "/logging/live") != changed_paths.end();
+        if (relevant_)
+        {
+            previous_level_ = logging_level_from_config(current.logging.level);
+            previous_retention_ = current.logging.retention_days;
+            candidate_level_ = logging_level_from_config(candidate.logging.level);
+            candidate_retention_ = candidate.logging.retention_days;
+        }
+        return paperbreak::Result<void>::success();
+    }
+
+    [[nodiscard]] paperbreak::Result<void> apply_and_readback(
+        const paperbreak::config::EdgeConfig&) override
+    {
+        if (!relevant_)
+            return paperbreak::Result<void>::success();
+        if (!candidate_level_ || !candidate_retention_)
+            return paperbreak::Result<void>::failure(paperbreak::make_error(
+                "SYS_CONFIG_APPLY_FAILED", paperbreak::Severity::error, "日志配置没有完成预应用",
+                "logging", "logging.config.apply"));
+        auto level = runtime_->set_minimum_level(*candidate_level_);
+        if (!level)
+            return level;
+        auto retention = runtime_->set_retention_days(*candidate_retention_);
+        if (!retention)
+            return retention;
+        if (runtime_->minimum_level() != *candidate_level_ ||
+            runtime_->retention_days() != *candidate_retention_)
+            return paperbreak::Result<void>::failure(
+                paperbreak::make_error("SYS_CONFIG_APPLY_FAILED", paperbreak::Severity::error,
+                                       "日志配置回读不一致", "logging", "logging.config.readback"));
+        return paperbreak::Result<void>::success();
+    }
+
+    [[nodiscard]] paperbreak::Result<void> commit(const paperbreak::config::EdgeConfig&) override
+    {
+        reset();
+        return paperbreak::Result<void>::success();
+    }
+
+    [[nodiscard]] paperbreak::Result<void> rollback(
+        const paperbreak::config::EdgeConfig& previous) noexcept override
+    {
+        if (!relevant_)
+            return paperbreak::Result<void>::success();
+        const auto level =
+            previous_level_.value_or(logging_level_from_config(previous.logging.level));
+        const auto retention = previous_retention_.value_or(previous.logging.retention_days);
+        auto result = runtime_->set_minimum_level(level);
+        auto retention_result = runtime_->set_retention_days(retention);
+        reset();
+        return !result ? result : retention_result;
+    }
+
+  private:
+    void reset() noexcept
+    {
+        relevant_ = false;
+        previous_level_.reset();
+        previous_retention_.reset();
+        candidate_level_.reset();
+        candidate_retention_.reset();
+    }
+
+    std::shared_ptr<paperbreak::logging::LoggingRuntime> runtime_;
+    bool relevant_{};
+    std::optional<paperbreak::logging::Level> previous_level_;
+    std::optional<std::uint32_t> previous_retention_;
+    std::optional<paperbreak::logging::Level> candidate_level_;
+    std::optional<std::uint32_t> candidate_retention_;
 };
 
 class EventConfigApplier final : public paperbreak::config::IConfigApplier
@@ -1655,6 +1758,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     }
 
     paperbreak::logging::LoggingConfig log_config;
+    log_config.file_stem = "paperbreak-service";
     log_config.directory =
         resolve_config_path(config_path, loaded.value().effective->logging.directory);
     log_config.max_file_size_bytes =
@@ -1663,6 +1767,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     log_config.max_files_per_day = loaded.value().effective->logging.maximum_files_per_day;
     log_config.queue_capacity = loaded.value().effective->logging.queue_capacity;
     log_config.minimum_level = logging_level_from_config(loaded.value().effective->logging.level);
+    log_config.retention_days = loaded.value().effective->logging.retention_days;
     auto logging_result = paperbreak::logging::LoggingRuntime::create(log_config);
     if (!logging_result)
     {
@@ -1671,6 +1776,34 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     }
 
     std::shared_ptr<paperbreak::logging::LoggingRuntime> logging{std::move(logging_result).value()};
+    const paperbreak::ThreadRegistrationFactory service_thread_registrar =
+        [weak_logging = std::weak_ptr<paperbreak::logging::LoggingRuntime>{logging}](
+            const std::string_view name) -> std::shared_ptr<void> {
+        const auto runtime = weak_logging.lock();
+        if (!runtime)
+            return {};
+        auto registration = runtime->register_current_thread(name);
+        if (!registration)
+            return {};
+        return std::make_shared<paperbreak::logging::LoggingRuntime::ThreadRegistration>(
+            std::move(registration).value());
+    };
+    const auto debug_diagnostics =
+        [weak_logging = std::weak_ptr<paperbreak::logging::LoggingRuntime>{logging}](
+            const paperbreak::logging::Category category) {
+            return paperbreak::DebugDiagnosticSink{
+                .enabled =
+                    [weak_logging] {
+                        const auto runtime = weak_logging.lock();
+                        return runtime && runtime->enabled(paperbreak::logging::Level::debug);
+                    },
+                .record =
+                    [weak_logging, category](std::string message) {
+                        if (const auto runtime = weak_logging.lock())
+                            static_cast<void>(
+                                runtime->log(category, paperbreak::logging::Level::debug, message));
+                    }};
+        };
     auto audit_attach = configuration->audit.attach(logging);
     if (!audit_attach)
     {
@@ -1771,29 +1904,31 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                  std::chrono::milliseconds{
                      loaded.value().effective->storage.rolling_cache_io_timeout_ms},
              .cameras = std::move(layouts),
-             .error_observer = [weak_event_alarms,
-                                weak_event_logging](const paperbreak::Error& error) {
-                 if (auto alarm_registry = weak_event_alarms.lock())
-                 {
-                     static_cast<void>(
-                         alarm_registry->raise_alarm({.code = error.business_code,
-                                                      .severity = error.severity,
-                                                      .source = error.source_id.value_or("nvme"),
-                                                      .message = error.message,
-                                                      .details = error.details}));
-                 }
-                 if (auto log_runtime = weak_event_logging.lock())
-                 {
-                     static_cast<void>(
-                         log_runtime->log(paperbreak::logging::Category::storage,
-                                          error.severity == paperbreak::Severity::critical
-                                              ? paperbreak::logging::Level::critical
-                                          : error.severity == paperbreak::Severity::warning
-                                              ? paperbreak::logging::Level::warning
-                                              : paperbreak::logging::Level::error,
-                                          error.business_code + ": " + error.message));
-                 }
-             }});
+             .error_observer =
+                 [weak_event_alarms, weak_event_logging](const paperbreak::Error& error) {
+                     if (auto alarm_registry = weak_event_alarms.lock())
+                     {
+                         static_cast<void>(alarm_registry->raise_alarm(
+                             {.code = error.business_code,
+                              .severity = error.severity,
+                              .source = error.source_id.value_or("nvme"),
+                              .message = error.message,
+                              .details = error.details}));
+                     }
+                     if (auto log_runtime = weak_event_logging.lock())
+                     {
+                         static_cast<void>(
+                             log_runtime->log(paperbreak::logging::Category::storage,
+                                              error.severity == paperbreak::Severity::critical
+                                                  ? paperbreak::logging::Level::critical
+                                              : error.severity == paperbreak::Severity::warning
+                                                  ? paperbreak::logging::Level::warning
+                                                  : paperbreak::logging::Level::error,
+                                              error.business_code + ": " + error.message));
+                     }
+                 },
+             .register_thread = service_thread_registrar,
+             .diagnostics = debug_diagnostics(paperbreak::logging::Category::storage)});
         if (!cache_result)
         {
             static_cast<void>(logging->shutdown());
@@ -1813,7 +1948,8 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                  std::chrono::milliseconds{loaded.value().effective->uplink.io_timeout_ms},
              .chunk_bytes = loaded.value().effective->uplink.chunk_bytes,
              .upload_limit_bytes_per_second =
-                 loaded.value().effective->uplink.upload_limit_mibps * 1024ULL * 1024ULL});
+                 loaded.value().effective->uplink.upload_limit_mibps * 1024ULL * 1024ULL,
+             .register_thread = service_thread_registrar});
         if (!transport_result)
         {
             static_cast<void>(logging->shutdown());
@@ -1835,7 +1971,10 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                     executor.error());
         }
         auto scheduler_result = paperbreak::uplink::PersistentUploadScheduler::create(
-            event_database, {}, std::move(executor).value());
+            event_database,
+            {.register_thread = service_thread_registrar,
+             .diagnostics = debug_diagnostics(paperbreak::logging::Category::uplink)},
+            std::move(executor).value());
         if (!scheduler_result)
         {
             static_cast<void>(logging->shutdown());
@@ -1940,7 +2079,9 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                                           error.business_code + ": " + error.message));
                  }
              },
-         .committed_observer = enqueue_event_for_upload});
+         .committed_observer = enqueue_event_for_upload,
+         .register_thread = service_thread_registrar,
+         .diagnostics = debug_diagnostics(paperbreak::logging::Category::algorithm)});
     if (!event_runtime_result)
     {
         static_cast<void>(logging->shutdown());
@@ -1968,7 +2109,9 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                 .frames_per_second = loaded.value().effective->preview.fps,
                 .encoding = {.maximum_width = loaded.value().effective->preview.max_width,
                              .maximum_height = loaded.value().effective->preview.max_height,
-                             .jpeg_quality = loaded.value().effective->preview.jpeg_quality}};
+                             .jpeg_quality = loaded.value().effective->preview.jpeg_quality},
+                .register_thread = service_thread_registrar};
+            preview_options.diagnostics = debug_diagnostics(paperbreak::logging::Category::ipc);
             preview = std::make_shared<paperbreak::pipeline::PreviewRuntime>(
                 std::move(camera_ids), paperbreak::pipeline::make_opencv_preview_encoder(),
                 [preview_publisher](paperbreak::pipeline::PreviewDelivery delivery) {
@@ -1984,16 +2127,33 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         .frame_pool_capacity = loaded.value().effective->acquisition.frame_pool_capacity,
         .queue_capacity = loaded.value().effective->acquisition.queue_capacity,
         .receive_timeout =
-            std::chrono::milliseconds{loaded.value().effective->acquisition.receive_timeout_ms}};
+            std::chrono::milliseconds{loaded.value().effective->acquisition.receive_timeout_ms},
+        .register_thread = service_thread_registrar};
+    delivery_options.diagnostics = debug_diagnostics(paperbreak::logging::Category::camera);
     cameras = std::make_shared<paperbreak::camera::CameraControlRuntime>(
         std::move(camera_provider),
-        [weak_preview, weak_event_runtime, weak_nvme_cache](paperbreak::camera::FrameView frame) {
+        [weak_preview, weak_event_runtime, weak_nvme_cache,
+         weak_event_logging](paperbreak::camera::FrameView frame) {
+            const std::string camera_id = frame.camera_id();
+            const auto sequence_number = frame.sequence_number();
+            bool event_accepted = false;
+            bool nvme_accepted = false;
+            const bool preview_accepted = !weak_preview.expired();
             if (auto runtime = weak_event_runtime.lock())
-                static_cast<void>(runtime->submit_frame(frame));
+                event_accepted = static_cast<bool>(runtime->submit_frame(frame));
             if (auto runtime = weak_nvme_cache.lock())
-                static_cast<void>(runtime->submit_frame(frame));
+                nvme_accepted = static_cast<bool>(runtime->submit_frame(frame));
             if (auto runtime = weak_preview.lock())
                 runtime->submit(std::move(frame), {.camera_status = "acquiring"});
+            if (const auto log_runtime = weak_event_logging.lock();
+                log_runtime && log_runtime->enabled(paperbreak::logging::Level::debug))
+                static_cast<void>(log_runtime->log(
+                    paperbreak::logging::Category::camera, paperbreak::logging::Level::debug,
+                    "operation=frame.forward cameraId=" + camera_id +
+                        " sequenceNumber=" + std::to_string(sequence_number) +
+                        " eventAccepted=" + (event_accepted ? "true" : "false") +
+                        " nvmeAccepted=" + (nvme_accepted ? "true" : "false") +
+                        " previewAccepted=" + (preview_accepted ? "true" : "false")));
         },
         delivery_options);
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
@@ -2005,17 +2165,20 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         const auto machine_id = loaded.value().effective->system.machine_id;
         const auto production_line_id = loaded.value().effective->system.production_line_id;
         paperbreak::uplink::UplinkRuntimeConfig runtime_config{
-            .session_hello = {
-                .request_id = "session-" + machine_id,
-                .machine_id = machine_id,
-                .production_line_id = production_line_id,
-                .software_version = std::string{paperbreak::version_info().application_version},
-                .supported_protocol_versions = {paperbreak::uplink::protocol_version},
-                .capabilities = {"system.requestStatus", "config.replace", "event.review",
-                                 "event.retryUpload", "camera.discover", "camera.bind",
-                                 "camera.connect", "camera.disconnect", "camera.start",
-                                 "camera.stop", "camera.updateConfig", "camera.captureSnapshot",
-                                 "camera.softwareTrigger"}}};
+            .session_hello = {.request_id = "session-" + machine_id,
+                              .machine_id = machine_id,
+                              .production_line_id = production_line_id,
+                              .software_version =
+                                  std::string{paperbreak::version_info().application_version},
+                              .supported_protocol_versions = {paperbreak::uplink::protocol_version},
+                              .capabilities = {"system.requestStatus", "config.replace",
+                                               "event.review", "event.retryUpload",
+                                               "camera.discover", "camera.bind", "camera.connect",
+                                               "camera.disconnect", "camera.start", "camera.stop",
+                                               "camera.updateConfig", "camera.captureSnapshot",
+                                               "camera.softwareTrigger"}},
+            .register_thread = service_thread_registrar,
+            .diagnostics = debug_diagnostics(paperbreak::logging::Category::uplink)};
         auto runtime_result = paperbreak::uplink::UplinkRuntime::create(
             uplink_transport, std::move(runtime_config),
             [status, event_database] {
@@ -2044,12 +2207,18 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         uplink_runtime =
             std::shared_ptr<paperbreak::uplink::UplinkRuntime>{std::move(runtime_result).value()};
     }
-    auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(commands);
+    paperbreak::ipc::IpcServerOptions ipc_options;
+    ipc_options.register_thread = service_thread_registrar;
+    ipc_options.diagnostics = debug_diagnostics(paperbreak::logging::Category::ipc);
+    auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(
+        commands, paperbreak::ipc::make_windows_peer_authorizer(), std::move(ipc_options));
     if (preview_publisher)
         preview_publisher->set_server(ipc_server);
 
+    auto monitoring_options = monitoring_options_from_config(*loaded.value().effective);
+    monitoring_options.register_thread = service_thread_registrar;
     auto monitor = std::make_shared<paperbreak::monitoring::HealthMonitor>(
-        metrics, alarms, monitoring_options_from_config(*loaded.value().effective));
+        metrics, alarms, std::move(monitoring_options));
     auto system_volume = paperbreak::platform::windows_system_volume();
     if (!system_volume)
     {
@@ -2082,8 +2251,18 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         }
     }
 
+    auto logging_applier = std::make_shared<LoggingConfigApplier>(logging);
+    auto registered_applier = configuration->repository.register_applier(*logging_applier);
+    if (!registered_applier)
+    {
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(registered_applier.error());
+    }
+    configuration->dynamic_appliers.push_back(logging_applier);
+
     auto monitoring_applier = std::make_shared<MonitoringConfigApplier>(monitor);
-    auto registered_applier = configuration->repository.register_applier(*monitoring_applier);
+    registered_applier = configuration->repository.register_applier(*monitoring_applier);
     if (!registered_applier)
     {
         static_cast<void>(logging->shutdown());
@@ -2138,8 +2317,8 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     components.push_back(std::make_unique<EventLifecycleComponent>(event_runtime));
     if (nvme_cache)
         components.push_back(std::make_unique<NvmeLifecycleComponent>(nvme_cache));
-    components.push_back(
-        std::make_unique<StorageMaintenanceLifecycleComponent>(storage_policy, alarms, nvme_cache));
+    components.push_back(std::make_unique<StorageMaintenanceLifecycleComponent>(
+        storage_policy, alarms, nvme_cache, service_thread_registrar));
     components.push_back(std::make_unique<IpcLifecycleComponent>(ipc_server));
     if (uplink_runtime && upload_scheduler)
         components.push_back(

@@ -87,11 +87,38 @@ int main(int argc, char* argv[])
 
     paperbreak::logging::LoggingConfig log_config;
     log_config.directory = std::filesystem::temp_directory_path() / "PaperBreakEdge" / "logs";
+    log_config.file_stem = "paperbreak-console";
     auto logging_result = paperbreak::logging::LoggingRuntime::create(log_config);
     if (!logging_result)
         return 1;
     auto logging = std::move(logging_result).value();
     auto* const logging_runtime = logging.get();
+    auto gui_registration_result = logging->register_current_thread("console-gui");
+    if (!gui_registration_result)
+    {
+        static_cast<void>(logging->shutdown());
+        return 1;
+    }
+    auto gui_registration = std::move(gui_registration_result).value();
+    const paperbreak::ThreadRegistrationFactory register_thread =
+        [logging_runtime](const std::string_view name) -> std::shared_ptr<void> {
+        auto registration = logging_runtime->register_current_thread(name);
+        if (!registration)
+            return {};
+        return std::make_shared<paperbreak::logging::LoggingRuntime::ThreadRegistration>(
+            std::move(registration).value());
+    };
+    paperbreak::ipc::IpcClientOptions console_ipc_options;
+    console_ipc_options.diagnostics = {
+        .enabled =
+            [logging_runtime] {
+                return logging_runtime->enabled(paperbreak::logging::Level::debug);
+            },
+        .record =
+            [logging_runtime](std::string message) {
+                static_cast<void>(logging_runtime->log(paperbreak::logging::Category::ipc,
+                                                       paperbreak::logging::Level::debug, message));
+            }};
 
     std::unique_ptr<paperbreak::console::PreviewClient> preview_client;
     std::unique_ptr<paperbreak::console::CameraClient> camera_client;
@@ -311,7 +338,8 @@ int main(int argc, char* argv[])
     preview_client = std::make_unique<paperbreak::console::PreviewClient>(
         [&main_window](const paperbreak::console::PreviewSnapshot& snapshot) {
             main_window.apply_preview_snapshot(snapshot);
-        });
+        },
+        console_ipc_options);
     camera_client = std::make_unique<paperbreak::console::CameraClient>(
         [&main_window, &preview_client](const paperbreak::console::CameraClientSnapshot& snapshot) {
             main_window.apply_camera_snapshot(snapshot);
@@ -321,29 +349,35 @@ int main(int argc, char* argv[])
                 camera_ids.push_back(camera.id);
             if (preview_client && !camera_ids.empty())
                 preview_client->set_camera_ids(std::move(camera_ids));
-        });
+        },
+        console_ipc_options);
     if (!smoke_test)
     {
         operations_client = std::make_unique<paperbreak::console::OperationsClient>(
             [&main_window](const paperbreak::console::OperationsSnapshot& snapshot) {
                 main_window.apply_operations_snapshot(snapshot);
-            });
+            },
+            console_ipc_options, register_thread);
         algorithm_client = std::make_unique<paperbreak::console::AlgorithmClient>(
             [&main_window](const paperbreak::console::AlgorithmClientSnapshot& snapshot) {
                 main_window.apply_algorithm_snapshot(snapshot);
-            });
+            },
+            console_ipc_options);
         event_client = std::make_unique<paperbreak::console::EventClient>(
             [&main_window](const paperbreak::console::EventClientSnapshot& snapshot) {
                 main_window.apply_event_snapshot(snapshot);
-            });
+            },
+            console_ipc_options, register_thread);
         storage_client = std::make_unique<paperbreak::console::StorageClient>(
             [&main_window](const paperbreak::console::StorageClientSnapshot& snapshot) {
                 main_window.apply_storage_snapshot(snapshot);
-            });
+            },
+            console_ipc_options);
         uplink_client = std::make_unique<paperbreak::console::UplinkClient>(
             [&main_window](const paperbreak::console::UplinkClientSnapshot& snapshot) {
                 main_window.apply_uplink_snapshot(snapshot);
-            });
+            },
+            console_ipc_options);
     }
     paperbreak::console::ClientStateSnapshot latest_snapshot;
     std::atomic_bool restart_running{};
@@ -376,6 +410,12 @@ int main(int argc, char* argv[])
                     restart_task.join();
                 restart_task = std::jthread([&application, &main_window, &restart_running,
                                              logging_runtime](const std::stop_token stop_token) {
+                    auto thread_registration_result =
+                        logging_runtime->register_current_thread("console-service-restart");
+                    std::optional<paperbreak::logging::LoggingRuntime::ThreadRegistration>
+                        thread_registration;
+                    if (thread_registration_result)
+                        thread_registration = std::move(thread_registration_result).value();
                     auto api = paperbreak::service::windows::make_windows_service_manager_api();
                     paperbreak::service::windows::ServiceManager manager{*api};
                     auto result = std::make_shared<paperbreak::Result<void>>(
@@ -439,9 +479,16 @@ int main(int argc, char* argv[])
     paperbreak::console::ClientStateStore state_store(
         [&](const paperbreak::console::ClientStateSnapshot& snapshot) {
             latest_snapshot = snapshot;
+            if (snapshot.service_status)
+            {
+                if (const auto level =
+                        paperbreak::logging::parse_level(snapshot.service_status->logging_level))
+                    static_cast<void>(logging_runtime->set_minimum_level(*level));
+            }
             tray.apply_snapshot(snapshot);
             main_window.apply_snapshot(snapshot);
-        });
+        },
+        console_ipc_options);
     tray.apply_snapshot(state_store.snapshot());
     main_window.apply_snapshot(state_store.snapshot());
     auto client_start = state_store.start();

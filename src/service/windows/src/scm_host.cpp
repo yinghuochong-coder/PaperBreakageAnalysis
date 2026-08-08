@@ -142,6 +142,8 @@ class PendingStatusPulse final
   public:
     PendingStatusPulse(ScmStatusModel& model, StatusReporter& reporter)
         : model_(model), reporter_(reporter), thread_([this](const std::stop_token token) {
+              static_cast<void>(
+                  ::SetThreadDescription(::GetCurrentThread(), L"service-scm-status"));
               std::unique_lock lock{mutex_};
               while (!token.stop_requested())
               {

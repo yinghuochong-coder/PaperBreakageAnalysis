@@ -209,6 +209,16 @@ class IpcClient::Impl final : public QObject
                          Pending{.handle = handle,
                                  .deadline = std::chrono::steady_clock::now() + timeout,
                                  .completion = std::move(completion)});
+        if (options_.diagnostics.enabled && options_.diagnostics.enabled() &&
+            options_.diagnostics.record)
+        {
+            options_.diagnostics.record(
+                "operation=console.ipc.send operationType=" + request.command + " correlationId=" +
+                request.request_id + " jsonBytes=" + std::to_string(request.payload_json.size()) +
+                " binaryBytes=" + std::to_string(request.binary.size()) +
+                " frameBytes=" + std::to_string(bytes.value().size()) +
+                " queueDepth=" + std::to_string(pending_.size()) + " result=accepted");
+        }
         schedule_request_timer();
         return Result<ClientRequestHandle>::success(std::move(handle));
     }
@@ -442,6 +452,35 @@ class IpcClient::Impl final : public QObject
                 {
                     protocol_failure(message.error());
                     return;
+                }
+                if (options_.diagnostics.enabled && options_.diagnostics.enabled() &&
+                    options_.diagnostics.record)
+                {
+                    std::string correlation_id;
+                    std::string operation_type;
+                    std::size_t json_bytes = 0U;
+                    std::size_t binary_bytes = 0U;
+                    if (std::holds_alternative<ResponseMessage>(message.value()))
+                    {
+                        const auto& response = std::get<ResponseMessage>(message.value());
+                        correlation_id = response.request_id;
+                        operation_type = "response";
+                        json_bytes = response.payload_json.size();
+                        binary_bytes = response.binary.size();
+                    }
+                    else
+                    {
+                        const auto& push = std::get<PushMessage>(message.value());
+                        correlation_id = push.coalescing_key;
+                        operation_type = push.event_name;
+                        json_bytes = push.payload_json.size();
+                        binary_bytes = push.binary.size();
+                    }
+                    options_.diagnostics.record(
+                        "operation=console.ipc.decode operationType=" + operation_type +
+                        " correlationId=" + correlation_id +
+                        " jsonBytes=" + std::to_string(json_bytes) +
+                        " binaryBytes=" + std::to_string(binary_bytes) + " decodeResult=success");
                 }
                 reset_backoff();
                 if (std::holds_alternative<ResponseMessage>(message.value()))

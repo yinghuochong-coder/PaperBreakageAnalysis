@@ -564,3 +564,17 @@ EventRuntime::submit_frame
 8. `src/ipc/src/server.cpp`、`src/uplink/src/runtime.cpp`：最后看外部交互和线程隔离。
 
 这样阅读时，先建立“谁拥有谁、谁启动谁、帧在哪里换线程”的骨架，再进入配置 schema、具体算法、MVS SDK 或协议编码细节，会更容易保持全局方向。
+
+## 12. 线程命名与逐帧诊断
+
+所有项目拥有的工作线程通过组合根注入的 `ThreadRegistrationFactory` 在入口注册并持有 RAII
+对象。固定名称为：主线程 `service-main`；IPC 的 `ipc-event`/`ipc-command`；每相机
+`camera-acquisition-camNN`、`camera-forward-camNN`；事件的 `event-processing`、
+`event-keyframe`、`event-persistence`；预览、NVMe、维护、上行、上传和健康线程分别为
+`preview-encoder`、`nvme-writer`、`storage-maintenance`、`uplink-session`、
+`uplink-transport`、`upload-scheduler`、`health-monitor`。通用每相机预处理器使用
+`pipeline-processing-<camera-id>`。新增线程必须继续采用“模块-功能-实例”规则，不得绕过注册。
+
+逐帧诊断通过 `DebugDiagnosticSink` 依赖注入，业务模块不直接依赖 spdlog。调用方必须先执行
+`enabled()`，只在 Debug 有效时构造帧、队列、检测、编码、事件、存储、IPC 或上行字段；禁止把
+图像内容、完整正文或凭据写入日志。日志后台线程是唯一执行文件 I/O 和轮转的线程。

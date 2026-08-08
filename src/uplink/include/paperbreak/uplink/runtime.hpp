@@ -1,5 +1,6 @@
 #pragma once
 
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/uplink/transport.hpp"
 
 #include <chrono>
@@ -48,6 +49,8 @@ struct UplinkRuntimeConfig final
     std::size_t command_queue_byte_capacity{8U * 1024U * 1024U};
     std::size_t command_deduplication_capacity{1024U};
     std::size_t command_deduplication_byte_capacity{16U * 1024U * 1024U};
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 struct UplinkRuntimeSnapshot final

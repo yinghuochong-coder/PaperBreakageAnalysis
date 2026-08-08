@@ -4,6 +4,7 @@
 #include "paperbreak/camera/frame_pool.hpp"
 #include "paperbreak/camera/state.hpp"
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -95,6 +96,8 @@ struct AcquisitionWorkerOptions final
     std::chrono::milliseconds statistics_window{std::chrono::seconds{1}};
     std::size_t consecutive_timeout_limit{3U};
     std::optional<std::chrono::milliseconds> software_trigger_interval;
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 struct AcquisitionWorkerSnapshot final
@@ -170,6 +173,7 @@ struct RecoveringCameraSessionOptions final
     std::chrono::milliseconds statistics_window{std::chrono::seconds{1}};
     std::size_t consecutive_timeout_limit{3U};
     ReconnectPolicy reconnect_policy;
+    ThreadRegistrationFactory register_thread;
 };
 
 struct RecoveringCameraSessionSnapshot final

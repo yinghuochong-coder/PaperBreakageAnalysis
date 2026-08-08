@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/storage/metadata_database.hpp"
 
 #include <chrono>
@@ -40,6 +41,8 @@ struct PersistentUploadSchedulerConfig final
     std::chrono::milliseconds idle_poll_interval{std::chrono::seconds{1}};
     double jitter_ratio{0.2};
     std::uint32_t maximum_attempts{10U};
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 enum class PersistentUploadSchedulerState

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 
 #include <chrono>
 #include <condition_variable>
@@ -194,6 +195,7 @@ struct HealthMonitorOptions final
     double memory_warning_percent{85.0};
     std::vector<DiskThreshold> disks;
     std::size_t source_capacity{default_metric_source_capacity};
+    ThreadRegistrationFactory register_thread;
 };
 
 class HealthMonitor final

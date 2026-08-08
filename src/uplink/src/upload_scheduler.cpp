@@ -160,6 +160,8 @@ struct PersistentUploadScheduler::Impl final
 
     void run() noexcept
     {
+        const auto thread_registration =
+            config.register_thread ? config.register_thread("upload-scheduler") : nullptr;
         try
         {
             auto recovered = database->recover_upload_jobs(now_utc_ms());
@@ -209,7 +211,22 @@ struct PersistentUploadScheduler::Impl final
                         outcome.error_code = "UPLOAD_TRANSFER_INTERRUPTED";
                     }
                 }
+                const auto disposition = outcome.disposition;
+                const std::string error_code = outcome.error_code;
                 persist_outcome(job, std::move(outcome));
+                if (config.diagnostics.enabled && config.diagnostics.enabled() &&
+                    config.diagnostics.record)
+                {
+                    config.diagnostics.record(
+                        "operation=upload.execute jobId=" + std::to_string(job.job_id) +
+                        " eventId=" + job.event_id.value_or("") +
+                        " bytes=" + std::to_string(job.upload_bytes) +
+                        " attempt=" + std::to_string(job.attempts) + " disposition=" +
+                        std::to_string(static_cast<int>(disposition)) + " result=" +
+                        (disposition == UploadAttemptDisposition::succeeded ? "success"
+                                                                            : "failure") +
+                        " businessCode=" + (error_code.empty() ? "OK" : error_code));
+                }
                 {
                     std::lock_guard lock{mutex};
                     metrics.active_job_id = 0;

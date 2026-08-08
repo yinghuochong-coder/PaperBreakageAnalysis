@@ -2,11 +2,12 @@
 
 #include "paperbreak/camera/frame.hpp"
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 
 #include <atomic>
 #include <chrono>
-#include <cstddef>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -79,6 +80,8 @@ struct PreviewRuntimeOptions final
     PreviewEncodeOptions encoding;
     std::size_t maximum_cameras{preview_maximum_cameras};
     std::size_t maximum_subscriptions{preview_maximum_subscriptions};
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 struct PreviewRuntimeSnapshot final

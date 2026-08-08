@@ -1118,6 +1118,8 @@ struct EventPersistenceRuntime::Impl final
 
     void run() noexcept
     {
+        const auto thread_registration =
+            options.register_thread ? options.register_thread("event-persistence") : nullptr;
         for (;;)
         {
             std::unique_ptr<Job> job;
@@ -1132,6 +1134,10 @@ struct EventPersistenceRuntime::Impl final
             }
 
             EventPersistenceCompletion completion{.event_id = job->request.metadata.event_id};
+            std::size_t frame_count = 0U;
+            for (const auto& camera_window : job->request.window.camera_windows)
+                frame_count += camera_window.frames.size();
+            const std::size_t key_frame_count = job->request.key_frames.size();
             try
             {
                 auto result = writer->persist(job->request);
@@ -1152,6 +1158,18 @@ struct EventPersistenceRuntime::Impl final
                 ++write_failures;
                 completion.error = event_error("EVENT_WRITE_FAILED", Severity::critical,
                                                "事件写入器抛出异常", "event.persist.worker", true);
+            }
+
+            const bool failed = completion.error.has_value();
+            const std::string business_code = failed ? completion.error->business_code : "OK";
+            if (options.diagnostics.enabled && options.diagnostics.enabled() &&
+                options.diagnostics.record)
+            {
+                options.diagnostics.record(
+                    "operation=event.persist eventId=" + completion.event_id +
+                    " frameCount=" + std::to_string(frame_count) +
+                    " keyFrameCount=" + std::to_string(key_frame_count) + " result=" +
+                    (failed ? "failure" : "success") + " businessCode=" + business_code);
             }
 
             try

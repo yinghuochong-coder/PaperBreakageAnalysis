@@ -1,5 +1,6 @@
 #pragma once
 
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/uplink/transport.hpp"
 #include "paperbreak/uplink/upload_scheduler.hpp"
 
@@ -22,6 +23,7 @@ struct QtUplinkTransportConfig final
     std::chrono::milliseconds io_timeout{std::chrono::seconds{10}};
     std::uint32_t chunk_bytes{default_upload_chunk_bytes};
     std::uint64_t upload_limit_bytes_per_second{default_upload_limit_bytes_per_second};
+    ThreadRegistrationFactory register_thread;
 };
 
 /// Production Uplink v1 adapter backed by Qt Network and Qt WebSockets.

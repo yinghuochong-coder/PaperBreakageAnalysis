@@ -54,10 +54,11 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
   public:
     StatusHandler(std::string state, std::string machine,
                   const std::uint64_t malformed_metrics_responses = 0U,
-                  const bool malformed_locations = false)
+                  const bool malformed_locations = false,
+                  std::optional<std::string> logging_level = std::nullopt)
         : state_(std::move(state)), machine_(std::move(machine)),
           malformed_metrics_responses_(malformed_metrics_responses),
-          malformed_locations_(malformed_locations)
+          malformed_locations_(malformed_locations), logging_level_(std::move(logging_level))
     {
     }
 
@@ -114,11 +115,14 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
                                                       : R"({"eventRoot":"C:/PaperBreak/events"})",
                  .binary = {}});
         }
+        nlohmann::json status{{"serviceState", state_},
+                              {"machineId", machine_},
+                              {"timestamp", "2026-08-01T12:00:00.123Z"},
+                              {"acceptingWrites", true}};
+        if (logging_level_)
+            status["loggingLevel"] = *logging_level_;
         return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
-            {.payload_json = "{\"serviceState\":\"" + state_ + "\",\"machineId\":\"" + machine_ +
-                             "\",\"timestamp\":\"2026-08-01T12:00:00.123Z\","
-                             "\"acceptingWrites\":true}",
-             .binary = {}});
+            {.payload_json = status.dump(), .binary = {}});
     }
 
   private:
@@ -126,6 +130,7 @@ class StatusHandler final : public paperbreak::ipc::IRequestHandler
     std::string machine_;
     std::uint64_t malformed_metrics_responses_{};
     bool malformed_locations_{};
+    std::optional<std::string> logging_level_;
     std::atomic_uint64_t metrics_requests_{};
     std::atomic_uint64_t alarm_requests_{};
 
@@ -681,6 +686,7 @@ TEST(ClientStateStore, SynchronizesMarksStaleAndRefreshesAfterReconnect)
         << ", outbound=" << first->metrics_snapshot().outbound_messages;
     EXPECT_EQ(latest.service_status->service_state, "running");
     EXPECT_EQ(latest.service_status->machine_id, "EDGE-01");
+    EXPECT_EQ(latest.service_status->logging_level, "info");
     EXPECT_EQ(latest.version->application_version, "4.1.0");
     EXPECT_DOUBLE_EQ(latest.metrics->process_cpu_percent.value(), 12.5);
     EXPECT_DOUBLE_EQ(latest.metrics->system_memory_used_percent.value(), 48.0);
@@ -726,8 +732,8 @@ TEST(ClientStateStore, SynchronizesMarksStaleAndRefreshesAfterReconnect)
     EXPECT_TRUE(latest.locations_stale);
 
     auto second = std::make_unique<paperbreak::ipc::IpcServer>(
-        std::make_shared<StatusHandler>("degraded", "EDGE-01"), std::make_unique<StateAuthorizer>(),
-        server_options(name));
+        std::make_shared<StatusHandler>("degraded", "EDGE-01", 0U, false, std::string{"debug"}),
+        std::make_unique<StateAuthorizer>(), server_options(name));
     ASSERT_TRUE(second->start());
     ASSERT_TRUE(wait_until([&] {
         const bool ready = latest.service_status.has_value() && !latest.service_status_stale &&
@@ -739,6 +745,7 @@ TEST(ClientStateStore, SynchronizesMarksStaleAndRefreshesAfterReconnect)
         return ready;
     }));
     EXPECT_EQ(latest.service_status->service_state, "degraded");
+    EXPECT_EQ(latest.service_status->logging_level, "debug");
 
     store.stop();
     stop_server(*second);

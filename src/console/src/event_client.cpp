@@ -98,7 +98,11 @@ class EventClient::FileExporter final
   public:
     using Completion = std::function<void(Result<std::filesystem::path>)>;
 
-    FileExporter() : worker_([this](const std::stop_token token) { run(token); }) {}
+    explicit FileExporter(ThreadRegistrationFactory register_thread)
+        : register_thread_(std::move(register_thread)),
+          worker_([this](const std::stop_token token) { run(token); })
+    {
+    }
     ~FileExporter()
     {
         stop();
@@ -188,6 +192,8 @@ class EventClient::FileExporter final
 
     void run(const std::stop_token token)
     {
+        const auto thread_registration =
+            register_thread_ ? register_thread_("console-event-export") : nullptr;
         while (!token.stop_requested())
         {
             std::optional<Job> job;
@@ -214,11 +220,14 @@ class EventClient::FileExporter final
     std::condition_variable_any condition_;
     std::optional<Job> job_;
     bool stopped_{};
+    ThreadRegistrationFactory register_thread_;
     std::jthread worker_;
 };
 
-EventClient::EventClient(EventClientObserver observer, ipc::IpcClientOptions options)
-    : observer_(std::move(observer)), exporter_(std::make_unique<FileExporter>()),
+EventClient::EventClient(EventClientObserver observer, ipc::IpcClientOptions options,
+                         ThreadRegistrationFactory register_thread)
+    : observer_(std::move(observer)),
+      exporter_(std::make_unique<FileExporter>(std::move(register_thread))),
       alive_(std::make_shared<std::atomic_bool>(true))
 {
     client_ = std::make_unique<ipc::IpcClient>(

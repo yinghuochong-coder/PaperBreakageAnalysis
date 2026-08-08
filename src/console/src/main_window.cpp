@@ -2162,7 +2162,10 @@ void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
         const int row = static_cast<int>(index);
         set_table_item(log_table_, row, 0, QString::number(record.sequence));
         set_table_item(log_table_, row, 1, local_date_time_text(record.timestamp));
-        set_table_item(log_table_, row, 2, QString::number(record.thread_id));
+        set_table_item(log_table_, row, 2,
+                       QStringLiteral("%1（%2）")
+                           .arg(QString::fromStdString(record.thread_name),
+                                QString::number(record.thread_id)));
         set_table_item(log_table_, row, 3, QString::fromStdString(record.category));
         set_table_item(log_table_, row, 4, QString::fromStdString(record.level));
         set_table_item(log_table_, row, 5, QString::fromStdString(record.message));

@@ -22,6 +22,8 @@ struct CameraFrameDeliveryOptions final
     std::size_t frame_pool_capacity{8U};
     std::size_t queue_capacity{4U};
     std::chrono::milliseconds receive_timeout{250};
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 enum class CameraControlState

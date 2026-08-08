@@ -246,6 +246,7 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     EXPECT_EQ(status_json.at("configSchemaVersion"), 2);
     EXPECT_EQ(status_json.at("storedConfigRevision"), 1);
     EXPECT_FALSE(status_json.at("machineId").get<std::string>().empty());
+    EXPECT_EQ(status_json.at("loggingLevel"), "info");
 
     auto version = fixture.commands.handle(fixture.request("system.getVersion"), reader, {});
     ASSERT_TRUE(version);
@@ -1146,8 +1147,12 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToAcknowledgeAlarm)
     auto created = paperbreak::logging::LoggingRuntime::create(log_config);
     ASSERT_TRUE(created);
     std::shared_ptr<paperbreak::logging::LoggingRuntime> logging{std::move(created).value()};
-    ASSERT_TRUE(logging->log(paperbreak::logging::Category::service,
-                             paperbreak::logging::Level::warning, "recent marker"));
+    {
+        auto registration = logging->register_current_thread("service-main");
+        ASSERT_TRUE(registration);
+        ASSERT_TRUE(logging->log(paperbreak::logging::Category::service,
+                                 paperbreak::logging::Level::warning, "recent marker"));
+    }
     ASSERT_TRUE(logging->shutdown());
 
     paperbreak::service::SystemCommandService commands{fixture.repository, fixture.status, metrics,
@@ -1174,11 +1179,16 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToAcknowledgeAlarm)
     EXPECT_TRUE(Json::parse(acknowledged.value().payload_json).at("acknowledged").get<bool>());
 
     auto logs = commands.handle(
-        fixture.request("log.tail", R"({"categories":["service"],"limit":10})"), reader, {});
+        fixture.request("log.tail",
+                        R"({"categories":["service"],"threadName":"service-main","limit":10})"),
+        reader, {});
     ASSERT_TRUE(logs);
     const Json log_tail = Json::parse(logs.value().payload_json);
-    ASSERT_EQ(log_tail.at("records").size(), 1U);
-    EXPECT_EQ(log_tail.at("records").front().at("message"), "recent marker");
+    const auto marker = std::ranges::find_if(log_tail.at("records"), [](const auto& record) {
+        return record.at("message") == "recent marker";
+    });
+    ASSERT_NE(marker, log_tail.at("records").end());
+    EXPECT_EQ(marker->at("threadName"), "service-main");
 
     auto invalid = commands.handle(fixture.request("alarm.list", R"({"limit":201})"), reader, {});
     ASSERT_FALSE(invalid);
@@ -1191,6 +1201,7 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToAcknowledgeAlarm)
         {"alarm.list", R"({"minimumSeverity":"warning"})"},
         {"log.tail", R"({"afterSequence":-1})"},
         {"log.tail", R"({"categories":["unknown"]})"},
+        {"log.tail", R"({"threadName":"Invalid_Name"})"},
         {"log.tail", R"({"limit":0})"},
         {"alarm.acknowledge",
          acknowledge_payload.substr(0, acknowledge_payload.size() - 1U) + R"(,"extra":true})"}};

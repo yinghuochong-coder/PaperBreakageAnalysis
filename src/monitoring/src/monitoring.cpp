@@ -538,6 +538,8 @@ Result<void> HealthMonitor::reconfigure(HealthMonitorOptions options)
                                                       "新的指标源容量小于当前注册数量",
                                                       "monitoring.health.reconfigure"));
     }
+    if (!options.register_thread)
+        options.register_thread = options_.register_thread;
     options_ = std::move(options);
     ++configuration_generation_;
     condition_.notify_all();
@@ -616,6 +618,12 @@ Result<void> HealthMonitor::join(const std::chrono::steady_clock::time_point dea
 
 void HealthMonitor::run(const std::stop_token stop_token) noexcept
 {
+    ThreadRegistrationFactory registrar;
+    {
+        std::scoped_lock lock{mutex_};
+        registrar = options_.register_thread;
+    }
+    const auto thread_registration = registrar ? registrar("health-monitor") : nullptr;
     while (!stop_token.stop_requested())
     {
         sample_once(stop_token);

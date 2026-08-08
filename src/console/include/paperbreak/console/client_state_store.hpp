@@ -18,6 +18,7 @@ struct ServiceStatusSummary final
     std::string service_state;
     std::string machine_id;
     std::string service_timestamp;
+    std::string logging_level{"info"};
     bool accepting_writes{};
     std::uint64_t generation{};
 };

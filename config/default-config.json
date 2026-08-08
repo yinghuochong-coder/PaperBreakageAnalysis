@@ -68,7 +68,7 @@
   },
   "logging": {
     "directory": "data/logs",
-    "level": "info",
+    "level": "debug",
     "maximumFileSizeMiB": 10,
     "maximumFilesPerDay": 5,
     "queueCapacity": 8192,

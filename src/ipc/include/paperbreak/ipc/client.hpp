@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/ipc/protocol.hpp"
 
 #include <chrono>
@@ -61,6 +62,7 @@ struct IpcClientOptions final
     std::chrono::milliseconds maximum_reconnect_delay{std::chrono::seconds{10}};
     std::chrono::milliseconds stable_connection_reset{std::chrono::seconds{5}};
     double reconnect_jitter_fraction{0.20};
+    DebugDiagnosticSink diagnostics;
 };
 
 class IpcClient final

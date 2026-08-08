@@ -345,6 +345,12 @@ struct QtUplinkTransport::Impl final
               [this](const MessageEnvelope& command) { dispatch_command(command); }))
     {
         websocket_worker->moveToThread(&websocket_thread);
+        QObject::connect(&websocket_thread, &QThread::started, [this] {
+            websocket_thread_registration =
+                config.register_thread ? config.register_thread("uplink-transport") : nullptr;
+        });
+        QObject::connect(&websocket_thread, &QThread::finished,
+                         [this] { websocket_thread_registration.reset(); });
         websocket_thread.start();
     }
 
@@ -373,6 +379,7 @@ struct QtUplinkTransport::Impl final
     CommandHandler command_handler;
     mutable std::mutex websocket_call_mutex;
     QThread websocket_thread;
+    std::shared_ptr<void> websocket_thread_registration;
     std::unique_ptr<WebSocketWorker> websocket_worker;
     mutable std::mutex http_call_mutex;
     mutable std::mutex reply_mutex;

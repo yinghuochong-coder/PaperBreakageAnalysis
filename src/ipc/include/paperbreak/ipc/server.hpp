@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/ipc/protocol.hpp"
 
 #include <chrono>
@@ -62,6 +63,8 @@ struct IpcServerOptions final
     std::chrono::milliseconds incomplete_frame_timeout{std::chrono::seconds{5}};
     std::chrono::milliseconds startup_timeout{std::chrono::seconds{5}};
     std::chrono::milliseconds shutdown_flush_timeout{std::chrono::milliseconds{250}};
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 struct IpcServerMetrics final

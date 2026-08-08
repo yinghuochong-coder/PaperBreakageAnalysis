@@ -2,6 +2,7 @@
 
 #include "paperbreak/camera/frame.hpp"
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/event/event_window.hpp"
 #include "paperbreak/event/key_frame.hpp"
 
@@ -199,6 +200,8 @@ using EventPersistenceCallback = std::function<void(EventPersistenceCompletion)>
 struct EventPersistenceRuntimeOptions final
 {
     std::size_t event_capacity{event_persist_default_capacity};
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 struct EventPersistenceRuntimeSnapshot final

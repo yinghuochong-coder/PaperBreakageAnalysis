@@ -535,3 +535,13 @@ sequenceDiagram
 8. [tests/unit/client_state_store_tests.cpp](../../tests/unit/client_state_store_tests.cpp)、[tests/unit/ipc_client_tests.cpp](../../tests/unit/ipc_client_tests.cpp) 和 [tests/unit/system_command_tests.cpp](../../tests/unit/system_command_tests.cpp)：用测试确认重连、协议、各领域 DTO 和服务命令语义。
 
 调试某个按钮时，最短定位方法是：先在 `main_window.cpp` 搜索控件的 `objectName` 或按钮文本，找到其 `QObject::connect` lambda；再查对应 `UiActions` 字段、领域客户端公共方法、IPC 命令字符串和 `SystemCommandService::handle_with_source()` 的同名分支。
+
+## 13. 线程日志
+
+控制台自有线程固定命名为 `console-gui`、`console-service-restart`、
+`console-event-export` 和 `console-diagnostics-export`，均在入口注册逻辑名称并同步 Windows 线程描述。
+控制台日志按线程写入
+`%TEMP%\PaperBreakEdge\logs\paperbreak-console-<thread-name>-YYYY-MM-DD.log[.N]`。
+
+连接后从 `system.getStatus.loggingLevel` 同步最低等级；旧服务缺少字段或首次连接前使用 `info`，
+断线时保留最后有效值。`log.tail` 可按 `threadName` 过滤，日志页面显示“线程名（线程 ID）”。

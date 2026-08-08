@@ -339,6 +339,8 @@ struct KeyFrameJpegRuntime::Impl final
 
     void run() noexcept
     {
+        const auto thread_registration =
+            options.register_thread ? options.register_thread("event-keyframe") : nullptr;
         for (;;)
         {
             std::unique_ptr<Job> job;
@@ -373,6 +375,10 @@ struct KeyFrameJpegRuntime::Impl final
             }
 
             const bool failed = output.error.has_value();
+            const std::size_t jpeg_bytes = output.jpeg.size();
+            const std::string camera_id = output.descriptor.camera_id;
+            const auto sequence_number = output.descriptor.sequence_number;
+            const std::string event_id = output.event_id;
             try
             {
                 callback(std::move(output));
@@ -387,6 +393,15 @@ struct KeyFrameJpegRuntime::Impl final
                 ++completed;
                 if (failed)
                     ++encoding_failures;
+            }
+            if (options.diagnostics.enabled && options.diagnostics.enabled() &&
+                options.diagnostics.record)
+            {
+                options.diagnostics.record("operation=event.keyframe eventId=" + event_id +
+                                           " cameraId=" + camera_id +
+                                           " sequenceNumber=" + std::to_string(sequence_number) +
+                                           " jpegBytes=" + std::to_string(jpeg_bytes) +
+                                           " result=" + (failed ? "failure" : "success"));
             }
         }
         {

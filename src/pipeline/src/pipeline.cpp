@@ -1,6 +1,7 @@
 #include "paperbreak/pipeline/pipeline.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -420,6 +421,14 @@ const std::string& PerCameraProcessor::camera_id() const noexcept
 
 void PerCameraProcessor::run(const std::stop_token stop_token) noexcept
 {
+    std::string thread_camera_id = options_.camera_id;
+    std::ranges::transform(
+        thread_camera_id, thread_camera_id.begin(),
+        [](const unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    const auto thread_registration =
+        options_.register_thread
+            ? options_.register_thread("pipeline-processing-" + thread_camera_id)
+            : std::shared_ptr<void>{};
     std::uint64_t previous_sequence = 0U;
     try
     {

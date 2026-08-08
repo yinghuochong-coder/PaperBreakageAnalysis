@@ -896,12 +896,24 @@ timestamp         墙上时间
 ### 17.3 日志
 
 - 分类：service、camera、algorithm、event、storage、uplink、ipc、ui、audit、performance；
-- 异步、有界、按日期和大小滚动；
+- 单一 `logging-worker` 异步线程、有界队列和 `overrun_oldest` 策略；业务线程只入队，不执行文件 I/O、轮转或刷新；
+- 每个已注册功能线程分别按本地日期和大小滚动。服务文件为 `paperbreak-service-<thread-name>-YYYY-MM-DD.log[.N]`，控制台文件为 `paperbreak-console-<thread-name>-YYYY-MM-DD.log[.N]`；同名线程的后续实例在同一天继续追加；
+- 进程内功能线程名必须唯一，只含小写字母、数字和连字符且不超过 63 字符。非法、重复、未注册或超过 64 个文件状态的写入进入 `unregistered-thread-<tid>` 应急文件并产生错误记录；
 - 日志后台线程同时维护默认 2048 条的结构化近期日志环；IPC 查询只复制有界内存快照，不读取滚动文件；
-- 每条含时间、线程、模块、业务码和关联 ID；
-- 高频帧不逐帧写普通日志，改用指标和限频摘要；
+- 文件和近期日志使用带本地偏移的 RFC 3339 毫秒时间；事件、配置等领域时间继续使用 UTC；
+- 每条含逻辑线程名、线程 ID、模块、业务码和关联 ID；结构化扩展字段最多 16 个；
+- `info` 是生产默认等级。逐帧数据流只允许写 `debug`，通过默认空操作的诊断回调注入且先检查等级，禁止记录原始图像、完整网络正文或凭据；
 - 关键事件有独立事件日志；
 - 诊断包使用一致快照并脱敏。
+
+服务固定线程名包括 `service-main`、`ipc-event`、`ipc-command`、每相机的
+`camera-acquisition-cam01`～`cam04` 和 `camera-forward-cam01`～`cam04`、
+`event-processing`、`event-keyframe`、`event-persistence`、`preview-encoder`、
+`nvme-writer`、`storage-maintenance`、`uplink-session`、`uplink-transport`、
+`upload-scheduler`、`health-monitor`。控制台固定线程名为 `console-gui`、
+`console-service-restart`、`console-event-export` 和 `console-diagnostics-export`。
+其他自有线程按“模块-功能-实例”命名并在入口用 RAII 注册，同时同步 Windows 线程描述。
+SCM 启停阶段的 `service-scm-status` 在线程日志运行时创建之前工作，只设置 Windows 原生描述且不写业务日志。
 
 ## 18. 目录结构
 

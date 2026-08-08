@@ -2,6 +2,7 @@
 
 #include "paperbreak/camera/frame.hpp"
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/event/event_window.hpp"
 
 #include <chrono>
@@ -151,6 +152,8 @@ struct KeyFrameJpegRuntimeOptions final
 {
     std::size_t job_capacity{key_frame_default_job_capacity};
     KeyFrameJpegEncodeOptions encoding;
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 struct KeyFrameJpegRuntimeSnapshot final

@@ -1,6 +1,7 @@
 #include "paperbreak/camera/acquisition.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <exception>
 #include <stdexcept>
 #include <utility>
@@ -271,6 +272,13 @@ AcquisitionWorkerSnapshot AcquisitionWorker::snapshot() const
 
 void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
 {
+    std::string camera_suffix = options_.camera_id;
+    std::ranges::transform(camera_suffix, camera_suffix.begin(), [](const unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    const auto thread_registration =
+        options_.register_thread ? options_.register_thread("camera-acquisition-" + camera_suffix)
+                                 : nullptr;
     std::uint64_t sequence_number = 0U;
     std::uint64_t previous_camera_frame_number = 0U;
     std::uint64_t window_frames = 0U;
@@ -416,7 +424,28 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
                                .pixel_format = metadata.pixel_format,
                                .buffer = std::move(acquired.buffer),
                                .flags = metadata.flags};
-            if (queue_.push(std::move(packet)) == FrameEnqueueStatus::closed)
+            const auto frame_bytes = packet.buffer ? packet.buffer->size() : 0U;
+            const auto enqueue_status = queue_.push(std::move(packet));
+            if (options_.diagnostics.enabled && options_.diagnostics.enabled() &&
+                options_.diagnostics.record)
+            {
+                const auto queue_snapshot = queue_.snapshot();
+                options_.diagnostics.record(
+                    "operation=frame.acquire cameraId=" + options_.camera_id +
+                    " frameNumber=" + std::to_string(metadata.camera_frame_number) +
+                    " sequenceNumber=" + std::to_string(sequence_number) +
+                    " width=" + std::to_string(metadata.geometry.width) +
+                    " height=" + std::to_string(metadata.geometry.height) +
+                    " stride=" + std::to_string(metadata.geometry.stride) +
+                    " validBytes=" + std::to_string(frame_bytes) + " incomplete=" +
+                    (metadata.flags.incomplete ? "true" : "false") + " enqueueResult=" +
+                    (enqueue_status == FrameEnqueueStatus::enqueued ? "accepted"
+                     : enqueue_status == FrameEnqueueStatus::enqueued_after_dropping_oldest
+                         ? "accepted-drop-oldest"
+                         : "closed") +
+                    " queueDepth=" + std::to_string(queue_snapshot.depth));
+            }
+            if (enqueue_status == FrameEnqueueStatus::closed)
             {
                 break;
             }
@@ -595,6 +624,13 @@ bool RecoveringCameraSession::recover_from(Error error, std::string reason,
 
 void RecoveringCameraSession::run(const std::stop_token stop_token) noexcept
 {
+    std::string camera_suffix = options_.camera_id;
+    std::ranges::transform(camera_suffix, camera_suffix.begin(), [](const unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    const auto thread_registration =
+        options_.register_thread ? options_.register_thread("camera-session-" + camera_suffix)
+                                 : nullptr;
     try
     {
         if (!controller_.transition_to(CameraState::connecting, "session-start"))

@@ -708,6 +708,14 @@ struct EventRuntimeImpl final
         }
         else if (detection)
         {
+            if (options.diagnostics.enabled && options.diagnostics.enabled() &&
+                options.diagnostics.record)
+                options.diagnostics.record(
+                    "operation=algorithm.detect result=success cameraId=" + frame.camera_id() +
+                    " sequenceNumber=" + std::to_string(frame.sequence_number()) +
+                    " durationUs=" + std::to_string(detection->value().processing_time.count()) +
+                    " confidence=" + std::to_string(detection->value().confidence) + " candidate=" +
+                    (detection->value().triggered ? "true" : "false") + " businessCode=OK");
             consecutive_detector_failures.store(0U);
             auto candidate = pipeline->candidates->process(detection->value());
             if (!candidate)
@@ -774,6 +782,8 @@ struct EventRuntimeImpl final
 
     void run(const std::stop_token token)
     {
+        const auto thread_registration =
+            options.register_thread ? options.register_thread("event-processing") : nullptr;
         while (true)
         {
             std::optional<camera::FrameView> frame;
@@ -836,7 +846,9 @@ Result<std::shared_ptr<EventRuntime>> EventRuntime::create(EventRuntimeOptions o
         [raw](storage::EventPersistenceCompletion completion) {
             raw->persistence_completed(std::move(completion));
         },
-        {.event_capacity = impl->options.persistence_capacity});
+        {.event_capacity = impl->options.persistence_capacity,
+         .register_thread = impl->options.register_thread,
+         .diagnostics = impl->options.diagnostics});
     if (!persistence_runtime)
         return Result<std::shared_ptr<EventRuntime>>::failure(
             std::move(persistence_runtime).error());
@@ -844,7 +856,9 @@ Result<std::shared_ptr<EventRuntime>> EventRuntime::create(EventRuntimeOptions o
     auto jpeg = event::KeyFrameJpegRuntime::create(
         event::make_opencv_key_frame_jpeg_encoder(),
         [raw](event::KeyFrameEncodingResult result) { raw->jpeg_completed(std::move(result)); },
-        {.job_capacity = event::key_frame_default_job_capacity});
+        {.job_capacity = event::key_frame_default_job_capacity,
+         .register_thread = impl->options.register_thread,
+         .diagnostics = impl->options.diagnostics});
     if (!jpeg)
         return Result<std::shared_ptr<EventRuntime>>::failure(std::move(jpeg).error());
     impl->jpeg = std::move(jpeg).value();

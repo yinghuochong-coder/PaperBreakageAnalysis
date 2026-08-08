@@ -259,6 +259,21 @@ struct UplinkRuntime::Impl final
                 return;
             ++metrics.commands_received;
             const std::size_t bytes = envelope_bytes(command);
+            const std::string message_id = command.message_id;
+            const std::string message_type = command.message_type;
+            const std::size_t json_bytes = command.payload_json.size();
+            const auto diagnose = [&](const std::string_view result) {
+                if (config.diagnostics.enabled && config.diagnostics.enabled() &&
+                    config.diagnostics.record)
+                {
+                    config.diagnostics.record("operation=uplink.enqueue operationType=" +
+                                              message_type + " correlationId=" + message_id +
+                                              " jsonBytes=" + std::to_string(json_bytes) +
+                                              " envelopeBytes=" + std::to_string(bytes) +
+                                              " queueDepth=" + std::to_string(commands.size()) +
+                                              " result=" + std::string{result});
+                }
+            };
             if (command.payload_json.empty() ||
                 command.payload_json.size() > maximum_json_message_bytes ||
                 bytes > config.command_queue_byte_capacity)
@@ -266,6 +281,7 @@ struct UplinkRuntime::Impl final
                 ++metrics.command_queue_rejections;
                 ++metrics.commands_rejected;
                 metrics.last_error_code = "UPLINK_PROTOCOL_ERROR";
+                diagnose("invalid");
                 return;
             }
             if (commands.size() >= config.command_queue_capacity ||
@@ -274,6 +290,7 @@ struct UplinkRuntime::Impl final
                 ++metrics.command_queue_rejections;
                 ++metrics.commands_rejected;
                 metrics.last_error_code = "UPLINK_SERVER_BUSY";
+                diagnose("rejected");
                 return;
             }
             command_bytes += bytes;
@@ -284,6 +301,7 @@ struct UplinkRuntime::Impl final
                 std::max(metrics.command_queue_high_watermark, commands.size());
             metrics.command_queue_byte_high_watermark =
                 std::max(metrics.command_queue_byte_high_watermark, command_bytes);
+            diagnose("accepted");
             condition.notify_all();
         }
         catch (...)
@@ -553,6 +571,15 @@ struct UplinkRuntime::Impl final
         }
 
         auto outcome = execute_command(parsed.value());
+        if (config.diagnostics.enabled && config.diagnostics.enabled() && config.diagnostics.record)
+        {
+            config.diagnostics.record(
+                "operation=uplink.command operationType=" + parsed.value().command_type +
+                " correlationId=" + parsed.value().command_id +
+                " jsonBytes=" + std::to_string(parsed.value().body_json.size()) +
+                " decodeResult=success result=" + (outcome ? "success" : "failure") +
+                " businessCode=" + (outcome ? "OK" : outcome.error().business_code));
+        }
         {
             std::lock_guard lock{mutex};
             if (outcome)
@@ -577,6 +604,8 @@ struct UplinkRuntime::Impl final
 
     void run() noexcept
     {
+        const auto thread_registration =
+            config.register_thread ? config.register_thread("uplink-session") : nullptr;
         auto reconnect_delay = config.initial_reconnect_delay;
         try
         {

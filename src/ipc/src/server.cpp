@@ -410,6 +410,8 @@ class IpcServer::Impl final
 
     void run_event_thread()
     {
+        const auto thread_registration =
+            options_.register_thread ? options_.register_thread("ipc-event") : nullptr;
         QObject dispatcher;
         QEventLoop loop;
         QLocalServer server;
@@ -692,6 +694,8 @@ class IpcServer::Impl final
 
     void run_command_thread(const std::stop_token stop_token)
     {
+        const auto thread_registration =
+            options_.register_thread ? options_.register_thread("ipc-command") : nullptr;
         while (true)
         {
             QueuedCommand command;
@@ -727,6 +731,17 @@ class IpcServer::Impl final
                     server_error("SYS_INTERNAL_ERROR", Severity::error,
                                  "IPC 命令处理器抛出了未处理异常", "ipc.command"));
             }
+
+            if (options_.diagnostics.enabled && options_.diagnostics.enabled() &&
+                options_.diagnostics.record)
+                options_.diagnostics.record(
+                    "operation=ipc.command command=" + command.request.command +
+                    " correlationId=" + command.request.request_id +
+                    " jsonBytes=" + std::to_string(command.request.payload_json.size()) +
+                    " binaryBytes=" + std::to_string(command.request.binary.size()) +
+                    " result=" + (handled ? "success" : "failure") + " businessCode=" +
+                    (handled ? "OK" : handled.error().business_code) + " queueDepth=" +
+                    std::to_string(command_queue_depth_.load(std::memory_order_relaxed)));
 
             ResponseMessage response;
             response.request_id = command.request.request_id;

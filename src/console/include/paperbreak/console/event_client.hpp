@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/ipc/client.hpp"
 
 #include <atomic>
@@ -88,7 +89,8 @@ using EventClientObserver = std::function<void(const EventClientSnapshot&)>;
 class EventClient final
 {
   public:
-    explicit EventClient(EventClientObserver observer = {}, ipc::IpcClientOptions options = {});
+    explicit EventClient(EventClientObserver observer = {}, ipc::IpcClientOptions options = {},
+                         ThreadRegistrationFactory register_thread = {});
     ~EventClient();
     EventClient(const EventClient&) = delete;
     EventClient& operator=(const EventClient&) = delete;

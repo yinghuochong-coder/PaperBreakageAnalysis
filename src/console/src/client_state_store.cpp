@@ -51,7 +51,8 @@ Result<ServiceStatusSummary> parse_status(const ipc::ResponseMessage& response,
         payload["serviceState"].get_ref<const std::string&>().empty() ||
         !payload.contains("machineId") || !payload["machineId"].is_string() ||
         !payload.contains("timestamp") || !payload["timestamp"].is_string() ||
-        !payload.contains("acceptingWrites") || !payload["acceptingWrites"].is_boolean())
+        !payload.contains("acceptingWrites") || !payload["acceptingWrites"].is_boolean() ||
+        (payload.contains("loggingLevel") && !payload["loggingLevel"].is_string()))
     {
         return Result<ServiceStatusSummary>::failure(
             state_error("system.getStatus 响应结构无效", "console.status.parse"));
@@ -60,6 +61,7 @@ Result<ServiceStatusSummary> parse_status(const ipc::ResponseMessage& response,
         {.service_state = payload["serviceState"].get<std::string>(),
          .machine_id = payload["machineId"].get<std::string>(),
          .service_timestamp = payload["timestamp"].get<std::string>(),
+         .logging_level = payload.value("loggingLevel", std::string{"info"}),
          .accepting_writes = payload["acceptingWrites"].get<bool>(),
          .generation = generation});
 }

@@ -3,6 +3,7 @@
 #include "paperbreak/algorithm/detector_host.hpp"
 #include "paperbreak/camera/frame.hpp"
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/config/basic_config.hpp"
 #include "paperbreak/storage/metadata_database.hpp"
 #include "paperbreak/storage/nvme_cache.hpp"
@@ -48,6 +49,8 @@ struct EventRuntimeOptions final
     std::function<Result<void>(algorithm::DetectorPluginRegistry&)> detector_registry_configurer;
     std::function<void(const Error&)> error_observer;
     std::function<void(const storage::EventMetadataRecord&)> committed_observer;
+    ThreadRegistrationFactory register_thread;
+    DebugDiagnosticSink diagnostics;
 };
 
 struct EventRuntimeSnapshot final

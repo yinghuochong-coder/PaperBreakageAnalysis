@@ -78,7 +78,11 @@ class OperationsClient::FileExporter final
   public:
     using Completion = std::function<void(Result<std::filesystem::path>)>;
 
-    FileExporter() : worker_([this](const std::stop_token token) { run(token); }) {}
+    explicit FileExporter(ThreadRegistrationFactory register_thread)
+        : register_thread_(std::move(register_thread)),
+          worker_([this](const std::stop_token token) { run(token); })
+    {
+    }
     ~FileExporter()
     {
         stop();
@@ -168,6 +172,8 @@ class OperationsClient::FileExporter final
 
     void run(const std::stop_token token)
     {
+        const auto thread_registration =
+            register_thread_ ? register_thread_("console-diagnostics-export") : nullptr;
         while (!token.stop_requested())
         {
             std::optional<Job> job;
@@ -202,11 +208,14 @@ class OperationsClient::FileExporter final
     std::optional<Job> job_;
     bool busy_{};
     bool stopped_{};
+    ThreadRegistrationFactory register_thread_;
     std::jthread worker_;
 };
 
-OperationsClient::OperationsClient(OperationsObserver observer, ipc::IpcClientOptions options)
-    : observer_(std::move(observer)), exporter_(std::make_unique<FileExporter>()),
+OperationsClient::OperationsClient(OperationsObserver observer, ipc::IpcClientOptions options,
+                                   ThreadRegistrationFactory register_thread)
+    : observer_(std::move(observer)),
+      exporter_(std::make_unique<FileExporter>(std::move(register_thread))),
       alive_(std::make_shared<std::atomic_bool>(true))
 {
     client_ = std::make_unique<ipc::IpcClient>(
@@ -334,6 +343,8 @@ void OperationsClient::refresh_logs()
         payload["categories"] = Json::array({*snapshot_.log_filter.category});
     if (snapshot_.log_filter.minimum_level)
         payload["minimumLevel"] = *snapshot_.log_filter.minimum_level;
+    if (snapshot_.log_filter.thread_name && !snapshot_.log_filter.thread_name->empty())
+        payload["threadName"] = *snapshot_.log_filter.thread_name;
     auto sent =
         client_->send_request("log.tail", payload.dump(), {}, [this](auto handle, auto result) {
             logs_completed(std::move(handle), std::move(result));
@@ -510,12 +521,16 @@ void OperationsClient::logs_completed(ipc::ClientRequestHandle handle,
             notify();
             return;
         }
-        items.push_back({.sequence = item["sequence"].get<std::uint64_t>(),
-                         .timestamp = item["timestamp"].get<std::string>(),
-                         .thread_id = item["threadId"].get<std::uint64_t>(),
-                         .category = item["category"].get<std::string>(),
-                         .level = item["level"].get<std::string>(),
-                         .message = item["message"].get<std::string>()});
+        items.push_back(
+            {.sequence = item["sequence"].get<std::uint64_t>(),
+             .timestamp = item["timestamp"].get<std::string>(),
+             .thread_id = item["threadId"].get<std::uint64_t>(),
+             .thread_name = item.value("threadName",
+                                       std::string{"unregistered-thread-"} +
+                                           std::to_string(item["threadId"].get<std::uint64_t>())),
+             .category = item["category"].get<std::string>(),
+             .level = item["level"].get<std::string>(),
+             .message = item["message"].get<std::string>()});
     }
     snapshot_.logs = std::move(items);
     snapshot_.logs_truncated = payload.value().value("truncated", false);

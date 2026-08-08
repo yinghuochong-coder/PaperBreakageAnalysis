@@ -79,6 +79,19 @@ M7-04 启动恢复不新增 schema v2 配置字段，采用固定安全上限：
 - `uploadLimitMiBps` 是单上传工作线程预校验读盘和网络分块阶段的非零速率上限，范围 1～1024 MiB/s，默认 20 MiB/s。上传不在相机采集回调中执行。
 - uplink 传输字段变化记录为 `/uplink/transport` 待重启项；配置 schema、解析器、序列化器和默认配置使用相同字段集。
 
+## 日志配置
+
+本变更不提升 `configSchemaVersion`。`logging.level` 与 `logging.retentionDays` 属于
+`/logging/live`，配置事务按 prepare、apply/readback、commit 和 rollback 热应用；应用失败时恢复
+上一个有效等级和保留天数。`logging.directory`、`queueCapacity`、`maximumFileSizeMiB` 和
+`maximumFilesPerDay` 仍进入 `/logging/runtime` 待重启路径。
+
+默认等级为 `info`；切换为 `debug` 后逐帧诊断立即生效，恢复较高等级后不再构造逐帧文本。
+`retentionDays` 对服务和控制台各自的新命名日志生效，只清理能严格匹配
+`paperbreak-service-<thread>-YYYY-MM-DD.log[.N]` 或
+`paperbreak-console-<thread>-YYYY-MM-DD.log[.N]` 且超过保留期的文件；旧聚合日志和无关文件不迁移、
+不改名且不被该清理规则删除。`maximumFilesPerDay` 对每个线程独立计数。
+
 ## 原子保存和恢复
 
 服务在目标目录创建唯一临时文件，完整写入并刷新后使用 Windows 原子替换。最近 5 份有效配置保存在 `<配置文件名>.history/`，文件名为 20 位修订号。主配置损坏时只从可完整验证的最新历史恢复；残留临时文件不会被采用。选择历史回滚时会创建新的修订，不会复用历史修订号。

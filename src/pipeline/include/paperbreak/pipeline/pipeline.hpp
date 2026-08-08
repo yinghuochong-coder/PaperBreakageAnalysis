@@ -3,6 +3,7 @@
 #include "paperbreak/camera/acquisition.hpp"
 #include "paperbreak/camera/frame.hpp"
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -163,6 +164,7 @@ struct PerCameraProcessorOptions final
 {
     std::string camera_id;
     std::chrono::milliseconds input_wait_timeout{std::chrono::milliseconds{100}};
+    ThreadRegistrationFactory register_thread;
 };
 
 struct PerCameraProcessorSnapshot final

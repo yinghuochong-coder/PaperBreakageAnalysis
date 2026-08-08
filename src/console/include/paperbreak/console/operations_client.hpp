@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/common/threading.hpp"
 #include "paperbreak/ipc/client.hpp"
 
 #include <atomic>
@@ -44,6 +45,7 @@ struct OperationsLogRecord final
     std::uint64_t sequence{};
     std::string timestamp;
     std::uint64_t thread_id{};
+    std::string thread_name;
     std::string category;
     std::string level;
     std::string message;
@@ -60,6 +62,7 @@ struct LogFilter final
 {
     std::optional<std::string> category;
     std::optional<std::string> minimum_level;
+    std::optional<std::string> thread_name;
 };
 
 struct OperationsSnapshot final
@@ -86,7 +89,8 @@ using OperationsObserver = std::function<void(const OperationsSnapshot&)>;
 class OperationsClient final
 {
   public:
-    explicit OperationsClient(OperationsObserver observer = {}, ipc::IpcClientOptions options = {});
+    explicit OperationsClient(OperationsObserver observer = {}, ipc::IpcClientOptions options = {},
+                              ThreadRegistrationFactory register_thread = {});
     ~OperationsClient();
     OperationsClient(const OperationsClient&) = delete;
     OperationsClient& operator=(const OperationsClient&) = delete;

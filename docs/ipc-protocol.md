@@ -110,7 +110,8 @@ binaryLength bytes optional binary payload
 
 响应包含 `serviceState`、`acceptingWrites`、`startedAt`、`timestamp`、`machineId`、
 `configSchemaVersion`、`storedConfigRevision`、`effectiveConfigRevision`、
-`pendingRestartPaths` 和 `recoveredFromHistory`。
+`pendingRestartPaths`、`recoveredFromHistory` 和当前有效的 `loggingLevel`。旧服务没有
+`loggingLevel` 时控制台按 `info` 兼容；首次连接前也使用 `info`，断线后保留最后一次有效等级。
 
 ### `system.getVersion`
 
@@ -228,6 +229,7 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
   "afterSequence": 1200,
   "categories": ["service", "ipc"],
   "minimumLevel": "warning",
+  "threadName": "ipc-command",
   "limit": 100
 }
 ```
@@ -235,11 +237,13 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 所有字段均可省略。`afterSequence` 是无符号整数；`categories` 最多 10 项，可用值为
 `service`、`camera`、`algorithm`、`event`、`storage`、`uplink`、`ipc`、`ui`、
 `audit`、`performance`；`minimumLevel` 为 `trace`、`debug`、`info`、`warning`、
-`error` 或 `critical`；`limit` 范围 1～200，默认 100。
+`error` 或 `critical`；`threadName` 可选，必须符合小写字母/数字/连字符且最长 63 字符；
+`limit` 范围 1～200，默认 100。
 
 响应包含 `firstAvailableSequence`、`latestSequence`、`records` 和 `truncated`。
-每条记录包含 `sequence`、`timestamp`、`threadId`、`category`、`level` 和脱敏后的
-`message`。查询读取异步日志线程维护的内存环，不读取滚动日志文件，因此允许短暂最终一致性。
+每条记录包含 `sequence`、本地 RFC 3339 `timestamp`、`threadName`、`threadId`、
+`category`、`level` 和脱敏后的 `message`。查询读取异步日志线程维护的内存环，不读取滚动日志文件，
+因此允许短暂最终一致性。
 当请求游标早于当前最早可用序号或匹配结果超过 `limit` 时，`truncated=true`。
 
 ### 相机查询与控制

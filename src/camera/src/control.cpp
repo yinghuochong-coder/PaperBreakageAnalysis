@@ -3,6 +3,7 @@
 #include "paperbreak/camera/frame.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <limits>
 #include <memory>
@@ -95,7 +96,9 @@ Result<void> CameraControlRuntime::start_frame_delivery(Session& session)
                                      .receive_timeout = delivery_options_.receive_timeout,
                                      .statistics_window = std::chrono::seconds{1},
                                      .consecutive_timeout_limit =
-                                         std::numeric_limits<std::size_t>::max()});
+                                         std::numeric_limits<std::size_t>::max(),
+                                     .register_thread = delivery_options_.register_thread,
+                                     .diagnostics = delivery_options_.diagnostics});
         auto started = session.acquisition->start();
         if (!started)
         {
@@ -157,6 +160,14 @@ Result<void> CameraControlRuntime::stop_frame_delivery(Session& session)
 void CameraControlRuntime::forward_frames(Session& session,
                                           const std::stop_token stop_token) noexcept
 {
+    std::string camera_suffix = session.id;
+    std::ranges::transform(camera_suffix, camera_suffix.begin(), [](const unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    const auto thread_registration =
+        delivery_options_.register_thread
+            ? delivery_options_.register_thread("camera-forward-" + camera_suffix)
+            : nullptr;
     while (!stop_token.stop_requested())
     {
         auto dequeued = session.acquisition_queue->wait_pop(stop_token, preview_forward_timeout);
