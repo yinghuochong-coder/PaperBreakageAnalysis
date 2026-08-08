@@ -55,7 +55,7 @@ struct IpcServerOptions final
     std::size_t maximum_connections{8U};
     std::size_t maximum_in_flight_per_connection{16U};
     std::size_t recent_request_ids_per_connection{1024U};
-    std::size_t command_queue_capacity{64U};
+    std::size_t command_queue_capacity{640U};
     std::size_t outbound_message_capacity{128U};
     std::size_t push_queue_capacity{32U};
     std::size_t outbound_byte_capacity{32U * 1024U * 1024U};

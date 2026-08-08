@@ -95,7 +95,7 @@
     "eventRoot": "data/event_root",
     "maximumCacheStorageGiB": 1,
     "maximumEventStorageGiB": 1000,
-    "rollingCacheEnabled": true,
+    "rollingCacheEnabled": false,
     "rollingCacheIoTimeoutMs": 10000,
     "rollingCacheWriteLimitMiBps": 600,
     "stopFreeSpaceGiB": 20,

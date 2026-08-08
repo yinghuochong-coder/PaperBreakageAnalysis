@@ -9,7 +9,7 @@
 *.suo
 *.VC.db
 *.VC.opendb
-config/data/logs/*.log
+config/data/logs/*.*
 config/default-config.json.history/*.json
 config/data/event_root/.metadata/events.db
 event_root
