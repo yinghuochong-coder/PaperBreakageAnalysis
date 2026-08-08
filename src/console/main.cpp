@@ -707,7 +707,7 @@ int main(int argc, char* argv[])
     QTimer refresh_timer;
     QObject::connect(&refresh_timer, &QTimer::timeout,
                      [&state_store] { state_store.refresh_dynamic(); });
-    refresh_timer.start(1000);
+    refresh_timer.start(5000);
     QObject::connect(&refresh_timer, &QTimer::timeout,
                      [&camera_client] { camera_client->refresh(); });
     QObject::connect(&refresh_timer, &QTimer::timeout, [&operations_client] {

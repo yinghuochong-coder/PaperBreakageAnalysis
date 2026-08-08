@@ -51,6 +51,7 @@ struct EventRuntimeOptions final
     std::size_t consecutive_backlog_limit{8U};
     std::function<Result<void>(algorithm::DetectorPluginRegistry&)> detector_registry_configurer;
     std::function<void(const Error&)> error_observer;
+    std::function<void(const storage::EventMetadataRecord&)> lifecycle_observer;
     std::function<void(const storage::EventMetadataRecord&)> committed_observer;
     ThreadRegistrationFactory register_thread;
     /// Test seam used to inject deterministic thread-creation failures before a thread is made.
@@ -92,6 +93,13 @@ struct EventRuntimeSnapshot final
     std::size_t result_queue_capacity{};
     std::size_t result_queue_high_watermark{};
     std::size_t pending_events{};
+    std::size_t persistence_queue_depth{};
+    std::size_t persistence_queue_capacity{};
+    std::size_t persistence_queue_high_watermark{};
+    std::size_t persistence_active_events{};
+    std::uint64_t persistence_last_write_bytes{};
+    std::chrono::milliseconds persistence_last_write_duration{};
+    double persistence_last_write_mib_per_second{};
     std::uint64_t submitted_frames{};
     std::uint64_t processed_frames{};
     std::uint64_t rejected_frames{};

@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,13 +22,18 @@
 namespace paperbreak::storage
 {
 
-inline constexpr std::uint32_t event_manifest_schema_version = 1U;
+inline constexpr std::uint32_t event_manifest_schema_version = 2U;
 inline constexpr std::size_t event_persist_default_capacity = 8U;
+inline constexpr std::size_t event_raw_block_maximum_frames = 256U;
+inline constexpr std::chrono::milliseconds event_raw_block_duration{1000};
 
 struct EventManifestMetadata final
 {
     std::string event_id;
+    /// Compatibility input. New callers should set decision_state.
     std::string event_state;
+    std::string decision_state;
+    std::uint64_t trigger_count{1U};
     camera::WallClockTime candidate_time;
     std::optional<camera::WallClockTime> confirmed_time;
     camera::WallClockTime start_time;
@@ -82,6 +88,10 @@ class IEventFileSystem
         const std::filesystem::path& path) = 0;
     [[nodiscard]] virtual Result<void> write_new_file_durable(
         const std::filesystem::path& path, std::span<const std::byte> contents) = 0;
+    /// Persists a PBNVME1 block in two flush phases and atomically publishes the final name.
+    /// The last eight bytes are the commit marker and are written only after the body flush.
+    [[nodiscard]] virtual Result<void> write_new_raw_block_durable(
+        const std::filesystem::path& path, std::span<const std::byte> contents) = 0;
     [[nodiscard]] virtual Result<std::vector<std::byte>> read_file_bounded(
         const std::filesystem::path& path, std::size_t maximum_bytes) = 0;
     [[nodiscard]] virtual Result<EventPathKind> path_kind(const std::filesystem::path& path) = 0;
@@ -112,8 +122,12 @@ struct EventPersistenceOutcome final
     std::filesystem::path committed_directory;
     std::filesystem::path transaction_directory;
     std::string manifest_json;
+    std::size_t raw_block_count{};
+    std::size_t raw_frame_count{};
+    /// Compatibility alias for raw_block_count.
     std::size_t raw_file_count{};
     std::size_t key_frame_count{};
+    std::uint64_t bytes_written{};
 };
 
 enum class EventRecoveryDisposition
@@ -146,6 +160,15 @@ class IEventTransactionWriter
 
     [[nodiscard]] virtual Result<EventPersistenceOutcome> persist(
         const EventPersistenceRequest& request) = 0;
+    [[nodiscard]] virtual Result<EventPersistenceOutcome> persist(
+        const EventPersistenceRequest& request, std::stop_token stop_token)
+    {
+        if (stop_token.stop_requested())
+            return Result<EventPersistenceOutcome>::failure(
+                make_error("EVENT_WRITE_CANCELLED", Severity::warning, "事件持久化已取消",
+                           "storage", "event.persist.cancel", true));
+        return persist(request);
+    }
 };
 
 /// Synchronous transaction boundary. Call it only from a bounded storage worker.
@@ -176,6 +199,8 @@ class EventTransactionWriter final : public IEventTransactionWriter
 
     [[nodiscard]] Result<EventPersistenceOutcome> persist(
         const EventPersistenceRequest& request) override;
+    [[nodiscard]] Result<EventPersistenceOutcome> persist(const EventPersistenceRequest& request,
+                                                          std::stop_token stop_token) override;
     [[nodiscard]] Result<EventRecoveryReport> recover_pending();
 
     /// Reads and verifies an already committed directory. Internal transaction/quarantine paths
@@ -202,6 +227,7 @@ struct EventPersistenceRuntimeOptions final
     std::size_t event_capacity{event_persist_default_capacity};
     ThreadRegistrationFactory register_thread;
     DebugDiagnosticSink diagnostics;
+    std::function<void(std::string_view)> writing_observer;
 };
 
 struct EventPersistenceRuntimeSnapshot final
@@ -216,6 +242,10 @@ struct EventPersistenceRuntimeSnapshot final
     std::uint64_t rejected{};
     std::uint64_t write_failures{};
     std::uint64_t callback_failures{};
+    std::size_t active_events{};
+    std::uint64_t last_write_bytes{};
+    std::chrono::milliseconds last_write_duration{};
+    double last_write_mib_per_second{};
 };
 
 /// Fixed-capacity, single-worker event persistence runtime. Submission never waits for disk I/O.

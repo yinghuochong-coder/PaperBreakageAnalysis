@@ -93,6 +93,8 @@ void insert_event(const MetadataDatabaseOptions& options, const std::string& eve
 {
     execute_sql(options.database_path,
                 "INSERT INTO events(event_id,event_schema_version,event_state,"
+                "decision_state,persistence_state,review_state,review_decision,"
+                "artifacts_available,trigger_count,"
                 "candidate_time_utc_ms,confirmed_time_utc_ms,start_time_utc_ms,end_time_utc_ms,"
                 "trigger_camera_id,trigger_frame_number,trigger_reason,confidence,pre_event_ms,"
                 "post_event_ms,algorithm_name,algorithm_version,config_version,machine_id,"
@@ -100,7 +102,8 @@ void insert_event(const MetadataDatabaseOptions& options, const std::string& eve
                 "relative_directory,storage_state,window_complete,truncated_by_maximum_duration,"
                 "stopped_early,indexed_at_utc_ms) VALUES('" +
                     event_id +
-                    "',1,'Confirmed',1,2,0,3,'CAM01',1,'test',0.9,1,1,'mock','1','1',"
+                    "',2,'Confirmed','Confirmed','Committed','Unreviewed',NULL,1,1,"
+                    "1,2,0,3,'CAM01',1,'test',0.9,1,1,'mock','1','1',"
                     "'machine','line','paper',NULL,'NotUploaded','Good','2026/08/05/" +
                     event_id +
                     "','Present',1,0,0,1);"
@@ -181,7 +184,7 @@ TEST(UplinkUploadRepository, EnforcesDualCapacityAndIdempotency)
     EXPECT_FALSE(pruned.value());
 }
 
-TEST(UplinkUploadRepository, MigratesLegacyInProgressJobAndPreservesTheEvent)
+TEST(UplinkUploadRepository, RejectsLegacyInProgressEventDatabaseWithoutMutatingIt)
 {
     TemporaryUploadDirectory temporary{"migration"};
     const auto options = options_for(temporary);
@@ -217,18 +220,9 @@ PRAGMA user_version=3;
 )sql");
 
     auto migrated = EventMetadataDatabase::open(options);
-    ASSERT_TRUE(migrated);
-    EXPECT_TRUE(migrated.value()->open_report().migrated);
-    EXPECT_EQ(migrated.value()->open_report().schema_version,
-              paperbreak::storage::database_schema_version);
-    ASSERT_TRUE(migrated.value()->open_report().migration_backup);
-    auto legacy = migrated.value()->get_upload_job("legacy-event:event-migrate");
-    ASSERT_TRUE(legacy);
-    ASSERT_TRUE(legacy.value());
-    EXPECT_EQ(legacy.value()->state, UploadJobState::retry_wait);
-    EXPECT_EQ(legacy.value()->kind, UploadJobKind::manifest);
-    auto event = migrated.value()->get_event("event-migrate");
-    ASSERT_TRUE(event);
+    ASSERT_FALSE(migrated);
+    EXPECT_EQ(migrated.error().business_code, "EVENT_SCHEMA_UNSUPPORTED");
+    EXPECT_TRUE(std::filesystem::is_regular_file(options.database_path));
 }
 
 TEST(UplinkUploadRepository, ClaimsFiveKindsByFixedPriorityWithoutCreatingEvents)

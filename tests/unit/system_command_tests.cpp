@@ -521,15 +521,50 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
         inspector,
         [&reviewed_events](const auto&) { ++reviewed_events; }};
 
+    const std::string collecting_id = "019fcb3d-aaaa-7000-8000-000000000010";
+    ASSERT_TRUE(database->create_collecting_event({.event_id = collecting_id,
+                                                   .decision_state = "Candidate",
+                                                   .candidate_time_utc_ms = 1785801600000,
+                                                   .start_time_utc_ms = 1785801599000,
+                                                   .end_time_utc_ms = 1785801601000,
+                                                   .camera_ids = {"CAM01"},
+                                                   .trigger_camera_id = "CAM01",
+                                                   .trigger_frame_number = 1U,
+                                                   .trigger_reason = "Algorithm",
+                                                   .confidence = 0.75,
+                                                   .trigger_count = 1U}));
+    auto collecting_detail = commands.handle(
+        fixture.request("event.get", Json{{"eventId", collecting_id}}.dump()), reader, {});
+    ASSERT_TRUE(collecting_detail);
+    const auto collecting_json = Json::parse(collecting_detail.value().payload_json);
+    EXPECT_EQ(collecting_json["event"]["persistenceState"], "Collecting");
+    EXPECT_FALSE(collecting_json["event"]["artifactsAvailable"].get<bool>());
+    EXPECT_TRUE(collecting_json["committedDirectory"].is_null());
+    auto early_manifest = commands.handle(
+        fixture.request("event.getManifest", Json{{"eventId", collecting_id}}.dump()), reader, {});
+    ASSERT_FALSE(early_manifest);
+    EXPECT_EQ(early_manifest.error().business_code, "EVENT_NOT_COMMITTED");
+    auto early_review = commands.handle(
+        fixture.request("event.confirm",
+                        Json{{"eventId", collecting_id}, {"expectedReviewRevision", 1U}}.dump()),
+        reader, {});
+    ASSERT_FALSE(early_review);
+    EXPECT_EQ(early_review.error().business_code, "EVENT_NOT_COMMITTED");
+
     auto list = commands.handle(
-        fixture.request("event.list",
-                        R"({"eventState":"Candidate","cameraId":"CAM01","offset":0,"limit":1})"),
+        fixture.request(
+            "event.list",
+            R"({"eventState":"Candidate","persistenceState":"Committed","cameraId":"CAM01","offset":0,"limit":1})"),
         reader, {});
     ASSERT_TRUE(list) << list.error().message;
     const Json listed = Json::parse(list.value().payload_json);
     EXPECT_EQ(listed["total"], 1U);
     ASSERT_EQ(listed["events"].size(), 1U);
     EXPECT_EQ(listed["events"][0]["eventId"], event_id);
+    EXPECT_EQ(listed["events"][0]["decisionState"], "Candidate");
+    EXPECT_EQ(listed["events"][0]["persistenceState"], "Committed");
+    EXPECT_EQ(listed["events"][0]["reviewState"], "Unreviewed");
+    EXPECT_TRUE(listed["events"][0]["artifactsAvailable"].get<bool>());
     EXPECT_EQ(listed["events"][0]["reviewRevision"], 1U);
     EXPECT_TRUE(listed["events"][0]["thumbnailAvailable"].get<bool>());
 
@@ -554,7 +589,9 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
     auto confirmed = commands.handle(fixture.request("event.confirm", review_payload), reader, {});
     ASSERT_TRUE(confirmed);
     const Json confirmed_json = Json::parse(confirmed.value().payload_json);
-    EXPECT_EQ(confirmed_json["event"]["eventState"], "Confirmed");
+    EXPECT_EQ(confirmed_json["event"]["decisionState"], "Candidate");
+    EXPECT_EQ(confirmed_json["event"]["reviewState"], "Reviewed");
+    EXPECT_EQ(confirmed_json["event"]["reviewDecision"], "Confirmed");
     EXPECT_EQ(confirmed_json["event"]["reviewRevision"], 2U);
     EXPECT_EQ(reviewed_events, 1U);
     auto conflicting = commands.handle(fixture.request("event.reject", review_payload), reader, {});

@@ -1213,11 +1213,28 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             event_filter_end_->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
             event_filter_end_->setCalendarPopup(true);
             event_filter_end_->setDateTime(QDateTime::currentDateTime());
+            event_filter_through_now_ =
+                make_child<QCheckBox>(filters, QStringLiteral("截至当前（持续更新）"));
+            event_filter_through_now_->setChecked(true);
+            event_filter_end_->setEnabled(false);
+            QObject::connect(event_filter_through_now_, &QCheckBox::toggled, event_filter_end_,
+                             &QWidget::setDisabled);
             event_filter_state_ = make_child<QComboBox>(filters);
-            event_filter_state_->addItem(QStringLiteral("全部状态"), QString{});
+            event_filter_state_->addItem(QStringLiteral("全部算法判定"), QString{});
             event_filter_state_->addItem(QStringLiteral("候选"), QStringLiteral("Candidate"));
-            event_filter_state_->addItem(QStringLiteral("已确认"), QStringLiteral("Confirmed"));
-            event_filter_state_->addItem(QStringLiteral("误报"), QStringLiteral("Rejected"));
+            event_filter_state_->addItem(QStringLiteral("自动确认"), QStringLiteral("Confirmed"));
+            event_filter_state_->addItem(QStringLiteral("算法拒绝"), QStringLiteral("Rejected"));
+            event_filter_state_->addItem(QStringLiteral("判定超时"), QStringLiteral("Timeout"));
+            event_filter_persistence_ = make_child<QComboBox>(filters);
+            event_filter_persistence_->addItem(QStringLiteral("全部证据状态"), QString{});
+            for (const auto& state :
+                 {"Collecting", "Encoding", "Queued", "Writing", "Committed", "Incomplete"})
+                event_filter_persistence_->addItem(QString::fromLatin1(state),
+                                                   QString::fromLatin1(state));
+            event_filter_review_ = make_child<QComboBox>(filters);
+            event_filter_review_->addItem(QStringLiteral("全部复核状态"), QString{});
+            event_filter_review_->addItem(QStringLiteral("待复核"), QStringLiteral("Unreviewed"));
+            event_filter_review_->addItem(QStringLiteral("已复核"), QStringLiteral("Reviewed"));
             event_filter_camera_ = make_child<QLineEdit>(filters);
             event_filter_camera_->setPlaceholderText(QStringLiteral("相机 ID（可留空）"));
             event_filter_camera_->setMaxLength(32);
@@ -1229,11 +1246,18 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                 EventListFilter filter{
                     .start_time_utc_ms = event_filter_start_->dateTime().toMSecsSinceEpoch(),
                     .end_time_utc_ms = event_filter_end_->dateTime().toMSecsSinceEpoch(),
+                    .through_now = event_filter_through_now_->isChecked(),
                     .offset = 0U,
                     .limit = 50U};
                 if (!event_filter_state_->currentData().toString().isEmpty())
-                    filter.event_state =
+                    filter.decision_state =
                         event_filter_state_->currentData().toString().toStdString();
+                if (!event_filter_persistence_->currentData().toString().isEmpty())
+                    filter.persistence_state =
+                        event_filter_persistence_->currentData().toString().toStdString();
+                if (!event_filter_review_->currentData().toString().isEmpty())
+                    filter.review_state =
+                        event_filter_review_->currentData().toString().toStdString();
                 if (!event_filter_camera_->text().trimmed().isEmpty())
                     filter.camera_id = event_filter_camera_->text().trimmed().toStdString();
                 show_event_result(event_actions_.query(std::move(filter)));
@@ -1248,22 +1272,26 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             });
             filter_layout->addWidget(event_filter_start_);
             filter_layout->addWidget(event_filter_end_);
+            filter_layout->addWidget(event_filter_through_now_);
             filter_layout->addWidget(event_filter_state_);
+            filter_layout->addWidget(event_filter_persistence_);
+            filter_layout->addWidget(event_filter_review_);
             filter_layout->addWidget(event_filter_camera_);
             filter_layout->addWidget(apply);
             filter_layout->addWidget(manual);
             layout->addWidget(filters);
             event_table_ = make_child<QTableWidget>(page);
             event_table_->setObjectName(QStringLiteral("event-table"));
-            configure_table(event_table_, {QStringLiteral("时间"), QStringLiteral("状态"),
+            configure_table(event_table_, {QStringLiteral("时间"), QStringLiteral("算法判定"),
+                                           QStringLiteral("证据状态"), QStringLiteral("人工复核"),
                                            QStringLiteral("触发相机"), QStringLiteral("置信度"),
                                            QStringLiteral("上传状态"), QStringLiteral("缩略图"),
                                            QStringLiteral("事件 ID")});
             QObject::connect(event_table_, &QTableWidget::itemSelectionChanged, this, [this] {
                 const int row = event_table_->currentRow();
-                if (row >= 0 && event_actions_.get && event_table_->item(row, 6))
+                if (row >= 0 && event_actions_.get && event_table_->item(row, 8))
                     show_event_result(
-                        event_actions_.get(event_table_->item(row, 6)->text().toStdString()));
+                        event_actions_.get(event_table_->item(row, 8)->text().toStdString()));
             });
             layout->addWidget(event_table_, 1);
             auto* paging = make_child<QWidget>(page);
@@ -2598,8 +2626,8 @@ void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
                                                                  : QStringLiteral("不可用")));
 
     const QString selected_id =
-        event_table_->currentRow() >= 0 && event_table_->item(event_table_->currentRow(), 6)
-            ? event_table_->item(event_table_->currentRow(), 6)->text()
+        event_table_->currentRow() >= 0 && event_table_->item(event_table_->currentRow(), 8)
+            ? event_table_->item(event_table_->currentRow(), 8)->text()
             : QString{};
     event_table_->setRowCount(static_cast<int>(snapshot.events.size()));
     int selected_row = -1;
@@ -2611,15 +2639,20 @@ void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
                        QDateTime::fromMSecsSinceEpoch(event.candidate_time_utc_ms, QTimeZone::utc())
                            .toLocalTime()
                            .toString(QString::fromLatin1(local_date_time_format)));
-        set_table_item(event_table_, row, 1, QString::fromStdString(event.event_state));
-        set_table_item(event_table_, row, 2, QString::fromStdString(event.trigger_camera_id));
-        set_table_item(event_table_, row, 3, QString::number(event.confidence, 'f', 3));
-        set_table_item(event_table_, row, 4, QString::fromStdString(event.upload_state));
-        set_table_item(event_table_, row, 5,
+        set_table_item(event_table_, row, 1, QString::fromStdString(event.decision_state));
+        set_table_item(event_table_, row, 2, QString::fromStdString(event.persistence_state));
+        const auto review_text = event.review_decision
+                                     ? QString::fromStdString(*event.review_decision)
+                                     : QString::fromStdString(event.review_state);
+        set_table_item(event_table_, row, 3, review_text);
+        set_table_item(event_table_, row, 4, QString::fromStdString(event.trigger_camera_id));
+        set_table_item(event_table_, row, 5, QString::number(event.confidence, 'f', 3));
+        set_table_item(event_table_, row, 6, QString::fromStdString(event.upload_state));
+        set_table_item(event_table_, row, 7,
                        event.thumbnail_available ? QStringLiteral("可用")
                                                  : QStringLiteral("不可用"));
-        set_table_item(event_table_, row, 6, QString::fromStdString(event.event_id));
-        if (event_table_->item(row, 6)->text() == selected_id)
+        set_table_item(event_table_, row, 8, QString::fromStdString(event.event_id));
+        if (event_table_->item(row, 8)->text() == selected_id)
             selected_row = row;
     }
     if (selected_row >= 0)
@@ -2643,14 +2676,16 @@ void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
         if (thumbnail.isNull())
             event_thumbnail_->setText(QStringLiteral("缩略图不可用"));
     }
-    const bool candidate = has_detail && snapshot.detail->event.event_state == "Candidate" &&
-                           snapshot.connection.state == ipc::ClientConnectionState::connected &&
-                           !snapshot.operation_pending;
-    event_confirm_->setEnabled(candidate);
-    event_reject_->setEnabled(candidate);
-    event_export_->setEnabled(has_detail && !snapshot.operation_pending);
-    event_open_directory_->setEnabled(has_detail && !snapshot.operation_pending);
-    event_retry_upload_->setEnabled(has_detail && !snapshot.operation_pending &&
+    const bool reviewable = has_detail && snapshot.detail->event.artifacts_available &&
+                            snapshot.detail->event.review_state == "Unreviewed" &&
+                            snapshot.connection.state == ipc::ClientConnectionState::connected &&
+                            !snapshot.operation_pending;
+    event_confirm_->setEnabled(reviewable);
+    event_reject_->setEnabled(reviewable);
+    const bool artifacts = has_detail && snapshot.detail->event.artifacts_available;
+    event_export_->setEnabled(artifacts && !snapshot.operation_pending);
+    event_open_directory_->setEnabled(artifacts && !snapshot.operation_pending);
+    event_retry_upload_->setEnabled(artifacts && !snapshot.operation_pending &&
                                     snapshot.connection.state ==
                                         ipc::ClientConnectionState::connected);
     if (snapshot.operation_pending)
@@ -2666,8 +2701,20 @@ void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
                 .arg(QString::fromStdWString(snapshot.exported_path->wstring())));
     else
         event_status_->setText(
-            QStringLiteral("共 %1 个事件；当前从第 %2 条开始；详情读取前会校验 manifest 与文件摘要")
+            QStringLiteral("共 %1 个事件；本次启动算法候选判定 %2 / 自动确认 %3；"
+                           "采集 %4、编码 %5、排队 %6、写入 %7、已提交 %8；"
+                           "待复核 %9、人工确认 %10、误报 %11；当前从第 %12 条开始")
                 .arg(snapshot.total)
+                .arg(snapshot.summary.candidate_decisions)
+                .arg(snapshot.summary.automatic_confirmations)
+                .arg(snapshot.summary.collecting)
+                .arg(snapshot.summary.encoding)
+                .arg(snapshot.summary.queued)
+                .arg(snapshot.summary.writing)
+                .arg(snapshot.summary.committed)
+                .arg(snapshot.summary.unreviewed)
+                .arg(snapshot.summary.review_confirmed)
+                .arg(snapshot.summary.review_rejected)
                 .arg(snapshot.filter.offset + 1U));
 }
 
@@ -2875,7 +2922,8 @@ bool MainWindow::event_pages_ready() const noexcept
            event_post_seconds_ && event_max_seconds_ && event_merge_seconds_ && event_key_frames_ &&
            event_retention_days_ && event_save_raw_ && event_preview_video_ &&
            event_upload_policy_ && event_filter_start_ && event_filter_end_ &&
-           event_filter_state_ && event_filter_camera_ && event_table_ && event_thumbnail_ &&
+           event_filter_state_ && event_filter_persistence_ && event_filter_review_ &&
+           event_filter_through_now_ && event_filter_camera_ && event_table_ && event_thumbnail_ &&
            event_manifest_ && event_confirm_ && event_reject_ && event_export_ &&
            event_open_directory_ && event_retry_upload_;
 }

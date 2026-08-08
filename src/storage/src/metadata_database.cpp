@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -498,6 +499,61 @@ CREATE INDEX idx_upload_jobs_schedule
 CREATE INDEX idx_upload_jobs_event ON upload_jobs(event_id,kind,state);
 )sql";
 
+constexpr std::string_view schema_v5 = R"sql(
+CREATE TABLE events_v5(
+  event_id TEXT PRIMARY KEY NOT NULL,
+  event_schema_version INTEGER NOT NULL CHECK(event_schema_version > 0),
+  event_state TEXT NOT NULL CHECK(event_state IN ('Candidate','Confirmed','Rejected','Timeout')),
+  decision_state TEXT NOT NULL CHECK(decision_state IN ('Candidate','Confirmed','Rejected','Timeout')),
+  persistence_state TEXT NOT NULL CHECK(persistence_state IN
+    ('Collecting','Encoding','Queued','Writing','Committed','Incomplete')),
+  review_state TEXT NOT NULL CHECK(review_state IN ('Unreviewed','Reviewed')),
+  review_decision TEXT CHECK(review_decision IN ('Confirmed','Rejected')),
+  artifacts_available INTEGER NOT NULL CHECK(artifacts_available IN (0,1)),
+  trigger_count INTEGER NOT NULL CHECK(trigger_count > 0),
+  candidate_time_utc_ms INTEGER NOT NULL,
+  confirmed_time_utc_ms INTEGER,
+  start_time_utc_ms INTEGER NOT NULL,
+  end_time_utc_ms INTEGER NOT NULL,
+  trigger_camera_id TEXT NOT NULL,
+  trigger_frame_number INTEGER NOT NULL CHECK(trigger_frame_number >= 0),
+  trigger_reason TEXT NOT NULL,
+  confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+  pre_event_ms INTEGER NOT NULL CHECK(pre_event_ms >= 0),
+  post_event_ms INTEGER NOT NULL CHECK(post_event_ms >= 0),
+  algorithm_name TEXT NOT NULL,
+  algorithm_version TEXT NOT NULL,
+  config_version TEXT NOT NULL,
+  machine_id TEXT NOT NULL,
+  production_line_id TEXT NOT NULL,
+  paper_type TEXT NOT NULL,
+  paper_speed REAL,
+  upload_state TEXT NOT NULL,
+  time_quality TEXT NOT NULL,
+  relative_directory TEXT NOT NULL DEFAULT '',
+  storage_state TEXT NOT NULL CHECK(storage_state IN ('Collecting','Present','Missing','Damaged')),
+  window_complete INTEGER NOT NULL CHECK(window_complete IN (0,1)),
+  truncated_by_maximum_duration INTEGER NOT NULL CHECK(truncated_by_maximum_duration IN (0,1)),
+  stopped_early INTEGER NOT NULL CHECK(stopped_early IN (0,1)),
+  indexed_at_utc_ms INTEGER NOT NULL,
+  review_revision INTEGER NOT NULL DEFAULT 1 CHECK(review_revision > 0),
+  reviewed_at_utc_ms INTEGER,
+  reviewed_by TEXT NOT NULL DEFAULT '',
+  CHECK(event_state=decision_state),
+  CHECK((persistence_state='Committed')=artifacts_available),
+  CHECK((review_state='Reviewed')=(review_decision IS NOT NULL))
+) STRICT;
+DROP TABLE events;
+ALTER TABLE events_v5 RENAME TO events;
+CREATE UNIQUE INDEX idx_events_relative_directory
+  ON events(relative_directory) WHERE relative_directory<>'';
+CREATE INDEX idx_events_candidate ON events(candidate_time_utc_ms DESC,event_id DESC);
+CREATE INDEX idx_events_state_time ON events(decision_state,candidate_time_utc_ms DESC);
+CREATE INDEX idx_events_persistence_time
+  ON events(persistence_state,candidate_time_utc_ms DESC);
+CREATE INDEX idx_events_review_time ON events(review_state,candidate_time_utc_ms DESC);
+)sql";
+
 Result<void> migrate_to_v1(sqlite3* database)
 {
     auto begun = execute(database, "BEGIN IMMEDIATE", "database.migrate.begin", true);
@@ -568,6 +624,85 @@ Result<void> migrate_to_v4(sqlite3* database)
         return schema;
     }
     return Result<void>::success();
+}
+
+Result<void> migrate_to_v5(sqlite3* database)
+{
+    auto foreign_keys =
+        execute(database, "PRAGMA foreign_keys=OFF", "database.migrate.foreignKeys");
+    if (!foreign_keys)
+        return foreign_keys;
+    auto begun = execute(database, "BEGIN IMMEDIATE", "database.migrate.begin", true);
+    if (!begun)
+        return begun;
+    auto schema = execute(database, schema_v5, "database.migrate.schema-v5", true);
+    if (schema)
+        schema = execute(database, "PRAGMA user_version=5", "database.migrate.version", true);
+    if (schema)
+        schema = execute(database, "COMMIT", "database.migrate.commit", true);
+    if (!schema)
+    {
+        static_cast<void>(execute(database, "ROLLBACK", "database.migrate.rollback", true));
+        return schema;
+    }
+    return execute(database, "PRAGMA foreign_keys=ON", "database.migrate.foreignKeys");
+}
+
+Result<std::uint64_t> legacy_event_count(sqlite3* database)
+{
+    auto prepared =
+        prepare(database, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'",
+                "database.open.legacyTable");
+    if (!prepared)
+        return Result<std::uint64_t>::failure(std::move(prepared).error());
+    auto statement = std::move(prepared).value();
+    const auto stepped = sqlite3_step(statement.get());
+    if (stepped != SQLITE_ROW)
+        return Result<std::uint64_t>::failure(
+            database_error(database, stepped, "database.open.legacyCount", "无法检查旧事件数据库"));
+    if (sqlite3_column_int64(statement.get(), 0) == 0)
+        return Result<std::uint64_t>::success(0U);
+    prepared = prepare(database, "SELECT COUNT(*) FROM events", "database.open.legacyCount");
+    if (!prepared)
+        return Result<std::uint64_t>::failure(std::move(prepared).error());
+    statement = std::move(prepared).value();
+    const auto count_stepped = sqlite3_step(statement.get());
+    if (count_stepped != SQLITE_ROW || sqlite3_column_int64(statement.get(), 0) < 0)
+        return Result<std::uint64_t>::failure(database_error(
+            database, count_stepped, "database.open.legacyCount", "无法检查旧事件数据库"));
+    return Result<std::uint64_t>::success(
+        static_cast<std::uint64_t>(sqlite3_column_int64(statement.get(), 0)));
+}
+
+bool contains_legacy_event_data(const std::filesystem::path& event_root)
+{
+    std::error_code error;
+    for (std::filesystem::recursive_directory_iterator
+             iterator{event_root, std::filesystem::directory_options::skip_permission_denied,
+                      error},
+         end;
+         iterator != end && !error; iterator.increment(error))
+    {
+        if (iterator->is_regular_file(error) && iterator->path().filename() == "manifest.json")
+        {
+            try
+            {
+                std::ifstream input{iterator->path(), std::ios::binary};
+                nlohmann::json manifest;
+                input >> manifest;
+                if (!input || !manifest.contains("schemaVersion") ||
+                    !manifest["schemaVersion"].is_number_unsigned() ||
+                    manifest["schemaVersion"].get<std::uint32_t>() != event_manifest_schema_version)
+                    return true;
+            }
+            catch (const std::exception&)
+            {
+                return true;
+            }
+        }
+        error.clear();
+    }
+    return false;
 }
 
 Result<void> reserve_file(const std::filesystem::path& path)
@@ -750,7 +885,12 @@ Result<IndexedManifest> parse_index_manifest(const std::string& manifest_text)
         indexed.manifest_size_bytes = manifest_text.size();
         indexed.event = {.event_id = value.at("eventId").get<std::string>(),
                          .event_schema_version = value.at("schemaVersion").get<std::uint32_t>(),
-                         .event_state = value.at("eventState").get<std::string>(),
+                         .event_state = value.at("decisionState").get<std::string>(),
+                         .decision_state = value.at("decisionState").get<std::string>(),
+                         .persistence_state = "Committed",
+                         .review_state = "Unreviewed",
+                         .artifacts_available = true,
+                         .trigger_count = value.at("triggerCount").get<std::uint64_t>(),
                          .candidate_time_utc_ms = *candidate,
                          .confirmed_time_utc_ms = confirmed,
                          .start_time_utc_ms = *start,
@@ -797,20 +937,22 @@ Result<void> bind_failure(sqlite3* database, const std::string_view operation)
 Result<void> index_manifest(sqlite3* database, const IndexedManifest& indexed)
 {
     constexpr std::string_view event_sql = R"sql(
-INSERT INTO events(event_id,event_schema_version,event_state,candidate_time_utc_ms,
+INSERT INTO events(event_id,event_schema_version,event_state,decision_state,persistence_state,
+ review_state,review_decision,artifacts_available,trigger_count,candidate_time_utc_ms,
  confirmed_time_utc_ms,start_time_utc_ms,end_time_utc_ms,trigger_camera_id,
  trigger_frame_number,trigger_reason,confidence,pre_event_ms,post_event_ms,algorithm_name,
  algorithm_version,config_version,machine_id,production_line_id,paper_type,paper_speed,
  upload_state,time_quality,relative_directory,storage_state,window_complete,
  truncated_by_maximum_duration,stopped_early,indexed_at_utc_ms)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
+       ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)
 ON CONFLICT(event_id) DO UPDATE SET
  event_schema_version=excluded.event_schema_version,
- event_state=CASE WHEN events.review_revision>1 THEN events.event_state
-                  ELSE excluded.event_state END,
+ event_state=excluded.decision_state,decision_state=excluded.decision_state,
+ persistence_state='Committed',artifacts_available=1,
+ trigger_count=MAX(events.trigger_count,excluded.trigger_count),
  candidate_time_utc_ms=excluded.candidate_time_utc_ms,
- confirmed_time_utc_ms=CASE WHEN events.review_revision>1 THEN events.confirmed_time_utc_ms
-                            ELSE excluded.confirmed_time_utc_ms END,
+ confirmed_time_utc_ms=excluded.confirmed_time_utc_ms,
  start_time_utc_ms=excluded.start_time_utc_ms,
  end_time_utc_ms=excluded.end_time_utc_ms,trigger_camera_id=excluded.trigger_camera_id,
  trigger_frame_number=excluded.trigger_frame_number,trigger_reason=excluded.trigger_reason,
@@ -830,10 +972,16 @@ ON CONFLICT(event_id) DO UPDATE SET
     auto statement = std::move(prepared).value();
     int parameter = 1;
     const auto& event = indexed.event;
-    bool bound = bind_text(statement.get(), parameter, event.event_id) &&
-                 bind_int64(statement.get(), parameter, event.event_schema_version) &&
-                 bind_text(statement.get(), parameter, event.event_state) &&
-                 bind_int64(statement.get(), parameter, event.candidate_time_utc_ms);
+    bool bound =
+        bind_text(statement.get(), parameter, event.event_id) &&
+        bind_int64(statement.get(), parameter, event.event_schema_version) &&
+        bind_text(statement.get(), parameter, event.event_state) &&
+        bind_text(statement.get(), parameter, event.decision_state) &&
+        bind_text(statement.get(), parameter, "Committed") &&
+        bind_text(statement.get(), parameter, "Unreviewed") &&
+        bind_null(statement.get(), parameter) && bind_int64(statement.get(), parameter, 1) &&
+        bind_int64(statement.get(), parameter, static_cast<std::int64_t>(event.trigger_count)) &&
+        bind_int64(statement.get(), parameter, event.candidate_time_utc_ms);
     bound = bound && (event.confirmed_time_utc_ms
                           ? bind_int64(statement.get(), parameter, *event.confirmed_time_utc_ms)
                           : bind_null(statement.get(), parameter));
@@ -976,9 +1124,14 @@ INSERT INTO event_files(event_id,path,file_kind,camera_id,camera_frame_number,se
     auto metadata = insert_file("event.json", "Metadata", nullptr);
     if (!metadata)
         return metadata;
-    for (const auto& raw : indexed.value.at("rawFiles"))
+    for (const auto& raw : indexed.value.at("rawBlocks"))
     {
-        auto inserted = insert_file(raw.at("path").get_ref<const std::string&>(), "RawFrame", &raw);
+        Json attributes = raw;
+        attributes["cameraFrameNumber"] = raw.at("firstCameraFrameNumber");
+        attributes["sequenceNumber"] = raw.at("firstSequenceNumber");
+        attributes["wallClockTime"] = raw.at("startTime");
+        auto inserted =
+            insert_file(raw.at("path").get_ref<const std::string&>(), "RawBlock", &attributes);
         if (!inserted)
             return inserted;
     }
@@ -1266,9 +1419,36 @@ Result<std::unique_ptr<EventMetadataDatabase>> EventMetadataDatabase::open(
         return Result<std::unique_ptr<EventMetadataDatabase>>::failure(std::move(unsupported));
     }
 
+    if (contains_legacy_event_data(options.event_root))
+    {
+        Error unsupported =
+            make_error("EVENT_SCHEMA_UNSUPPORTED", Severity::critical,
+                       "检测到 schema v1、未知或损坏的旧事件目录；请先人工归档旧数据", "storage",
+                       "database.open.eventSchema");
+        unsupported.details.push_back(
+            {.key = "databaseVersion", .value = std::to_string(version.value())});
+        return Result<std::unique_ptr<EventMetadataDatabase>>::failure(std::move(unsupported));
+    }
+
     MetadataDatabaseOpenReport report{.schema_version = version.value(), .created = !existed};
     if (version.value() < database_schema_version)
     {
+        auto legacy_count = legacy_event_count(connection.get());
+        if (!legacy_count)
+            return Result<std::unique_ptr<EventMetadataDatabase>>::failure(
+                std::move(legacy_count).error());
+        if (legacy_count.value() != 0U)
+        {
+            Error unsupported =
+                make_error("EVENT_SCHEMA_UNSUPPORTED", Severity::critical,
+                           "检测到非空旧事件数据库或 schema v1 事件目录；请先人工归档旧数据",
+                           "storage", "database.open.eventSchema");
+            unsupported.details.push_back(
+                {.key = "databaseVersion", .value = std::to_string(version.value())});
+            unsupported.details.push_back(
+                {.key = "legacyEventCount", .value = std::to_string(legacy_count.value())});
+            return Result<std::unique_ptr<EventMetadataDatabase>>::failure(std::move(unsupported));
+        }
         if (existed)
         {
             std::filesystem::create_directories(options.backup_directory, error);
@@ -1307,6 +1487,8 @@ Result<std::unique_ptr<EventMetadataDatabase>> EventMetadataDatabase::open(
             migrated = migrate_to_v3(connection.get());
         if (migrated && version.value() <= 3U)
             migrated = migrate_to_v4(connection.get());
+        if (migrated && version.value() <= 4U)
+            migrated = migrate_to_v5(connection.get());
         if (!migrated)
             return Result<std::unique_ptr<EventMetadataDatabase>>::failure(
                 std::move(migrated).error());
@@ -1550,6 +1732,271 @@ Result<void> EventMetadataDatabase::index_committed_event(
     return Result<void>::success();
 }
 
+Result<EventMetadataRecord> EventMetadataDatabase::create_collecting_event(
+    const CollectingEventRecord& event)
+{
+    if (!valid_text(event.event_id) || !valid_text(event.decision_state) ||
+        event.candidate_time_utc_ms < 0 || event.start_time_utc_ms < 0 ||
+        event.end_time_utc_ms < event.start_time_utc_ms || event.camera_ids.empty() ||
+        event.camera_ids.size() > 4U || !valid_text(event.trigger_camera_id) ||
+        !valid_text(event.trigger_reason) || !std::isfinite(event.confidence) ||
+        event.confidence < 0.0 || event.confidence > 1.0 || event.trigger_count == 0U ||
+        event.trigger_count >
+            static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+        return Result<EventMetadataRecord>::failure(
+            config_error("候选事件参数无效", "database.event.collecting.validate"));
+    const std::set<std::string> cameras{event.camera_ids.begin(), event.camera_ids.end()};
+    if (cameras.size() != event.camera_ids.size() || !cameras.contains(event.trigger_camera_id))
+        return Result<EventMetadataRecord>::failure(
+            config_error("候选事件相机集合无效", "database.event.collecting.validate"));
+
+    const std::scoped_lock lock{impl_->mutex};
+    auto begun =
+        execute(impl_->database.get(), "BEGIN IMMEDIATE", "database.event.collecting.begin");
+    if (!begun)
+        return Result<EventMetadataRecord>::failure(std::move(begun).error());
+    auto inserted = prepare(impl_->database.get(), R"sql(
+INSERT INTO events(event_id,event_schema_version,event_state,decision_state,persistence_state,
+ review_state,review_decision,artifacts_available,trigger_count,candidate_time_utc_ms,
+ confirmed_time_utc_ms,start_time_utc_ms,end_time_utc_ms,trigger_camera_id,
+ trigger_frame_number,trigger_reason,confidence,pre_event_ms,post_event_ms,algorithm_name,
+ algorithm_version,config_version,machine_id,production_line_id,paper_type,paper_speed,
+ upload_state,time_quality,relative_directory,storage_state,window_complete,
+ truncated_by_maximum_duration,stopped_early,indexed_at_utc_ms)
+VALUES(?,?,?,?,?,'Unreviewed',NULL,0,?,?,?,?,?,?,?,?,?,0,0,'Pending','Pending','Pending',
+ 'Pending','Pending','Pending',NULL,'Pending','Normal','','Collecting',0,0,0,?)
+ON CONFLICT(event_id) DO NOTHING
+)sql",
+                            "database.event.collecting.insert", true);
+    if (!inserted)
+    {
+        static_cast<void>(
+            execute(impl_->database.get(), "ROLLBACK", "database.event.collecting.rollback"));
+        return Result<EventMetadataRecord>::failure(std::move(inserted).error());
+    }
+    auto statement = std::move(inserted).value();
+    int parameter = 1;
+    bool bound =
+        bind_text(statement.get(), parameter, event.event_id) &&
+        bind_int64(statement.get(), parameter, event_manifest_schema_version) &&
+        bind_text(statement.get(), parameter, event.decision_state) &&
+        bind_text(statement.get(), parameter, event.decision_state) &&
+        bind_text(statement.get(), parameter, "Collecting") &&
+        bind_int64(statement.get(), parameter, static_cast<std::int64_t>(event.trigger_count)) &&
+        bind_int64(statement.get(), parameter, event.candidate_time_utc_ms);
+    bound = bound &&
+            (event.confirmed_time_utc_ms
+                 ? bind_int64(statement.get(), parameter, *event.confirmed_time_utc_ms)
+                 : bind_null(statement.get(), parameter)) &&
+            bind_int64(statement.get(), parameter, event.start_time_utc_ms) &&
+            bind_int64(statement.get(), parameter, event.end_time_utc_ms) &&
+            bind_text(statement.get(), parameter, event.trigger_camera_id) &&
+            bind_int64(statement.get(), parameter,
+                       static_cast<std::int64_t>(event.trigger_frame_number)) &&
+            bind_text(statement.get(), parameter, event.trigger_reason) &&
+            bind_double(statement.get(), parameter, event.confidence) &&
+            bind_int64(statement.get(), parameter, current_epoch_milliseconds());
+    if (!bound)
+    {
+        static_cast<void>(
+            execute(impl_->database.get(), "ROLLBACK", "database.event.collecting.rollback"));
+        return Result<EventMetadataRecord>::failure(
+            std::move(bind_failure(impl_->database.get(), "database.event.collecting.bind"))
+                .error());
+    }
+    auto stepped =
+        step_done(impl_->database.get(), statement.get(), "database.event.collecting.insert", true);
+    if (!stepped || sqlite3_changes(impl_->database.get()) != 1)
+    {
+        static_cast<void>(
+            execute(impl_->database.get(), "ROLLBACK", "database.event.collecting.rollback"));
+        if (!stepped)
+            return Result<EventMetadataRecord>::failure(std::move(stepped).error());
+        return Result<EventMetadataRecord>::failure(
+            make_error("EVENT_VERSION_CONFLICT", Severity::warning, "候选事件标识已存在", "storage",
+                       "database.event.collecting"));
+    }
+    for (const auto& camera_id : event.camera_ids)
+    {
+        auto camera =
+            prepare(impl_->database.get(),
+                    "INSERT INTO event_cameras(event_id,camera_id,is_trigger) VALUES(?,?,?)",
+                    "database.event.collecting.camera", true);
+        if (!camera)
+        {
+            static_cast<void>(
+                execute(impl_->database.get(), "ROLLBACK", "database.event.collecting.rollback"));
+            return Result<EventMetadataRecord>::failure(std::move(camera).error());
+        }
+        auto camera_statement = std::move(camera).value();
+        int camera_parameter = 1;
+        if (!bind_text(camera_statement.get(), camera_parameter, event.event_id) ||
+            !bind_text(camera_statement.get(), camera_parameter, camera_id) ||
+            !bind_int64(camera_statement.get(), camera_parameter,
+                        camera_id == event.trigger_camera_id ? 1 : 0))
+        {
+            static_cast<void>(
+                execute(impl_->database.get(), "ROLLBACK", "database.event.collecting.rollback"));
+            return Result<EventMetadataRecord>::failure(
+                std::move(
+                    bind_failure(impl_->database.get(), "database.event.collecting.camera.bind"))
+                    .error());
+        }
+        auto camera_inserted = step_done(impl_->database.get(), camera_statement.get(),
+                                         "database.event.collecting.camera", true);
+        if (!camera_inserted)
+        {
+            static_cast<void>(
+                execute(impl_->database.get(), "ROLLBACK", "database.event.collecting.rollback"));
+            return Result<EventMetadataRecord>::failure(std::move(camera_inserted).error());
+        }
+    }
+    auto retention =
+        prepare(impl_->database.get(), "INSERT INTO event_retention(event_id) VALUES(?)",
+                "database.event.collecting.retention", true);
+    if (!retention)
+    {
+        static_cast<void>(
+            execute(impl_->database.get(), "ROLLBACK", "database.event.collecting.rollback"));
+        return Result<EventMetadataRecord>::failure(std::move(retention).error());
+    }
+    auto retention_statement = std::move(retention).value();
+    int retention_parameter = 1;
+    if (!bind_text(retention_statement.get(), retention_parameter, event.event_id))
+    {
+        static_cast<void>(
+            execute(impl_->database.get(), "ROLLBACK", "database.event.collecting.rollback"));
+        return Result<EventMetadataRecord>::failure(
+            std::move(
+                bind_failure(impl_->database.get(), "database.event.collecting.retention.bind"))
+                .error());
+    }
+    auto retention_inserted = step_done(impl_->database.get(), retention_statement.get(),
+                                        "database.event.collecting.retention", true);
+    if (!retention_inserted)
+    {
+        static_cast<void>(
+            execute(impl_->database.get(), "ROLLBACK", "database.event.collecting.rollback"));
+        return Result<EventMetadataRecord>::failure(std::move(retention_inserted).error());
+    }
+    auto committed = execute(impl_->database.get(), "COMMIT", "database.event.collecting.commit");
+    if (!committed)
+        return Result<EventMetadataRecord>::failure(std::move(committed).error());
+    // Avoid recursively locking through get_event().
+    EventMetadataRecord result{.event_id = event.event_id,
+                               .event_schema_version = event_manifest_schema_version,
+                               .event_state = event.decision_state,
+                               .decision_state = event.decision_state,
+                               .persistence_state = "Collecting",
+                               .review_state = "Unreviewed",
+                               .artifacts_available = false,
+                               .trigger_count = event.trigger_count,
+                               .candidate_time_utc_ms = event.candidate_time_utc_ms,
+                               .confirmed_time_utc_ms = event.confirmed_time_utc_ms,
+                               .start_time_utc_ms = event.start_time_utc_ms,
+                               .end_time_utc_ms = event.end_time_utc_ms,
+                               .camera_ids = event.camera_ids,
+                               .trigger_camera_id = event.trigger_camera_id,
+                               .trigger_frame_number = event.trigger_frame_number,
+                               .trigger_reason = event.trigger_reason,
+                               .confidence = event.confidence,
+                               .upload_state = "Pending",
+                               .storage_state = "Collecting",
+                               .deletion_state = "Active"};
+    return Result<EventMetadataRecord>::success(std::move(result));
+}
+
+Result<EventMetadataRecord> EventMetadataDatabase::update_event_lifecycle(
+    const std::string_view event_id, const std::string_view decision_state,
+    const std::string_view persistence_state, const std::uint64_t trigger_count,
+    const std::optional<std::int64_t> confirmed_time_utc_ms)
+{
+    const auto decision_rank = [](const std::string_view state) {
+        if (state == "Confirmed")
+            return 4;
+        if (state == "Candidate")
+            return 3;
+        if (state == "Timeout")
+            return 2;
+        if (state == "Rejected")
+            return 1;
+        return 0;
+    };
+    const bool valid_persistence =
+        persistence_state == "Collecting" || persistence_state == "Encoding" ||
+        persistence_state == "Queued" || persistence_state == "Writing" ||
+        persistence_state == "Committed" || persistence_state == "Incomplete";
+    if (!valid_text(event_id) || decision_rank(decision_state) == 0 || !valid_persistence ||
+        trigger_count == 0U ||
+        trigger_count > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+        return Result<EventMetadataRecord>::failure(
+            config_error("事件生命周期参数无效", "database.event.lifecycle.validate"));
+    {
+        const std::scoped_lock lock{impl_->mutex};
+        auto selected =
+            prepare(impl_->database.get(), "SELECT decision_state FROM events WHERE event_id=?",
+                    "database.event.lifecycle.select", true);
+        if (!selected)
+            return Result<EventMetadataRecord>::failure(std::move(selected).error());
+        auto selected_statement = std::move(selected).value();
+        int parameter = 1;
+        if (!bind_text(selected_statement.get(), parameter, event_id))
+            return Result<EventMetadataRecord>::failure(
+                std::move(
+                    bind_failure(impl_->database.get(), "database.event.lifecycle.select.bind"))
+                    .error());
+        const auto selected_result = sqlite3_step(selected_statement.get());
+        if (selected_result != SQLITE_ROW)
+            return Result<EventMetadataRecord>::failure(
+                make_error("EVENT_NOT_FOUND", Severity::error, "事件不存在", "storage",
+                           "database.event.lifecycle"));
+        const std::string current = column_text(selected_statement.get(), 0);
+        // The runtime supplies the aggregate of all source decisions. Once confirmed, the
+        // canonical event is deliberately sticky and cannot be downgraded by a late source.
+        const std::string aggregate =
+            current == "Confirmed" ? current : std::string{decision_state};
+        auto updated = prepare(impl_->database.get(), R"sql(
+UPDATE events SET event_state=?,decision_state=?,persistence_state=?,
+ artifacts_available=CASE WHEN ?='Committed' THEN 1 ELSE 0 END,
+ storage_state=CASE WHEN ?='Committed' THEN 'Present'
+                    WHEN ?='Incomplete' THEN 'Damaged' ELSE 'Collecting' END,
+ trigger_count=MAX(trigger_count,?),
+ confirmed_time_utc_ms=CASE WHEN ?='Confirmed' THEN COALESCE(confirmed_time_utc_ms,?)
+                            ELSE confirmed_time_utc_ms END
+ WHERE event_id=?
+)sql",
+                               "database.event.lifecycle.update", true);
+        if (!updated)
+            return Result<EventMetadataRecord>::failure(std::move(updated).error());
+        auto update_statement = std::move(updated).value();
+        int update_parameter = 1;
+        bool bound = bind_text(update_statement.get(), update_parameter, aggregate) &&
+                     bind_text(update_statement.get(), update_parameter, aggregate) &&
+                     bind_text(update_statement.get(), update_parameter, persistence_state) &&
+                     bind_text(update_statement.get(), update_parameter, persistence_state) &&
+                     bind_text(update_statement.get(), update_parameter, persistence_state) &&
+                     bind_text(update_statement.get(), update_parameter, persistence_state) &&
+                     bind_int64(update_statement.get(), update_parameter,
+                                static_cast<std::int64_t>(trigger_count)) &&
+                     bind_text(update_statement.get(), update_parameter, aggregate);
+        bound = bound &&
+                (confirmed_time_utc_ms
+                     ? bind_int64(update_statement.get(), update_parameter, *confirmed_time_utc_ms)
+                     : bind_null(update_statement.get(), update_parameter)) &&
+                bind_text(update_statement.get(), update_parameter, event_id);
+        if (!bound)
+            return Result<EventMetadataRecord>::failure(
+                std::move(
+                    bind_failure(impl_->database.get(), "database.event.lifecycle.update.bind"))
+                    .error());
+        auto stepped = step_done(impl_->database.get(), update_statement.get(),
+                                 "database.event.lifecycle.update", true);
+        if (!stepped)
+            return Result<EventMetadataRecord>::failure(std::move(stepped).error());
+    }
+    return get_event(event_id);
+}
+
 Result<EventQueryPage> EventMetadataDatabase::query_events(const EventQuery& query) const
 {
     if (query.limit == 0U || query.limit > database_maximum_page_size ||
@@ -1558,6 +2005,12 @@ Result<EventQueryPage> EventMetadataDatabase::query_events(const EventQuery& que
          *query.start_time_utc_ms > *query.end_time_utc_ms) ||
         (query.event_id && !valid_text(*query.event_id)) ||
         (query.event_state && !valid_text(*query.event_state)) ||
+        (query.decision_state && !valid_text(*query.decision_state)) ||
+        (query.persistence_state && !valid_text(*query.persistence_state)) ||
+        (query.review_state && !valid_text(*query.review_state)) ||
+        (query.review_decision && !valid_text(*query.review_decision)) ||
+        (query.event_state && query.decision_state &&
+         *query.event_state != *query.decision_state) ||
         (query.camera_id && !valid_text(*query.camera_id)))
         return Result<EventQueryPage>::failure(
             config_error("事件分页或筛选参数无效", "database.query.validate"));
@@ -1569,8 +2022,15 @@ Result<EventQueryPage> EventMetadataDatabase::query_events(const EventQuery& que
         where += " AND e.candidate_time_utc_ms>=?";
     if (query.end_time_utc_ms)
         where += " AND e.candidate_time_utc_ms<=?";
-    if (query.event_state)
-        where += " AND e.event_state=?";
+    const auto& decision_filter = query.decision_state ? query.decision_state : query.event_state;
+    if (decision_filter)
+        where += " AND e.decision_state=?";
+    if (query.persistence_state)
+        where += " AND e.persistence_state=?";
+    if (query.review_state)
+        where += " AND e.review_state=?";
+    if (query.review_decision)
+        where += " AND e.review_decision=?";
     if (query.camera_id)
         where += " AND EXISTS(SELECT 1 FROM event_cameras c WHERE c.event_id=e.event_id AND "
                  "c.camera_id=?)";
@@ -1583,8 +2043,14 @@ Result<EventQueryPage> EventMetadataDatabase::query_events(const EventQuery& que
             bound = bound && bind_int64(statement, index, *query.start_time_utc_ms);
         if (query.end_time_utc_ms)
             bound = bound && bind_int64(statement, index, *query.end_time_utc_ms);
-        if (query.event_state)
-            bound = bound && bind_text(statement, index, *query.event_state);
+        if (decision_filter)
+            bound = bound && bind_text(statement, index, *decision_filter);
+        if (query.persistence_state)
+            bound = bound && bind_text(statement, index, *query.persistence_state);
+        if (query.review_state)
+            bound = bound && bind_text(statement, index, *query.review_state);
+        if (query.review_decision)
+            bound = bound && bind_text(statement, index, *query.review_decision);
         if (query.camera_id)
             bound = bound && bind_text(statement, index, *query.camera_id);
         return std::pair{bound, index};
@@ -1610,11 +2076,12 @@ Result<EventQueryPage> EventMetadataDatabase::query_events(const EventQuery& que
 
     const std::string select =
         R"sql(
-SELECT e.event_id,e.event_schema_version,e.event_state,e.review_revision,
- e.reviewed_at_utc_ms,e.reviewed_by,e.candidate_time_utc_ms,
- e.confirmed_time_utc_ms,e.start_time_utc_ms,e.end_time_utc_ms,e.trigger_camera_id,
- e.trigger_frame_number,e.trigger_reason,e.confidence,e.upload_state,e.storage_state,
- r.locked,r.deletion_allowed,r.deletion_state,e.relative_directory
+SELECT e.event_id,e.event_schema_version,e.event_state,e.decision_state,e.persistence_state,
+ e.review_state,e.review_decision,e.artifacts_available,e.trigger_count,e.review_revision,
+ e.reviewed_at_utc_ms,e.reviewed_by,e.candidate_time_utc_ms,e.confirmed_time_utc_ms,
+ e.start_time_utc_ms,e.end_time_utc_ms,e.trigger_camera_id,e.trigger_frame_number,
+ e.trigger_reason,e.confidence,e.upload_state,e.storage_state,r.locked,r.deletion_allowed,
+ r.deletion_state,e.relative_directory
  FROM events e JOIN event_retention r ON r.event_id=e.event_id)sql" +
         where + " ORDER BY e.candidate_time_utc_ms DESC,e.event_id DESC LIMIT ? OFFSET ?";
     auto rows = prepare(impl_->database.get(), select, "database.query.rows");
@@ -1634,8 +2101,8 @@ SELECT e.event_id,e.event_schema_version,e.event_state,e.review_revision,
                         .limit = query.limit};
     while ((result = sqlite3_step(row_statement.get())) == SQLITE_ROW)
     {
-        const auto review_revision = sqlite3_column_int64(row_statement.get(), 3);
-        const auto frame_number = sqlite3_column_int64(row_statement.get(), 11);
+        const auto review_revision = sqlite3_column_int64(row_statement.get(), 9);
+        const auto frame_number = sqlite3_column_int64(row_statement.get(), 17);
         if (review_revision <= 0 || frame_number < 0)
             return Result<EventQueryPage>::failure(database_error(
                 impl_->database.get(), SQLITE_CORRUPT, "database.query.rows", "事件帧号无效"));
@@ -1644,25 +2111,33 @@ SELECT e.event_id,e.event_schema_version,e.event_state,e.review_revision,
             .event_schema_version =
                 static_cast<std::uint32_t>(sqlite3_column_int64(row_statement.get(), 1)),
             .event_state = column_text(row_statement.get(), 2),
+            .decision_state = column_text(row_statement.get(), 3),
+            .persistence_state = column_text(row_statement.get(), 4),
+            .review_state = column_text(row_statement.get(), 5),
+            .artifacts_available = sqlite3_column_int64(row_statement.get(), 7) != 0,
+            .trigger_count =
+                static_cast<std::uint64_t>(sqlite3_column_int64(row_statement.get(), 8)),
             .review_revision = static_cast<std::uint64_t>(review_revision),
-            .reviewed_by = column_text(row_statement.get(), 5),
-            .candidate_time_utc_ms = sqlite3_column_int64(row_statement.get(), 6),
-            .start_time_utc_ms = sqlite3_column_int64(row_statement.get(), 8),
-            .end_time_utc_ms = sqlite3_column_int64(row_statement.get(), 9),
-            .trigger_camera_id = column_text(row_statement.get(), 10),
+            .reviewed_by = column_text(row_statement.get(), 11),
+            .candidate_time_utc_ms = sqlite3_column_int64(row_statement.get(), 12),
+            .start_time_utc_ms = sqlite3_column_int64(row_statement.get(), 14),
+            .end_time_utc_ms = sqlite3_column_int64(row_statement.get(), 15),
+            .trigger_camera_id = column_text(row_statement.get(), 16),
             .trigger_frame_number = static_cast<std::uint64_t>(frame_number),
-            .trigger_reason = column_text(row_statement.get(), 12),
-            .confidence = sqlite3_column_double(row_statement.get(), 13),
-            .upload_state = column_text(row_statement.get(), 14),
-            .storage_state = column_text(row_statement.get(), 15),
-            .retention_locked = sqlite3_column_int64(row_statement.get(), 16) != 0,
-            .deletion_allowed = sqlite3_column_int64(row_statement.get(), 17) != 0,
-            .deletion_state = column_text(row_statement.get(), 18),
-            .relative_directory = column_text(row_statement.get(), 19)};
-        if (sqlite3_column_type(row_statement.get(), 4) != SQLITE_NULL)
-            event.reviewed_at_utc_ms = sqlite3_column_int64(row_statement.get(), 4);
-        if (sqlite3_column_type(row_statement.get(), 7) != SQLITE_NULL)
-            event.confirmed_time_utc_ms = sqlite3_column_int64(row_statement.get(), 7);
+            .trigger_reason = column_text(row_statement.get(), 18),
+            .confidence = sqlite3_column_double(row_statement.get(), 19),
+            .upload_state = column_text(row_statement.get(), 20),
+            .storage_state = column_text(row_statement.get(), 21),
+            .retention_locked = sqlite3_column_int64(row_statement.get(), 22) != 0,
+            .deletion_allowed = sqlite3_column_int64(row_statement.get(), 23) != 0,
+            .deletion_state = column_text(row_statement.get(), 24),
+            .relative_directory = column_text(row_statement.get(), 25)};
+        if (sqlite3_column_type(row_statement.get(), 6) != SQLITE_NULL)
+            event.review_decision = column_text(row_statement.get(), 6);
+        if (sqlite3_column_type(row_statement.get(), 10) != SQLITE_NULL)
+            event.reviewed_at_utc_ms = sqlite3_column_int64(row_statement.get(), 10);
+        if (sqlite3_column_type(row_statement.get(), 13) != SQLITE_NULL)
+            event.confirmed_time_utc_ms = sqlite3_column_int64(row_statement.get(), 13);
         page.events.push_back(std::move(event));
     }
     if (result != SQLITE_DONE)
@@ -1692,6 +2167,42 @@ SELECT e.event_id,e.event_schema_version,e.event_state,e.review_revision,
                                                                   "database.query.cameras",
                                                                   "事件相机筛选结果读取失败"));
     }
+    auto summary = prepare(impl_->database.get(), R"sql(
+SELECT
+ SUM(trigger_count),SUM(decision_state='Confirmed'),
+ SUM(decision_state='Rejected'),SUM(decision_state='Timeout'),
+ SUM(persistence_state='Collecting'),SUM(persistence_state='Encoding'),
+ SUM(persistence_state='Queued'),SUM(persistence_state='Writing'),
+ SUM(persistence_state='Committed'),SUM(persistence_state='Incomplete'),
+ SUM(review_state='Unreviewed'),SUM(review_decision='Confirmed'),SUM(review_decision='Rejected')
+ FROM events
+)sql",
+                           "database.query.summary");
+    if (!summary)
+        return Result<EventQueryPage>::failure(std::move(summary).error());
+    auto summary_statement = std::move(summary).value();
+    result = sqlite3_step(summary_statement.get());
+    if (result != SQLITE_ROW)
+        return Result<EventQueryPage>::failure(database_error(
+            impl_->database.get(), result, "database.query.summary", "无法读取事件生命周期汇总"));
+    auto& lifecycle = page.summary;
+    auto summary_value = [&](const int column) {
+        const auto value = sqlite3_column_int64(summary_statement.get(), column);
+        return value < 0 ? std::uint64_t{} : static_cast<std::uint64_t>(value);
+    };
+    lifecycle.decision_candidates = summary_value(0);
+    lifecycle.decision_confirmed = summary_value(1);
+    lifecycle.decision_rejected = summary_value(2);
+    lifecycle.decision_timeout = summary_value(3);
+    lifecycle.persistence_collecting = summary_value(4);
+    lifecycle.persistence_encoding = summary_value(5);
+    lifecycle.persistence_queued = summary_value(6);
+    lifecycle.persistence_writing = summary_value(7);
+    lifecycle.persistence_committed = summary_value(8);
+    lifecycle.persistence_incomplete = summary_value(9);
+    lifecycle.review_unreviewed = summary_value(10);
+    lifecycle.review_confirmed = summary_value(11);
+    lifecycle.review_rejected = summary_value(12);
     return Result<EventQueryPage>::success(std::move(page));
 }
 
@@ -1730,7 +2241,8 @@ Result<EventReviewOutcome> EventMetadataDatabase::review_event(
     {
         const std::scoped_lock lock{impl_->mutex};
         auto selected = prepare(impl_->database.get(),
-                                "SELECT event_state,review_revision FROM events WHERE event_id=?",
+                                "SELECT review_decision,review_revision,persistence_state "
+                                "FROM events WHERE event_id=?",
                                 "database.review.select", true);
         if (!selected)
             return Result<EventReviewOutcome>::failure(std::move(selected).error());
@@ -1752,32 +2264,42 @@ Result<EventReviewOutcome> EventMetadataDatabase::review_event(
             return Result<EventReviewOutcome>::failure(
                 database_error(impl_->database.get(), selected_result, "database.review.select",
                                "无法读取事件复核状态"));
-        const std::string current_state = column_text(select_statement.get(), 0);
+        const std::optional<std::string> current_decision =
+            sqlite3_column_type(select_statement.get(), 0) == SQLITE_NULL
+                ? std::nullopt
+                : std::optional<std::string>{column_text(select_statement.get(), 0)};
         const auto current_revision_value = sqlite3_column_int64(select_statement.get(), 1);
         if (current_revision_value <= 0)
             return Result<EventReviewOutcome>::failure(
                 database_error(impl_->database.get(), SQLITE_CORRUPT, "database.review.select",
                                "事件复核版本无效"));
         const auto current_revision = static_cast<std::uint64_t>(current_revision_value);
-        if (current_state == desired)
+        const std::string persistence_state = column_text(select_statement.get(), 2);
+        if (persistence_state != "Committed")
+        {
+            return Result<EventReviewOutcome>::failure(
+                make_error("EVENT_NOT_COMMITTED", Severity::warning,
+                           "只有证据已提交的事件允许人工复核", "storage", "database.review"));
+        }
+        if (current_decision && *current_decision == desired)
         {
             duplicate = true;
         }
-        else if (current_revision != expected_review_revision || current_state == "Confirmed" ||
-                 current_state == "Rejected")
+        else if (current_revision != expected_review_revision || current_decision.has_value())
         {
             auto error = make_error("EVENT_VERSION_CONFLICT", Severity::warning,
                                     "事件已被其他操作员复核", "storage", "database.review");
             error.details.push_back(
                 {.key = "currentReviewRevision", .value = std::to_string(current_revision)});
-            error.details.push_back({.key = "currentState", .value = current_state});
+            error.details.push_back(
+                {.key = "currentDecision", .value = current_decision.value_or("null")});
             return Result<EventReviewOutcome>::failure(std::move(error));
         }
         else
         {
             auto updated = prepare(impl_->database.get(), R"sql(
-UPDATE events SET event_state=?,review_revision=review_revision+1,reviewed_at_utc_ms=?,
- reviewed_by=?,confirmed_time_utc_ms=CASE WHEN ?='Confirmed' THEN ? ELSE NULL END
+UPDATE events SET review_state='Reviewed',review_decision=?,
+ review_revision=review_revision+1,reviewed_at_utc_ms=?,reviewed_by=?
  WHERE event_id=? AND review_revision=?
 )sql",
                                    "database.review.update", true);
@@ -1788,8 +2310,6 @@ UPDATE events SET event_state=?,review_revision=review_revision+1,reviewed_at_ut
             if (!bind_text(update_statement.get(), update_index, desired) ||
                 !bind_int64(update_statement.get(), update_index, reviewed_at_utc_ms) ||
                 !bind_text(update_statement.get(), update_index, reviewed_by) ||
-                !bind_text(update_statement.get(), update_index, desired) ||
-                !bind_int64(update_statement.get(), update_index, reviewed_at_utc_ms) ||
                 !bind_text(update_statement.get(), update_index, event_id) ||
                 !bind_int64(update_statement.get(), update_index,
                             static_cast<std::int64_t>(expected_review_revision)))

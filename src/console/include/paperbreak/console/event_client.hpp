@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+class QTimer;
+
 namespace paperbreak::console
 {
 
@@ -34,6 +36,11 @@ struct EventListFilter final
     std::optional<std::int64_t> start_time_utc_ms;
     std::optional<std::int64_t> end_time_utc_ms;
     std::optional<std::string> event_state;
+    std::optional<std::string> decision_state;
+    std::optional<std::string> persistence_state;
+    std::optional<std::string> review_state;
+    std::optional<std::string> review_decision;
+    bool through_now{true};
     std::optional<std::string> camera_id;
     std::size_t offset{};
     std::size_t limit{50U};
@@ -43,6 +50,12 @@ struct EventListItem final
 {
     std::string event_id;
     std::string event_state;
+    std::string decision_state;
+    std::string persistence_state;
+    std::string review_state;
+    std::optional<std::string> review_decision;
+    bool artifacts_available{};
+    std::uint64_t trigger_count{};
     std::uint64_t review_revision{};
     std::int64_t candidate_time_utc_ms{};
     std::string trigger_camera_id;
@@ -50,6 +63,20 @@ struct EventListItem final
     std::string upload_state;
     std::string storage_state;
     bool thumbnail_available{};
+};
+
+struct EventLifecycleSummary final
+{
+    std::uint64_t candidate_decisions{};
+    std::uint64_t automatic_confirmations{};
+    std::uint64_t collecting{};
+    std::uint64_t encoding{};
+    std::uint64_t queued{};
+    std::uint64_t writing{};
+    std::uint64_t committed{};
+    std::uint64_t unreviewed{};
+    std::uint64_t review_confirmed{};
+    std::uint64_t review_rejected{};
 };
 
 struct EventDetail final
@@ -76,6 +103,7 @@ struct EventClientSnapshot final
     EventListFilter filter;
     std::vector<EventListItem> events;
     std::size_t total{};
+    EventLifecycleSummary summary;
     bool events_stale{true};
     std::optional<EventDetail> detail;
     bool operation_pending{};
@@ -126,12 +154,14 @@ class EventClient final
     EventClientSnapshot snapshot_;
     std::unique_ptr<ipc::IpcClient> client_;
     std::unique_ptr<FileExporter> exporter_;
+    std::unique_ptr<QTimer> refresh_timer_;
     std::shared_ptr<std::atomic_bool> alive_;
     std::optional<ipc::ClientRequestHandle> config_request_;
     std::optional<ipc::ClientRequestHandle> list_request_;
     std::optional<ipc::ClientRequestHandle> detail_request_;
     std::optional<ipc::ClientRequestHandle> manifest_request_;
     std::optional<ipc::ClientRequestHandle> operation_request_;
+    bool refresh_after_list_{};
 };
 
 } // namespace paperbreak::console

@@ -254,6 +254,9 @@ class MainWindow final : public QMainWindow
     QDateTimeEdit* event_filter_start_{};
     QDateTimeEdit* event_filter_end_{};
     QComboBox* event_filter_state_{};
+    QComboBox* event_filter_persistence_{};
+    QComboBox* event_filter_review_{};
+    QCheckBox* event_filter_through_now_{};
     QLineEdit* event_filter_camera_{};
     QTableWidget* event_table_{};
     QLabel* event_thumbnail_{};

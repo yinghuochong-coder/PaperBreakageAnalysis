@@ -154,6 +154,7 @@ struct EventPipelineState final
     std::unique_ptr<event::CandidateEventManager> candidates;
     std::unique_ptr<event::EventWindowManager> windows;
     std::map<std::string, std::string> source_to_canonical;
+    std::map<std::string, std::string> source_decisions;
     std::set<std::string> counted_confirmed_events;
     camera::MonotonicTime last_monotonic_time{};
     camera::WallClockTime last_wall_clock_time{};
@@ -376,6 +377,7 @@ struct EventRuntimeImpl final
         std::vector<storage::PersistedKeyFrame> key_frames;
         std::vector<std::string> nvme_lease_ids;
         bool save_raw{true};
+        bool failed{};
     };
 
     EventRuntimeOptions options;
@@ -405,6 +407,35 @@ struct EventRuntimeImpl final
         catch (...)
         {
         }
+    }
+
+    void publish_lifecycle(const storage::EventMetadataRecord& event) noexcept
+    {
+        try
+        {
+            if (options.lifecycle_observer)
+                options.lifecycle_observer(event);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    void transition_lifecycle(const std::string_view event_id,
+                              const std::string_view decision_state,
+                              const std::string_view persistence_state,
+                              const std::uint64_t trigger_count,
+                              const std::optional<std::int64_t> confirmed_time = std::nullopt)
+    {
+        auto updated = options.database->update_event_lifecycle(
+            event_id, decision_state, persistence_state, trigger_count, confirmed_time);
+        if (!updated)
+        {
+            ++event_failures;
+            report(updated.error());
+            return;
+        }
+        publish_lifecycle(updated.value());
     }
 
     [[nodiscard]] std::optional<Error> enter_degraded(Lane& lane,
@@ -486,6 +517,7 @@ struct EventRuntimeImpl final
         if (!completion.outcome)
         {
             ++event_failures;
+            transition_lifecycle(completion.event_id, "Rejected", "Incomplete", 1U);
             if (completion.error)
                 report(*completion.error);
             return;
@@ -495,6 +527,7 @@ struct EventRuntimeImpl final
         if (!indexed)
         {
             ++event_failures;
+            transition_lifecycle(completion.event_id, "Rejected", "Incomplete", 1U);
             report(indexed.error());
             return;
         }
@@ -532,6 +565,7 @@ struct EventRuntimeImpl final
                 nvme_lease_sources.erase(lease_id);
         }
         ++events_committed;
+        publish_lifecycle(record.value());
         try
         {
             if (options.committed_observer)
@@ -552,6 +586,16 @@ struct EventRuntimeImpl final
                 if (!admitted)
                 {
                     ++event_failures;
+                    transition_lifecycle(
+                        event.metadata.event_id, event.metadata.decision_state, "Incomplete",
+                        event.metadata.trigger_count,
+                        event.metadata.confirmed_time
+                            ? std::optional<std::int64_t>{std::chrono::duration_cast<
+                                                              std::chrono::milliseconds>(
+                                                              event.metadata.confirmed_time
+                                                                  ->time_since_epoch())
+                                                              .count()}
+                            : std::nullopt);
                     report(admitted.error());
                     return;
                 }
@@ -567,6 +611,14 @@ struct EventRuntimeImpl final
                     });
             }
             const auto event_id = event.metadata.event_id;
+            transition_lifecycle(
+                event_id, event.metadata.decision_state, "Queued", event.metadata.trigger_count,
+                event.metadata.confirmed_time
+                    ? std::optional<
+                          std::int64_t>{std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            event.metadata.confirmed_time->time_since_epoch())
+                                            .count()}
+                    : std::nullopt);
             if (!event.nvme_lease_ids.empty())
             {
                 bool lease_tracking_full = false;
@@ -593,6 +645,8 @@ struct EventRuntimeImpl final
             if (!submitted)
             {
                 ++event_failures;
+                transition_lifecycle(event_id, "Rejected", "Incomplete",
+                                     event.metadata.trigger_count);
                 report(submitted.error());
             }
         }
@@ -613,6 +667,7 @@ struct EventRuntimeImpl final
             else
             {
                 ++event_failures;
+                found->second.failed = true;
                 encoding_error = std::move(result.error);
             }
             if (found->second.remaining > 0U)
@@ -625,14 +680,32 @@ struct EventRuntimeImpl final
         }
         if (encoding_error)
             report(*encoding_error);
-        if (complete)
+        if (complete && complete->failed)
+            transition_lifecycle(complete->metadata.event_id, complete->metadata.decision_state,
+                                 "Incomplete", complete->metadata.trigger_count);
+        else if (complete)
             submit_persistence(std::move(*complete));
     }
 
     void freeze(EventPipelineState& state, event::FrozenEventWindow window)
     {
+        std::vector<std::string> source_ids;
+        source_ids.reserve(window.triggers.size());
+        for (const auto& item : window.triggers)
+            source_ids.push_back(item.source_event_id);
+        const auto release_sources = [&] {
+            for (const auto& source_id : source_ids)
+            {
+                state.source_decisions.erase(source_id);
+                state.source_to_canonical.erase(source_id);
+                state.counted_confirmed_events.erase(source_id);
+            }
+        };
         if (window.triggers.empty() || window.camera_windows.empty())
+        {
+            release_sources();
             return;
+        }
         event::KeyFrameSelectionContext context;
         for (const auto& camera : window.camera_windows)
             for (const auto& frame : camera.frames)
@@ -652,19 +725,33 @@ struct EventRuntimeImpl final
         if (!selected)
         {
             ++event_failures;
+            transition_lifecycle(window.event_id, "Candidate", "Incomplete", source_ids.size());
             report(selected.error());
+            release_sources();
             return;
         }
         if (selected.value().frames.size() > state.configuration.event.key_frame_count)
             selected.value().frames.resize(state.configuration.event.key_frame_count);
         const auto& trigger = window.triggers.front().trigger;
+        std::string aggregate_decision = "Candidate";
+        std::optional<camera::WallClockTime> aggregate_confirmed_time;
+        if (auto aggregate = options.database->get_event(window.event_id); aggregate)
+        {
+            aggregate_decision = aggregate.value().decision_state;
+            if (aggregate.value().confirmed_time_utc_ms)
+                aggregate_confirmed_time = camera::WallClockTime{
+                    std::chrono::milliseconds{*aggregate.value().confirmed_time_utc_ms}};
+        }
         std::vector<std::string> camera_ids;
         for (const auto& camera : window.camera_windows)
             camera_ids.push_back(camera.camera_id);
         PendingEvent pending_event{
             .metadata = {.event_id = window.event_id,
-                         .event_state = "Candidate",
+                         .event_state = aggregate_decision,
+                         .decision_state = aggregate_decision,
+                         .trigger_count = window.triggers.size(),
                          .candidate_time = trigger.wall_clock_time,
+                         .confirmed_time = aggregate_confirmed_time,
                          .start_time = earliest_wall_time(window),
                          .end_time = latest_wall_time(window),
                          .camera_ids = std::move(camera_ids),
@@ -692,6 +779,8 @@ struct EventRuntimeImpl final
             .window = std::move(window),
             .remaining = selected.value().frames.size(),
             .save_raw = state.configuration.event.save_raw};
+        transition_lifecycle(pending_event.metadata.event_id, pending_event.metadata.decision_state,
+                             "Encoding", pending_event.metadata.trigger_count);
         for (const auto& trigger_item : pending_event.window.triggers)
         {
             std::scoped_lock lock{mutex};
@@ -715,8 +804,10 @@ struct EventRuntimeImpl final
         }
         if (pending_full)
         {
+            transition_lifecycle(event_id, "Candidate", "Incomplete", source_ids.size());
             report(runtime_error("EVENT_QUEUE_FULL", Severity::critical, "待关键帧事件达到固定上限",
                                  "event.runtime.pending"));
+            release_sources();
             return;
         }
         if (selected.value().frames.empty())
@@ -729,6 +820,7 @@ struct EventRuntimeImpl final
                 pending.erase(found);
             }
             submit_persistence(std::move(*complete));
+            release_sources();
             return;
         }
         auto submitted = jpeg->submit(selected.value());
@@ -747,8 +839,10 @@ struct EventRuntimeImpl final
             }
             report(submitted.error());
             if (complete)
-                submit_persistence(std::move(*complete));
+                transition_lifecycle(complete->metadata.event_id, complete->metadata.decision_state,
+                                     "Incomplete", complete->metadata.trigger_count);
         }
+        release_sources();
     }
 
     [[nodiscard]] std::vector<Error> enqueue_result(EventPipelineState& state, Lane& lane,
@@ -787,6 +881,33 @@ struct EventRuntimeImpl final
         state.result_condition.notify_one();
     }
 
+    static std::string aggregate_decision(const EventPipelineState& state,
+                                          const std::string_view canonical_id)
+    {
+        const auto rank = [](const std::string_view value) {
+            if (value == "Confirmed")
+                return 4;
+            if (value == "Candidate")
+                return 3;
+            if (value == "Timeout")
+                return 2;
+            if (value == "Rejected")
+                return 1;
+            return 0;
+        };
+        std::string aggregate{"Rejected"};
+        for (const auto& [source_id, canonical] : state.source_to_canonical)
+        {
+            if (canonical != canonical_id)
+                continue;
+            const auto decision = state.source_decisions.find(source_id);
+            if (decision != state.source_decisions.end() &&
+                rank(decision->second) > rank(aggregate))
+                aggregate = decision->second;
+        }
+        return aggregate;
+    }
+
     void process_result(EventPipelineState& state, AlgorithmResultEnvelope envelope)
     {
         auto* lane = find_lane(state, envelope.frame.camera_id());
@@ -823,10 +944,80 @@ struct EventRuntimeImpl final
                         }
                         else
                         {
-                            state.source_to_canonical[candidate_event.event_id] =
-                                window_started.value().event.event_id;
+                            const auto canonical_id = window_started.value().event.event_id;
+                            for (const auto& source : window_started.value().event.triggers)
+                                state.source_to_canonical[source.source_event_id] = canonical_id;
                             ++lane->candidates_created;
-                            ++events_started;
+                            const auto decision =
+                                std::string{event::to_string(candidate_event.decision_state)};
+                            state.source_decisions[candidate_event.event_id] = decision;
+                            const auto aggregate = aggregate_decision(state, canonical_id);
+                            const auto confirmed_time =
+                                candidate_event.decision_state ==
+                                            event::CandidateEventState::confirmed &&
+                                        candidate_event.decision
+                                    ? std::optional<std::int64_t>{std::chrono::duration_cast<
+                                                                      std::chrono::milliseconds>(
+                                                                      candidate_event.decision
+                                                                          ->wall_clock_time
+                                                                          .time_since_epoch())
+                                                                      .count()}
+                                    : std::nullopt;
+                            auto existing = options.database->get_event(canonical_id);
+                            if (!existing && existing.error().business_code == "EVENT_NOT_FOUND")
+                            {
+                                const auto pre = std::chrono::seconds{
+                                    state.configuration.event.pre_event_seconds};
+                                const auto post = std::chrono::seconds{
+                                    state.configuration.event.post_event_seconds};
+                                std::vector<std::string> all_cameras;
+                                all_cameras.reserve(state.lanes.size());
+                                for (const auto& camera_lane : state.lanes)
+                                    all_cameras.push_back(camera_lane->camera_id);
+                                const auto wall_ms = [](const camera::WallClockTime time) {
+                                    return std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               time.time_since_epoch())
+                                        .count();
+                                };
+                                auto created = options.database->create_collecting_event(
+                                    {.event_id = canonical_id,
+                                     .decision_state = aggregate,
+                                     .candidate_time_utc_ms =
+                                         wall_ms(candidate_event.candidate_trigger.wall_clock_time),
+                                     .confirmed_time_utc_ms = confirmed_time,
+                                     .start_time_utc_ms = wall_ms(
+                                         candidate_event.candidate_trigger.wall_clock_time - pre),
+                                     .end_time_utc_ms = wall_ms(
+                                         candidate_event.candidate_trigger.wall_clock_time + post),
+                                     .camera_ids = std::move(all_cameras),
+                                     .trigger_camera_id =
+                                         candidate_event.candidate_trigger.camera_id,
+                                     .trigger_frame_number =
+                                         candidate_event.candidate_trigger.camera_frame_number,
+                                     .trigger_reason =
+                                         trigger_reason(candidate_event.candidate_trigger),
+                                     .confidence = candidate_event.candidate_trigger.confidence,
+                                     .trigger_count =
+                                         window_started.value().event.triggers.size()});
+                                if (!created)
+                                {
+                                    ++event_failures;
+                                    report(created.error());
+                                }
+                                else
+                                {
+                                    ++events_started;
+                                    publish_lifecycle(created.value());
+                                }
+                            }
+                            else if (!existing)
+                            {
+                                ++event_failures;
+                                report(existing.error());
+                            }
+                            transition_lifecycle(canonical_id, aggregate, "Collecting",
+                                                 window_started.value().event.triggers.size(),
+                                                 confirmed_time);
 
                             bool lease_exists = false;
                             {
@@ -865,11 +1056,52 @@ struct EventRuntimeImpl final
                             }
                         }
                     }
+                    else if (const auto canonical =
+                                 state.source_to_canonical.find(candidate_event.event_id);
+                             canonical != state.source_to_canonical.end())
+                    {
+                        auto current = options.database->get_event(canonical->second);
+                        if (current)
+                        {
+                            const auto decision =
+                                std::string{event::to_string(candidate_event.decision_state)};
+                            state.source_decisions[candidate_event.event_id] = decision;
+                            const auto aggregate = aggregate_decision(state, canonical->second);
+                            const auto confirmed_time =
+                                candidate_event.decision_state ==
+                                            event::CandidateEventState::confirmed &&
+                                        candidate_event.decision
+                                    ? std::optional<std::int64_t>{std::chrono::duration_cast<
+                                                                      std::chrono::milliseconds>(
+                                                                      candidate_event.decision
+                                                                          ->wall_clock_time
+                                                                          .time_since_epoch())
+                                                                      .count()}
+                                    : std::nullopt;
+                            transition_lifecycle(canonical->second, aggregate,
+                                                 current.value().persistence_state,
+                                                 current.value().trigger_count, confirmed_time);
+                        }
+                    }
                 }
             }
-            static_cast<void>(
+            const auto timed_out =
                 state.candidates->advance_time(envelope.frame.received_monotonic_time(),
-                                               envelope.frame.received_wall_clock_time()));
+                                               envelope.frame.received_wall_clock_time());
+            for (const auto& candidate_event : timed_out)
+            {
+                const auto canonical = state.source_to_canonical.find(candidate_event.event_id);
+                if (canonical == state.source_to_canonical.end())
+                    continue;
+                auto current = options.database->get_event(canonical->second);
+                if (current)
+                {
+                    state.source_decisions[candidate_event.event_id] = "Timeout";
+                    transition_lifecycle(
+                        canonical->second, aggregate_decision(state, canonical->second),
+                        current.value().persistence_state, current.value().trigger_count);
+                }
+            }
             frozen_windows = state.windows->advance_time(envelope.frame.received_monotonic_time());
         }
         for (auto& frozen : frozen_windows)
@@ -1040,8 +1272,22 @@ struct EventRuntimeImpl final
         std::vector<event::FrozenEventWindow> frozen_windows;
         {
             if (state.candidates)
-                static_cast<void>(
-                    state.candidates->stop(state.last_monotonic_time, state.last_wall_clock_time));
+            {
+                const auto stopped =
+                    state.candidates->stop(state.last_monotonic_time, state.last_wall_clock_time);
+                for (const auto& candidate_event : stopped)
+                {
+                    const auto canonical = state.source_to_canonical.find(candidate_event.event_id);
+                    if (canonical == state.source_to_canonical.end())
+                        continue;
+                    state.source_decisions[candidate_event.event_id] = "Timeout";
+                    auto current = options.database->get_event(canonical->second);
+                    if (current)
+                        transition_lifecycle(
+                            canonical->second, aggregate_decision(state, canonical->second),
+                            current.value().persistence_state, current.value().trigger_count);
+                }
+            }
             if (state.windows)
                 frozen_windows = state.windows->stop(state.last_monotonic_time);
         }
@@ -1189,7 +1435,14 @@ Result<std::shared_ptr<EventRuntime>> EventRuntime::create(EventRuntimeOptions o
         },
         {.event_capacity = impl->options.persistence_capacity,
          .register_thread = impl->options.register_thread,
-         .diagnostics = impl->options.diagnostics});
+         .diagnostics = impl->options.diagnostics,
+         .writing_observer = [raw](const std::string_view event_id) {
+             auto current = raw->options.database->get_event(event_id);
+             if (current)
+                 raw->transition_lifecycle(event_id, current.value().decision_state, "Writing",
+                                           current.value().trigger_count,
+                                           current.value().confirmed_time_utc_ms);
+         }});
     if (!persistence_runtime)
         return Result<std::shared_ptr<EventRuntime>>::failure(
             std::move(persistence_runtime).error());
@@ -1653,6 +1906,8 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
         else
             state = AlgorithmRuntimeState::partially_degraded;
     }
+    const auto persistence = impl_->persistence ? impl_->persistence->snapshot()
+                                                : storage::EventPersistenceRuntimeSnapshot{};
     return {.started = impl_->started,
             .accepting = impl_->accepting,
             .frame_queue_depth = frame_depth,
@@ -1662,6 +1917,13 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
             .result_queue_capacity = impl_->pipeline->result_capacity,
             .result_queue_high_watermark = result_high_watermark,
             .pending_events = impl_->pending.size(),
+            .persistence_queue_depth = persistence.depth,
+            .persistence_queue_capacity = persistence.capacity,
+            .persistence_queue_high_watermark = persistence.high_watermark,
+            .persistence_active_events = persistence.active_events,
+            .persistence_last_write_bytes = persistence.last_write_bytes,
+            .persistence_last_write_duration = persistence.last_write_duration,
+            .persistence_last_write_mib_per_second = persistence.last_write_mib_per_second,
             .submitted_frames = submitted,
             .processed_frames = processed,
             .rejected_frames = impl_->rejected_frames.load(),

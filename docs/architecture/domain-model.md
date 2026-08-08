@@ -109,11 +109,16 @@ EVT-019870f2-6c80-7a31-9b52-6e3b9ca1d88f
 | 状态维度 | 示例值 | 说明 |
 | --- | --- | --- |
 | `decisionState` | Candidate/Confirmed/Rejected/Timeout | 检测判定 |
-| `persistenceState` | Collecting/Writing/Committed/Incomplete/Corrupt | 事件证据写入 |
-| `reviewState` | Unreviewed/Acknowledged/Reviewed | 人工处置 |
+| `persistenceState` | Collecting/Encoding/Queued/Writing/Committed/Incomplete | 事件证据收集、编码、排队和写入；只有 `Committed` 有可读制品 |
+| `reviewState` | Unreviewed/Reviewed | 人工复核是否已完成；结论单独存入 `reviewDecision` |
 | `uploadState` | NotQueued/Queued/InProgress/Succeeded/Failed | 汇总显示；真实工作项在 `UploadTask` |
 
 任何接口必须注明返回的是哪个状态维度，不能只返回含糊的 `status`。
+
+`reviewDecision` 只能为 `Confirmed`、`Rejected` 或空值。人工复核不修改
+`decisionState`，也不改写不可变 manifest。兼容字段 `eventState` 暂时等同于
+`decisionState`，新客户端不得依赖它。合并事件的算法聚合优先级固定为
+`Confirmed > Candidate > Timeout > Rejected`；一旦任一来源确认，规范事件保持确认。
 
 ### 3.3 候选合并
 

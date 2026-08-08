@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QMetaObject>
 #include <QSaveFile>
+#include <QTimer>
 
 #include <algorithm>
 #include <chrono>
@@ -73,6 +74,16 @@ EventListItem event_item(const Json& value)
 {
     return {.event_id = value.value("eventId", std::string{}),
             .event_state = value.value("eventState", std::string{}),
+            .decision_state =
+                value.value("decisionState", value.value("eventState", std::string{})),
+            .persistence_state = value.value("persistenceState", std::string{}),
+            .review_state = value.value("reviewState", std::string{}),
+            .review_decision =
+                value.contains("reviewDecision") && value["reviewDecision"].is_string()
+                    ? std::optional<std::string>{value["reviewDecision"].get<std::string>()}
+                    : std::nullopt,
+            .artifacts_available = value.value("artifactsAvailable", false),
+            .trigger_count = value.value("triggerCount", std::uint64_t{}),
             .review_revision = value.value("reviewRevision", std::uint64_t{}),
             .candidate_time_utc_ms = value.value("candidateTimeUtcMs", std::int64_t{}),
             .trigger_camera_id = value.value("triggerCameraId", std::string{}),
@@ -228,14 +239,17 @@ EventClient::EventClient(EventClientObserver observer, ipc::IpcClientOptions opt
                          ThreadRegistrationFactory register_thread)
     : observer_(std::move(observer)),
       exporter_(std::make_unique<FileExporter>(std::move(register_thread))),
-      alive_(std::make_shared<std::atomic_bool>(true))
+      refresh_timer_(std::make_unique<QTimer>()), alive_(std::make_shared<std::atomic_bool>(true))
 {
+    refresh_timer_->setInterval(5000);
+    QObject::connect(refresh_timer_.get(), &QTimer::timeout, [this] { refresh(); });
     client_ = std::make_unique<ipc::IpcClient>(
         ipc::IpcClientCallbacks{
             .connection_changed = [this](const auto& value) { connection_changed(value); },
             .push_received =
                 [this](const auto, const auto& push) {
-                    if (push.event_name == "event.committed")
+                    if (push.event_name == "event.lifecycleChanged" ||
+                        push.event_name == "event.committed")
                         refresh();
                 }},
         std::move(options));
@@ -254,6 +268,8 @@ Result<void> EventClient::start()
 
 void EventClient::stop() noexcept
 {
+    if (refresh_timer_)
+        refresh_timer_->stop();
     if (client_)
         client_->stop();
     config_request_.reset();
@@ -278,9 +294,13 @@ void EventClient::connection_changed(const ipc::ClientConnectionSnapshot& connec
 {
     snapshot_.connection = connection;
     if (connection.state == ipc::ClientConnectionState::connected)
+    {
+        refresh_timer_->start();
         refresh();
+    }
     else
     {
+        refresh_timer_->stop();
         snapshot_.configuration_stale = true;
         snapshot_.events_stale = true;
         config_request_.reset();
@@ -308,7 +328,10 @@ void EventClient::refresh()
         else
             snapshot_.error = sent.error();
     }
-    static_cast<void>(query(snapshot_.filter));
+    if (list_request_)
+        refresh_after_list_ = true;
+    else
+        static_cast<void>(query(snapshot_.filter));
     notify();
 }
 
@@ -320,10 +343,18 @@ Result<void> EventClient::query(EventListFilter filter)
     Json payload{{"offset", filter.offset}, {"limit", filter.limit}};
     if (filter.start_time_utc_ms)
         payload["startTimeUtcMs"] = *filter.start_time_utc_ms;
-    if (filter.end_time_utc_ms)
+    if (!filter.through_now && filter.end_time_utc_ms)
         payload["endTimeUtcMs"] = *filter.end_time_utc_ms;
     if (filter.event_state)
         payload["eventState"] = *filter.event_state;
+    if (filter.decision_state)
+        payload["decisionState"] = *filter.decision_state;
+    if (filter.persistence_state)
+        payload["persistenceState"] = *filter.persistence_state;
+    if (filter.review_state)
+        payload["reviewState"] = *filter.review_state;
+    if (filter.review_decision)
+        payload["reviewDecision"] = *filter.review_decision;
     if (filter.camera_id)
         payload["cameraId"] = *filter.camera_id;
     auto sent =
@@ -456,9 +487,28 @@ void EventClient::list_completed(ipc::ClientRequestHandle handle,
         for (const auto& value : payload.value().at("events"))
             snapshot_.events.push_back(event_item(value));
         snapshot_.total = payload.value().value("total", 0U);
+        if (const auto summary = payload.value().find("summary");
+            summary != payload.value().end() && summary->is_object())
+        {
+            snapshot_.summary = {.candidate_decisions = summary->value("decisionCandidates", 0U),
+                                 .automatic_confirmations = summary->value("decisionConfirmed", 0U),
+                                 .collecting = summary->value("persistenceCollecting", 0U),
+                                 .encoding = summary->value("persistenceEncoding", 0U),
+                                 .queued = summary->value("persistenceQueued", 0U),
+                                 .writing = summary->value("persistenceWriting", 0U),
+                                 .committed = summary->value("persistenceCommitted", 0U),
+                                 .unreviewed = summary->value("reviewUnreviewed", 0U),
+                                 .review_confirmed = summary->value("reviewConfirmed", 0U),
+                                 .review_rejected = summary->value("reviewRejected", 0U)};
+        }
         snapshot_.events_stale = false;
     }
     notify();
+    if (refresh_after_list_)
+    {
+        refresh_after_list_ = false;
+        static_cast<void>(query(snapshot_.filter));
+    }
 }
 
 void EventClient::detail_completed(ipc::ClientRequestHandle handle,
@@ -472,16 +522,24 @@ void EventClient::detail_completed(ipc::ClientRequestHandle handle,
         snapshot_.error = payload.error();
     else
     {
+        const auto& committed = payload.value().find("committedDirectory");
+        const auto committed_path = committed != payload.value().end() && committed->is_string()
+                                        ? path_from_utf8(committed->get<std::string>())
+                                        : std::filesystem::path{};
         snapshot_.detail =
             EventDetail{.event = event_item(payload.value().at("event")),
-                        .committed_directory = path_from_utf8(
-                            payload.value().value("committedDirectory", std::string{})),
+                        .committed_directory = committed_path,
                         .manifest_json = {},
                         .thumbnail_jpeg = result.value().binary,
                         .raw_frame_count = payload.value().value("rawFrameCount", 0U),
                         .key_frame_count = payload.value().value("keyFrameCount", 0U),
                         .observed_sequence_gaps = payload.value().value("observedSequenceGaps", 0U),
                         .key_frames_traceable = payload.value().value("keyFramesTraceable", false)};
+        if (!snapshot_.detail->event.artifacts_available)
+        {
+            notify();
+            return;
+        }
         auto sent = client_->send_request(
             "event.getManifest", Json{{"eventId", snapshot_.detail->event.event_id}}.dump(), {},
             [this](auto manifest_handle, auto manifest_result) {

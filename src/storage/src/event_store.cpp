@@ -1,4 +1,5 @@
 #include "paperbreak/storage/event_store.hpp"
+#include "paperbreak/storage/nvme_cache.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -14,12 +15,14 @@
 #include <ctime>
 #include <exception>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 
 namespace paperbreak::storage
@@ -265,9 +268,12 @@ std::string_view pixel_format_name(const camera::PixelFormat format) noexcept
 Json metadata_json(const EventManifestMetadata& metadata,
                    const std::filesystem::path& destination_relative)
 {
+    const auto& decision_state =
+        metadata.decision_state.empty() ? metadata.event_state : metadata.decision_state;
     Json value{{"schemaVersion", event_manifest_schema_version},
                {"eventId", metadata.event_id},
-               {"eventState", metadata.event_state},
+               {"decisionState", decision_state},
+               {"triggerCount", metadata.trigger_count},
                {"candidateTime", format_utc(metadata.candidate_time)},
                {"confirmedTime", metadata.confirmed_time.has_value()
                                      ? Json(format_utc(*metadata.confirmed_time))
@@ -300,7 +306,9 @@ Result<void> validate_request(const EventPersistenceRequest& request,
 {
     const auto& metadata = request.metadata;
     if (!safe_event_id(metadata.event_id) || metadata.event_id != request.window.event_id ||
-        !valid_text(metadata.event_state) || metadata.start_time > metadata.end_time ||
+        !valid_text(metadata.decision_state.empty() ? metadata.event_state
+                                                    : metadata.decision_state) ||
+        metadata.trigger_count == 0U || metadata.start_time > metadata.end_time ||
         metadata.candidate_time < metadata.start_time ||
         metadata.candidate_time > metadata.end_time ||
         (metadata.confirmed_time.has_value() &&
@@ -433,7 +441,7 @@ bool has_string(const Json& value, const std::string_view key) noexcept
 Result<void> validate_manifest_shape(const Json& manifest, const EventStoreOptions& options)
 {
     static constexpr std::array<std::string_view, 13U> required_strings{
-        "eventId",         "eventState",       "candidateTime", "startTime",        "endTime",
+        "eventId",         "decisionState",    "candidateTime", "startTime",        "endTime",
         "triggerCameraId", "triggerReason",    "algorithmName", "algorithmVersion", "configVersion",
         "machineId",       "productionLineId", "paperType"};
     if (std::ranges::any_of(required_strings,
@@ -443,14 +451,17 @@ Result<void> validate_manifest_shape(const Json& manifest, const EventStoreOptio
         !(manifest["confirmedTime"].is_null() || manifest["confirmedTime"].is_string()) ||
         !manifest.contains("cameraIds") || !manifest["cameraIds"].is_array() ||
         manifest["cameraIds"].empty() || manifest["cameraIds"].size() > 4U ||
+        !manifest.contains("triggerCount") || !manifest["triggerCount"].is_number_unsigned() ||
+        manifest["triggerCount"].get<std::uint64_t>() == 0U ||
         !manifest.contains("triggerFrameNumber") ||
         !manifest["triggerFrameNumber"].is_number_unsigned() || !manifest.contains("confidence") ||
         !manifest["confidence"].is_number() || !manifest.contains("preEventSeconds") ||
         !manifest["preEventSeconds"].is_number() || !manifest.contains("postEventSeconds") ||
         !manifest["postEventSeconds"].is_number() || !manifest.contains("paperSpeed") ||
         !(manifest["paperSpeed"].is_null() || manifest["paperSpeed"].is_number()) ||
-        !manifest.contains("rawFiles") || !manifest["rawFiles"].is_array() ||
-        manifest["rawFiles"].empty() || manifest["rawFiles"].size() > options.maximum_raw_frames ||
+        !manifest.contains("rawBlocks") || !manifest["rawBlocks"].is_array() ||
+        manifest["rawBlocks"].empty() ||
+        manifest["rawBlocks"].size() > options.maximum_raw_frames ||
         !manifest.contains("keyFrames") || !manifest["keyFrames"].is_array() ||
         manifest["keyFrames"].size() > options.maximum_key_frames)
         return Result<void>::failure(event_error("EVENT_RECOVERY_FAILED", Severity::critical,
@@ -513,7 +524,7 @@ Result<void> validate_manifest_shape(const Json& manifest, const EventStoreOptio
         }
         return true;
     };
-    if (!collect_paths(manifest["rawFiles"], "raw/") ||
+    if (!collect_paths(manifest["rawBlocks"], "raw/") ||
         !collect_paths(manifest["keyFrames"], "keyframes/"))
         return Result<void>::failure(event_error("EVENT_RECOVERY_FAILED", Severity::critical,
                                                  "事件 manifest 文件路径或相机映射无效",
@@ -591,6 +602,215 @@ Json frame_json(const camera::FrameView& frame, const std::filesystem::path& rel
                {"pixelFormat", pixel_format_name(frame.pixel_format())},
                {"incomplete", frame.flags().incomplete}};
     return value;
+}
+
+template <typename T>
+void put_little(std::span<std::byte> destination, const std::size_t offset, const T value) noexcept
+{
+    using Unsigned = std::make_unsigned_t<T>;
+    const auto converted = static_cast<Unsigned>(value);
+    for (std::size_t index = 0U; index < sizeof(T); ++index)
+        destination[offset + index] =
+            static_cast<std::byte>((converted >> (index * 8U)) & static_cast<Unsigned>(0xFFU));
+}
+
+std::uint16_t pixel_format_id(const camera::PixelFormat value) noexcept
+{
+    switch (value)
+    {
+    case camera::PixelFormat::mono8:
+        return 1U;
+    case camera::PixelFormat::mono10:
+        return 2U;
+    case camera::PixelFormat::mono12:
+        return 3U;
+    case camera::PixelFormat::bayer_rg8:
+        return 4U;
+    }
+    return 0U;
+}
+
+std::uint64_t aligned_nvme_region(const std::uint64_t value) noexcept
+{
+    return (value + nvme_page_bytes - 1U) & ~(static_cast<std::uint64_t>(nvme_page_bytes) - 1U);
+}
+
+struct EncodedRawBlock final
+{
+    std::vector<std::byte> bytes;
+    std::string checksum;
+    Json manifest;
+};
+
+Result<EncodedRawBlock> encode_raw_block(const std::string_view event_id,
+                                         const std::filesystem::path& relative_path,
+                                         const std::string_view camera_id,
+                                         const std::span<const camera::FrameView> frames,
+                                         const std::uint64_t ordinal,
+                                         const std::size_t maximum_file_bytes)
+{
+    if (frames.empty() || frames.size() > event_raw_block_maximum_frames || camera_id.empty() ||
+        camera_id.size() > 16U)
+        return Result<EncodedRawBlock>::failure(
+            event_error("EVENT_WRITE_FAILED", Severity::critical, "事件原始块参数无效",
+                        "event.persist.rawBlock"));
+    const auto geometry = frames.front().geometry();
+    const auto format = frames.front().pixel_format();
+    std::size_t maximum_frame_bytes{};
+    for (std::size_t index = 0U; index < frames.size(); ++index)
+    {
+        const auto& frame = frames[index];
+        maximum_frame_bytes = (std::max)(maximum_frame_bytes, frame.bytes().size());
+        if (frame.camera_id() != camera_id || frame.geometry() != geometry ||
+            frame.pixel_format() != format || frame.bytes().empty() ||
+            (index != 0U && frame.sequence_number() <= frames[index - 1U].sequence_number()))
+            return Result<EncodedRawBlock>::failure(
+                event_error("EVENT_WRITE_FAILED", Severity::critical, "事件原始块帧布局无效",
+                            "event.persist.rawBlock"));
+    }
+    if (maximum_frame_bytes > (std::numeric_limits<std::uint32_t>::max)())
+        return Result<EncodedRawBlock>::failure(
+            event_error("EVENT_WRITE_FAILED", Severity::critical, "事件原始块单帧过大",
+                        "event.persist.rawBlock"));
+    const auto index_capacity = static_cast<std::uint32_t>(frames.size());
+    auto maximum =
+        maximum_nvme_block_bytes(index_capacity, static_cast<std::uint32_t>(maximum_frame_bytes));
+    if (!maximum || maximum.value() > maximum_file_bytes ||
+        maximum.value() > (std::numeric_limits<std::size_t>::max)())
+        return Result<EncodedRawBlock>::failure(
+            event_error("EVENT_WRITE_FAILED", Severity::critical, "事件原始块超过固定文件上限",
+                        "event.persist.rawBlock"));
+
+    EncodedRawBlock result;
+    result.bytes.resize(static_cast<std::size_t>(maximum.value()));
+    auto bytes = std::span<std::byte>{result.bytes};
+    constexpr std::array<std::byte, 8U> header_magic{std::byte{'P'}, std::byte{'B'}, std::byte{'N'},
+                                                     std::byte{'V'}, std::byte{'M'}, std::byte{'E'},
+                                                     std::byte{'1'}, std::byte{0U}};
+    std::ranges::copy(header_magic, bytes.begin());
+    put_little<std::uint16_t>(bytes, 8U, nvme_format_version);
+    put_little<std::uint16_t>(bytes, 10U, nvme_page_bytes);
+    put_little<std::uint32_t>(bytes, 12U, 0x01020304U);
+    const auto identity =
+        std::string{event_id} + ":" + std::string{camera_id} + ":" + std::to_string(ordinal);
+    const auto identity_digest = sha256(bytes_of(identity));
+    for (std::size_t index = 0U; index < 16U; ++index)
+    {
+        unsigned parsed{};
+        const auto first = identity_digest.data() + index * 2U;
+        static_cast<void>(std::from_chars(first, first + 2U, parsed, 16));
+        bytes[16U + index] = static_cast<std::byte>(parsed);
+    }
+    put_little<std::uint64_t>(bytes, 32U, ordinal + 1U);
+    std::ranges::copy(std::as_bytes(std::span{camera_id.data(), camera_id.size()}),
+                      bytes.begin() + 40U);
+    put_little<std::uint16_t>(bytes, 56U, static_cast<std::uint16_t>(camera_id.size()));
+    put_little<std::uint16_t>(bytes, 58U, pixel_format_id(format));
+    put_little<std::uint32_t>(bytes, 60U, geometry.width);
+    put_little<std::uint32_t>(bytes, 64U, geometry.height);
+    put_little<std::uint32_t>(bytes, 68U, geometry.stride);
+    put_little<std::uint32_t>(bytes, 76U,
+                              static_cast<std::uint32_t>(event_raw_block_duration.count()));
+    put_little<std::uint32_t>(bytes, 80U, nvme_index_entry_bytes);
+    put_little<std::uint32_t>(bytes, 84U, index_capacity);
+    put_little<std::uint32_t>(bytes, 88U, nvme_page_bytes);
+    put_little<std::uint32_t>(bytes, 92U, static_cast<std::uint32_t>(maximum_frame_bytes));
+    const auto wall_nanoseconds = [](const camera::WallClockTime value) {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(value.time_since_epoch())
+            .count();
+    };
+    put_little<std::int64_t>(bytes, 96U,
+                             wall_nanoseconds(frames.front().received_wall_clock_time()));
+    put_little<std::uint64_t>(bytes, 120U, frames.front().sequence_number());
+    const auto header_crc = crc32c(bytes.first(nvme_page_bytes));
+    put_little<std::uint32_t>(bytes, 128U, header_crc);
+
+    const auto index_reserved =
+        aligned_nvme_region(static_cast<std::uint64_t>(index_capacity) * nvme_index_entry_bytes);
+    const auto data_start = static_cast<std::uint64_t>(nvme_page_bytes) + index_reserved;
+    std::uint64_t data_offset = data_start;
+    std::uint32_t data_crc{};
+    for (std::size_t frame_index = 0U; frame_index < frames.size(); ++frame_index)
+    {
+        const auto& frame = frames[frame_index];
+        auto entry = bytes.subspan(nvme_page_bytes + frame_index * nvme_index_entry_bytes,
+                                   nvme_index_entry_bytes);
+        put_little<std::uint64_t>(entry, 0U, frame.sequence_number());
+        put_little<std::uint64_t>(entry, 8U, frame.camera_frame_number());
+        const auto monotonic_delta =
+            frame.received_monotonic_time() <= frames.front().received_monotonic_time()
+                ? 0U
+                : static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                 frame.received_monotonic_time() -
+                                                 frames.front().received_monotonic_time())
+                                                 .count());
+        put_little<std::uint64_t>(entry, 16U, monotonic_delta);
+        put_little<std::int64_t>(entry, 24U, wall_nanoseconds(frame.received_wall_clock_time()));
+        put_little<std::uint64_t>(entry, 48U, data_offset);
+        put_little<std::uint32_t>(entry, 56U, static_cast<std::uint32_t>(frame.bytes().size()));
+        put_little<std::uint32_t>(entry, 60U, geometry.width);
+        put_little<std::uint32_t>(entry, 64U, geometry.height);
+        put_little<std::uint32_t>(entry, 68U, geometry.stride);
+        put_little<std::uint16_t>(entry, 72U, pixel_format_id(format));
+        put_little<std::uint16_t>(entry, 74U, frame.flags().incomplete ? 1U : 0U);
+        put_little<std::uint32_t>(entry, 76U, crc32c(frame.bytes()));
+        put_little<std::uint32_t>(entry, 80U, crc32c(entry));
+        std::ranges::copy(frame.bytes(), bytes.begin() + static_cast<std::ptrdiff_t>(data_offset));
+        data_crc = crc32c(frame.bytes(), data_crc);
+        data_offset += frame.bytes().size();
+    }
+    const auto index_bytes = static_cast<std::uint64_t>(frames.size()) * nvme_index_entry_bytes;
+    const auto index_crc =
+        crc32c(bytes.subspan(nvme_page_bytes, static_cast<std::size_t>(index_bytes)));
+    auto footer = bytes.last(nvme_page_bytes);
+    constexpr std::array<std::byte, 8U> footer_magic{std::byte{'P'}, std::byte{'B'}, std::byte{'C'},
+                                                     std::byte{'O'}, std::byte{'M'}, std::byte{'M'},
+                                                     std::byte{'I'}, std::byte{'T'}};
+    constexpr std::array<std::byte, 8U> marker{std::byte{'C'}, std::byte{'O'}, std::byte{'M'},
+                                               std::byte{'M'}, std::byte{'I'}, std::byte{'T'},
+                                               std::byte{'1'}, std::byte{0U}};
+    std::ranges::copy(footer_magic, footer.begin());
+    put_little<std::uint16_t>(footer, 8U, nvme_format_version);
+    put_little<std::uint16_t>(footer, 10U, nvme_page_bytes);
+    put_little<std::uint32_t>(footer, 12U, static_cast<std::uint32_t>(frames.size()));
+    put_little<std::uint64_t>(footer, 16U, index_bytes);
+    put_little<std::uint64_t>(footer, 24U, data_offset - data_start);
+    put_little<std::uint64_t>(footer, 32U, maximum.value());
+    put_little<std::int64_t>(footer, 40U,
+                             wall_nanoseconds(frames.back().received_wall_clock_time()));
+    put_little<std::uint64_t>(footer, 48U, frames.back().sequence_number());
+    put_little<std::uint32_t>(footer, 56U, index_crc);
+    put_little<std::uint32_t>(footer, 60U, data_crc);
+    put_little<std::uint32_t>(footer, 64U, header_crc);
+    std::ranges::copy(marker, footer.begin() + 4088U);
+    const auto footer_crc = crc32c(footer);
+    put_little<std::uint32_t>(footer, 4084U, footer_crc);
+    const auto digest = sha256(result.bytes);
+    result.checksum = digest;
+    result.manifest = {
+        {"path", relative_path.generic_string()},
+        {"cameraId", camera_id},
+        {"startTime", format_utc(frames.front().received_wall_clock_time())},
+        {"endTime", format_utc(frames.back().received_wall_clock_time())},
+        {"startMonotonicNanoseconds",
+         std::chrono::duration_cast<std::chrono::nanoseconds>(
+             frames.front().received_monotonic_time().time_since_epoch())
+             .count()},
+        {"endMonotonicNanoseconds", std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        frames.back().received_monotonic_time().time_since_epoch())
+                                        .count()},
+        {"firstCameraFrameNumber", frames.front().camera_frame_number()},
+        {"lastCameraFrameNumber", frames.back().camera_frame_number()},
+        {"firstSequenceNumber", frames.front().sequence_number()},
+        {"lastSequenceNumber", frames.back().sequence_number()},
+        {"frameCount", frames.size()},
+        {"sizeBytes", result.bytes.size()},
+        {"headerCrc32c", header_crc},
+        {"indexCrc32c", index_crc},
+        {"dataCrc32c", data_crc},
+        {"footerCrc32c", footer_crc},
+        {"sha256", "sha256:" + digest}};
+    return Result<EncodedRawBlock>::success(std::move(result));
 }
 
 Json key_frame_json(const PersistedKeyFrame& key_frame, const std::filesystem::path& relative_path)
@@ -823,6 +1043,21 @@ EventTransactionWriter::~EventTransactionWriter() = default;
 Result<EventPersistenceOutcome> EventTransactionWriter::persist(
     const EventPersistenceRequest& request)
 {
+    return persist(request, {});
+}
+
+Result<EventPersistenceOutcome> EventTransactionWriter::persist(
+    const EventPersistenceRequest& request, const std::stop_token stop_token)
+{
+    const auto cancelled = [&]() -> std::optional<Result<EventPersistenceOutcome>> {
+        if (!stop_token.stop_requested())
+            return std::nullopt;
+        return Result<EventPersistenceOutcome>::failure(
+            event_error("EVENT_WRITE_CANCELLED", Severity::warning,
+                        "事件持久化已取消，事务目录已保留", "event.persist.cancel", true));
+    };
+    if (auto stopped = cancelled())
+        return std::move(*stopped);
     auto valid = validate_request(request, impl_->options);
     if (!valid)
         return Result<EventPersistenceOutcome>::failure(std::move(valid).error());
@@ -852,12 +1087,14 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
                 created.error(), "无法创建唯一事件事务目录", "event.persist.begin"));
         transaction.clear();
     }
+    if (auto stopped = cancelled())
+        return std::move(*stopped);
 
     Json manifest = metadata_json(request.metadata, relative_destination);
     manifest["windowComplete"] = request.window.complete;
     manifest["truncatedByMaximumDuration"] = request.window.truncated_by_maximum_duration;
     manifest["stoppedEarly"] = request.window.stopped_early;
-    manifest["rawFiles"] = Json::array();
+    manifest["rawBlocks"] = Json::array();
     manifest["keyFrames"] = Json::array();
     std::vector<FileRecord> records;
     records.reserve(1U + request.key_frames.size());
@@ -872,6 +1109,7 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
     records.push_back(std::move(event_metadata_record).value());
 
     std::size_t raw_count = 0U;
+    std::size_t raw_block_count = 0U;
     for (std::size_t camera_index = 0U; camera_index < request.window.camera_windows.size();
          ++camera_index)
     {
@@ -881,17 +1119,51 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
         if (!created)
             return Result<EventPersistenceOutcome>::failure(wrap_file_error(
                 created.error(), "无法创建原始帧目录", "event.persist.rawDirectory", transaction));
-        for (const auto& frame : request.window.camera_windows[camera_index].frames)
+        const auto& frames = request.window.camera_windows[camera_index].frames;
+        std::size_t block_begin = 0U;
+        while (block_begin < frames.size())
         {
+            if (auto stopped = cancelled())
+                return std::move(*stopped);
+            const auto bucket =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    frames[block_begin].received_monotonic_time().time_since_epoch())
+                    .count() /
+                event_raw_block_duration.count();
+            const auto geometry = frames[block_begin].geometry();
+            const auto format = frames[block_begin].pixel_format();
+            std::size_t block_end = block_begin + 1U;
+            while (block_end < frames.size() &&
+                   block_end - block_begin < event_raw_block_maximum_frames &&
+                   std::chrono::duration_cast<std::chrono::milliseconds>(
+                       frames[block_end].received_monotonic_time().time_since_epoch())
+                               .count() /
+                           event_raw_block_duration.count() ==
+                       bucket &&
+                   frames[block_end].geometry() == geometry &&
+                   frames[block_end].pixel_format() == format)
+                ++block_end;
             const auto relative =
-                camera_directory / ("frame-" + std::to_string(frame.sequence_number()) + ".raw");
-            auto record = write_verified(*impl_->file_system, transaction, relative, frame.bytes(),
-                                         impl_->options.maximum_file_bytes);
-            if (!record)
-                return Result<EventPersistenceOutcome>::failure(std::move(record).error());
-            manifest["rawFiles"].push_back(frame_json(frame, relative));
-            records.push_back(std::move(record).value());
-            ++raw_count;
+                camera_directory / ("block-" + std::to_string(raw_block_count) + ".pbnvme");
+            auto encoded = encode_raw_block(request.metadata.event_id, relative,
+                                            request.window.camera_windows[camera_index].camera_id,
+                                            std::span<const camera::FrameView>{frames}.subspan(
+                                                block_begin, block_end - block_begin),
+                                            raw_block_count, impl_->options.maximum_file_bytes);
+            if (!encoded)
+                return Result<EventPersistenceOutcome>::failure(std::move(encoded).error());
+            auto write = impl_->file_system->write_new_raw_block_durable(transaction / relative,
+                                                                         encoded.value().bytes);
+            if (!write)
+                return Result<EventPersistenceOutcome>::failure(wrap_file_error(
+                    write.error(), "原始块两阶段写入失败", "event.persist.rawBlock", transaction));
+            records.push_back({.relative_path = relative,
+                               .bytes = encoded.value().bytes.size(),
+                               .checksum = encoded.value().checksum});
+            manifest["rawBlocks"].push_back(std::move(encoded).value().manifest);
+            raw_count += block_end - block_begin;
+            ++raw_block_count;
+            block_begin = block_end;
         }
     }
 
@@ -905,6 +1177,8 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
     }
     for (std::size_t index = 0U; index < request.key_frames.size(); ++index)
     {
+        if (auto stopped = cancelled())
+            return std::move(*stopped);
         const auto relative =
             std::filesystem::path{"keyframes"} / ("keyframe-" + std::to_string(index) + ".jpg");
         auto record =
@@ -926,6 +1200,8 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
     }
     manifest["fileChecksums"] = std::move(checksums);
     manifest["fileSizes"] = std::move(sizes);
+    if (auto stopped = cancelled())
+        return std::move(*stopped);
     const auto manifest_text = json_text(manifest);
     if (manifest_text.size() > impl_->options.maximum_manifest_bytes)
         return Result<EventPersistenceOutcome>::failure(
@@ -959,12 +1235,18 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
     if (!moved)
         return Result<EventPersistenceOutcome>::failure(wrap_file_error(
             moved.error(), "事件目录原子提交失败", "event.persist.commit", transaction));
+    std::uint64_t bytes_written = manifest_text.size();
+    for (const auto& record : records)
+        bytes_written += record.bytes;
     return Result<EventPersistenceOutcome>::success({.event_id = request.metadata.event_id,
                                                      .committed_directory = destination,
                                                      .transaction_directory = transaction,
                                                      .manifest_json = manifest_text,
-                                                     .raw_file_count = raw_count,
-                                                     .key_frame_count = request.key_frames.size()});
+                                                     .raw_block_count = raw_block_count,
+                                                     .raw_frame_count = raw_count,
+                                                     .raw_file_count = raw_block_count,
+                                                     .key_frame_count = request.key_frames.size(),
+                                                     .bytes_written = bytes_written});
 }
 
 Result<EventRecoveryReport> EventTransactionWriter::recover_pending()
@@ -1138,13 +1420,31 @@ struct EventPersistenceRuntime::Impl final
             for (const auto& camera_window : job->request.window.camera_windows)
                 frame_count += camera_window.frames.size();
             const std::size_t key_frame_count = job->request.key_frames.size();
+            const auto write_started = std::chrono::steady_clock::now();
+            {
+                std::scoped_lock lock{mutex};
+                active_events = 1U;
+            }
+            try
+            {
+                if (options.writing_observer)
+                    options.writing_observer(job->request.metadata.event_id);
+            }
+            catch (...)
+            {
+                std::scoped_lock lock{mutex};
+                ++callback_failures;
+            }
             try
             {
                 auto result = writer->persist(job->request);
                 std::scoped_lock lock{mutex};
                 ++completed;
                 if (result)
+                {
                     completion.outcome = std::move(result).value();
+                    last_write_bytes = completion.outcome->bytes_written;
+                }
                 else
                 {
                     ++write_failures;
@@ -1158,6 +1458,18 @@ struct EventPersistenceRuntime::Impl final
                 ++write_failures;
                 completion.error = event_error("EVENT_WRITE_FAILED", Severity::critical,
                                                "事件写入器抛出异常", "event.persist.worker", true);
+            }
+            const auto write_finished = std::chrono::steady_clock::now();
+            {
+                std::scoped_lock lock{mutex};
+                active_events = 0U;
+                last_write_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    write_finished - write_started);
+                const auto seconds =
+                    std::chrono::duration<double>(write_finished - write_started).count();
+                last_write_mib_per_second = seconds > 0.0 ? static_cast<double>(last_write_bytes) /
+                                                                (1024.0 * 1024.0 * seconds)
+                                                          : 0.0;
             }
 
             const bool failed = completion.error.has_value();
@@ -1209,6 +1521,10 @@ struct EventPersistenceRuntime::Impl final
     std::uint64_t rejected{};
     std::uint64_t write_failures{};
     std::uint64_t callback_failures{};
+    std::size_t active_events{};
+    std::uint64_t last_write_bytes{};
+    std::chrono::milliseconds last_write_duration{};
+    double last_write_mib_per_second{};
 };
 
 Result<std::unique_ptr<EventPersistenceRuntime>> EventPersistenceRuntime::create(
@@ -1344,7 +1660,11 @@ EventPersistenceRuntimeSnapshot EventPersistenceRuntime::snapshot() const noexce
             .completed = impl_->completed,
             .rejected = impl_->rejected,
             .write_failures = impl_->write_failures,
-            .callback_failures = impl_->callback_failures};
+            .callback_failures = impl_->callback_failures,
+            .active_events = impl_->active_events,
+            .last_write_bytes = impl_->last_write_bytes,
+            .last_write_duration = impl_->last_write_duration,
+            .last_write_mib_per_second = impl_->last_write_mib_per_second};
 }
 
 } // namespace paperbreak::storage

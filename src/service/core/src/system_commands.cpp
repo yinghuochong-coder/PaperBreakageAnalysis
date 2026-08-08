@@ -500,30 +500,37 @@ Json algorithm_runtime_json(const AlgorithmRuntimeSnapshot& value)
 
 Json event_record_json(const storage::EventMetadataRecord& event)
 {
-    return {{"eventId", event.event_id},
-            {"eventSchemaVersion", event.event_schema_version},
-            {"eventState", event.event_state},
-            {"reviewRevision", event.review_revision},
-            {"reviewedAtUtcMs",
-             event.reviewed_at_utc_ms ? Json(*event.reviewed_at_utc_ms) : Json(nullptr)},
-            {"reviewedBy", event.reviewed_by},
-            {"candidateTimeUtcMs", event.candidate_time_utc_ms},
-            {"confirmedTimeUtcMs",
-             event.confirmed_time_utc_ms ? Json(*event.confirmed_time_utc_ms) : Json(nullptr)},
-            {"startTimeUtcMs", event.start_time_utc_ms},
-            {"endTimeUtcMs", event.end_time_utc_ms},
-            {"cameraIds", event.camera_ids},
-            {"triggerCameraId", event.trigger_camera_id},
-            {"triggerFrameNumber", event.trigger_frame_number},
-            {"triggerReason", event.trigger_reason},
-            {"confidence", event.confidence},
-            {"uploadState", event.upload_state},
-            {"storageState", event.storage_state},
-            {"retentionLocked", event.retention_locked},
-            {"deletionAllowed", event.deletion_allowed},
-            {"deletionState", event.deletion_state},
-            {"relativeDirectory", path_to_utf8(event.relative_directory)},
-            {"thumbnailAvailable", event.storage_state == "Present"}};
+    return {
+        {"eventId", event.event_id},
+        {"eventSchemaVersion", event.event_schema_version},
+        {"eventState", event.event_state},
+        {"decisionState", event.decision_state},
+        {"persistenceState", event.persistence_state},
+        {"reviewState", event.review_state},
+        {"reviewDecision", event.review_decision ? Json(*event.review_decision) : Json(nullptr)},
+        {"artifactsAvailable", event.artifacts_available},
+        {"triggerCount", event.trigger_count},
+        {"reviewRevision", event.review_revision},
+        {"reviewedAtUtcMs",
+         event.reviewed_at_utc_ms ? Json(*event.reviewed_at_utc_ms) : Json(nullptr)},
+        {"reviewedBy", event.reviewed_by},
+        {"candidateTimeUtcMs", event.candidate_time_utc_ms},
+        {"confirmedTimeUtcMs",
+         event.confirmed_time_utc_ms ? Json(*event.confirmed_time_utc_ms) : Json(nullptr)},
+        {"startTimeUtcMs", event.start_time_utc_ms},
+        {"endTimeUtcMs", event.end_time_utc_ms},
+        {"cameraIds", event.camera_ids},
+        {"triggerCameraId", event.trigger_camera_id},
+        {"triggerFrameNumber", event.trigger_frame_number},
+        {"triggerReason", event.trigger_reason},
+        {"confidence", event.confidence},
+        {"uploadState", event.upload_state},
+        {"storageState", event.storage_state},
+        {"retentionLocked", event.retention_locked},
+        {"deletionAllowed", event.deletion_allowed},
+        {"deletionState", event.deletion_state},
+        {"relativeDirectory", path_to_utf8(event.relative_directory)},
+        {"thumbnailAvailable", event.artifacts_available}};
 }
 
 Result<std::size_t> event_size_field(const Json& payload, const std::string_view key,
@@ -547,7 +554,8 @@ Result<std::size_t> event_size_field(const Json& payload, const std::string_view
 
 Result<storage::EventQuery> event_query(const Json& payload)
 {
-    if (!has_only_fields(payload, {"startTimeUtcMs", "endTimeUtcMs", "eventState", "cameraId",
+    if (!has_only_fields(payload, {"startTimeUtcMs", "endTimeUtcMs", "eventState", "decisionState",
+                                   "persistenceState", "reviewState", "reviewDecision", "cameraId",
                                    "offset", "limit"}))
         return Result<storage::EventQuery>::failure(command_error(
             "IPC_REQUEST_INVALID", Severity::error, "event.list 包含未知字段", "ipc.event.list"));
@@ -596,9 +604,21 @@ Result<storage::EventQuery> event_query(const Json& payload)
         return Result<void>::success();
     };
     auto state = text_field("eventState", query.event_state);
+    auto decision_state = text_field("decisionState", query.decision_state);
+    auto persistence_state = text_field("persistenceState", query.persistence_state);
+    auto review_state = text_field("reviewState", query.review_state);
+    auto review_decision = text_field("reviewDecision", query.review_decision);
     auto camera = text_field("cameraId", query.camera_id);
     if (!state)
         return Result<storage::EventQuery>::failure(std::move(state).error());
+    if (!decision_state)
+        return Result<storage::EventQuery>::failure(std::move(decision_state).error());
+    if (!persistence_state)
+        return Result<storage::EventQuery>::failure(std::move(persistence_state).error());
+    if (!review_state)
+        return Result<storage::EventQuery>::failure(std::move(review_state).error());
+    if (!review_decision)
+        return Result<storage::EventQuery>::failure(std::move(review_decision).error());
     if (!camera)
         return Result<storage::EventQuery>::failure(std::move(camera).error());
     return Result<storage::EventQuery>::success(std::move(query));
@@ -1863,6 +1883,10 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             auto event = event_database_->get_event(event_id);
             if (!event)
                 return Result<ipc::CommandResponse>::failure(event.error());
+            if (!event.value().artifacts_available)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("EVENT_NOT_COMMITTED", Severity::warning,
+                                  "事件证据尚未提交，不能重试上传", "ipc.event.retryUpload"));
             auto retried = event_database_->retry_event_upload_jobs(
                 event_id, std::chrono::duration_cast<std::chrono::milliseconds>(
                               std::chrono::system_clock::now().time_since_epoch())
@@ -1912,12 +1936,33 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             Json events = Json::array();
             for (const auto& event : page.value().events)
                 events.push_back(event_record_json(event));
+            const auto runtime =
+                event_runtime_ ? std::optional{event_runtime_->snapshot()} : std::nullopt;
+            const auto candidate_decisions =
+                runtime ? runtime->candidates_created : page.value().summary.decision_candidates;
+            const auto automatic_confirmations =
+                runtime ? runtime->confirmed_events : page.value().summary.decision_confirmed;
             return Result<ipc::CommandResponse>::success(
-                {.payload_json = Json{{"events", std::move(events)},
-                                      {"total", page.value().total},
-                                      {"offset", page.value().offset},
-                                      {"limit", page.value().limit}}
-                                     .dump(),
+                {.payload_json =
+                     Json{{"events", std::move(events)},
+                          {"total", page.value().total},
+                          {"offset", page.value().offset},
+                          {"limit", page.value().limit},
+                          {"summary",
+                           {{"decisionCandidates", candidate_decisions},
+                            {"decisionConfirmed", automatic_confirmations},
+                            {"decisionRejected", page.value().summary.decision_rejected},
+                            {"decisionTimeout", page.value().summary.decision_timeout},
+                            {"persistenceCollecting", page.value().summary.persistence_collecting},
+                            {"persistenceEncoding", page.value().summary.persistence_encoding},
+                            {"persistenceQueued", page.value().summary.persistence_queued},
+                            {"persistenceWriting", page.value().summary.persistence_writing},
+                            {"persistenceCommitted", page.value().summary.persistence_committed},
+                            {"persistenceIncomplete", page.value().summary.persistence_incomplete},
+                            {"reviewUnreviewed", page.value().summary.review_unreviewed},
+                            {"reviewConfirmed", page.value().summary.review_confirmed},
+                            {"reviewRejected", page.value().summary.review_rejected}}}}
+                         .dump(),
                  .binary = {}});
         }
         if (request.command == "event.get")
@@ -1928,6 +1973,19 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             auto record = event_database_->get_event(event_id.value());
             if (!record)
                 return Result<ipc::CommandResponse>::failure(record.error());
+            if (!record.value().artifacts_available)
+            {
+                Json response{{"event", event_record_json(record.value())},
+                              {"committedDirectory", nullptr},
+                              {"rawFrameCount", 0U},
+                              {"keyFrameCount", 0U},
+                              {"observedSequenceGaps", 0U},
+                              {"keyFramesTraceable", false},
+                              {"manifestBytes", 0U},
+                              {"thumbnailBytes", 0U}};
+                return Result<ipc::CommandResponse>::success(
+                    {.payload_json = response.dump(), .binary = {}});
+            }
             if (!event_inspector_)
                 return Result<ipc::CommandResponse>::failure(command_error(
                     "SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配", "ipc.event.get"));
@@ -1955,6 +2013,10 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             auto record = event_database_->get_event(event_id.value());
             if (!record)
                 return Result<ipc::CommandResponse>::failure(record.error());
+            if (!record.value().artifacts_available)
+                return Result<ipc::CommandResponse>::failure(command_error(
+                    "EVENT_NOT_COMMITTED", Severity::warning,
+                    "事件证据尚未提交，manifest 当前不可用", "ipc.event.getManifest"));
             if (!event_inspector_)
                 return Result<ipc::CommandResponse>::failure(
                     command_error("SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配",
@@ -2008,6 +2070,10 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             auto record = event_database_->get_event(event_id.value());
             if (!record)
                 return Result<ipc::CommandResponse>::failure(record.error());
+            if (!record.value().artifacts_available)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("EVENT_NOT_COMMITTED", Severity::warning,
+                                  "事件证据尚未提交，不能导出", "ipc.event.export"));
             if (!event_inspector_)
                 return Result<ipc::CommandResponse>::failure(
                     command_error("SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配",

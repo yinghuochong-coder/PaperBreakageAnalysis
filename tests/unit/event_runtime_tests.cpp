@@ -347,11 +347,17 @@ TEST(EventRuntimeIntegration, ManualTriggerPersistsContinuousWindowWithoutBlocki
     ASSERT_TRUE(database);
     std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
     std::atomic_uint64_t errors{};
+    std::atomic_bool collecting_visible{};
     auto runtime = EventRuntime::create({.configuration = runtime_config(),
                                          .event_root = event_root,
                                          .database = shared_database,
                                          .frame_queue_capacity = 64U,
-                                         .error_observer = [&](const Error&) { ++errors; }});
+                                         .error_observer = [&](const Error&) { ++errors; },
+                                         .lifecycle_observer =
+                                             [&](const auto& event) {
+                                                 if (event.persistence_state == "Collecting")
+                                                     collecting_visible.store(true);
+                                             }});
     ASSERT_TRUE(runtime) << runtime.error().message;
     ASSERT_TRUE(runtime.value()->start());
 
@@ -364,7 +370,17 @@ TEST(EventRuntimeIntegration, ManualTriggerPersistsContinuousWindowWithoutBlocki
     auto coalesced = runtime.value()->request_manual_trigger("CAM01");
     ASSERT_TRUE(coalesced);
     EXPECT_FALSE(coalesced.value());
-    for (std::uint64_t sequence = 11U; sequence <= 23U; ++sequence)
+    const auto visibility_started = std::chrono::steady_clock::now();
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(11U, 1100ms)));
+    ASSERT_TRUE(wait_until([&] { return collecting_visible.load(); }));
+    EXPECT_LT(std::chrono::steady_clock::now() - visibility_started, 1s);
+    auto collecting_page = shared_database->query_events({.limit = 10U});
+    ASSERT_TRUE(collecting_page);
+    ASSERT_EQ(collecting_page.value().events.size(), 1U);
+    EXPECT_EQ(collecting_page.value().events.front().persistence_state, "Collecting");
+    EXPECT_FALSE(collecting_page.value().events.front().artifacts_available);
+    EXPECT_TRUE(collecting_page.value().events.front().relative_directory.empty());
+    for (std::uint64_t sequence = 12U; sequence <= 23U; ++sequence)
         ASSERT_TRUE(runtime.value()->submit_frame(
             frame(sequence, std::chrono::milliseconds{static_cast<int>(sequence * 100U)})));
 
@@ -374,7 +390,7 @@ TEST(EventRuntimeIntegration, ManualTriggerPersistsContinuousWindowWithoutBlocki
         auto queried = shared_database->query_events({.limit = 10U});
         ASSERT_TRUE(queried);
         page = std::move(queried).value();
-        if (!page.events.empty())
+        if (!page.events.empty() && page.events.front().persistence_state == "Committed")
             break;
         std::this_thread::sleep_for(10ms);
     }
@@ -400,6 +416,11 @@ TEST(EventRuntimeIntegration, ManualTriggerPersistsContinuousWindowWithoutBlocki
     EXPECT_EQ(snapshot.processed_frames, 23U);
     EXPECT_EQ(snapshot.rejected_frames, 0U);
     EXPECT_EQ(snapshot.events_committed, 1U);
+    EXPECT_EQ(snapshot.persistence_queue_capacity, 8U);
+    EXPECT_EQ(snapshot.persistence_queue_depth, 0U);
+    EXPECT_EQ(snapshot.persistence_active_events, 0U);
+    EXPECT_GT(snapshot.persistence_last_write_bytes, 0U);
+    EXPECT_GT(snapshot.persistence_last_write_mib_per_second, 0.0);
     EXPECT_EQ(errors.load(), 0U);
 }
 
@@ -1062,7 +1083,10 @@ TEST(EventRuntimeLanes, AggregatesPartialAndFullDegradationAndReconfigureRecover
     ASSERT_TRUE(manual);
     ASSERT_TRUE(manual.value());
     ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 200ms, "CAM01")));
-    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started >= 2U; }));
+    ASSERT_TRUE(wait_until([&] {
+        const auto snapshot = runtime.value()->snapshot();
+        return snapshot.events_started >= 1U && snapshot.candidates_created >= 2U;
+    }));
 
     configuration.config_revision += 1U;
     ASSERT_TRUE(runtime.value()->reconfigure(configuration));
@@ -1109,7 +1133,10 @@ TEST(EventRuntimeLanes, SafeWatermarkOrdersSlowOlderResultBeforeFastNewerResult)
         behavior->release_cam01 = true;
     }
     behavior->condition.notify_all();
-    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 2U; }));
+    ASSERT_TRUE(wait_until([&] {
+        const auto snapshot = runtime.value()->snapshot();
+        return snapshot.events_started == 1U && snapshot.candidates_created == 2U;
+    }));
     runtime.value()->request_stop();
     ASSERT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 

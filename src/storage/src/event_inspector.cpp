@@ -1,4 +1,5 @@
 #include "paperbreak/storage/event_inspector.hpp"
+#include "paperbreak/storage/nvme_cache.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -12,6 +13,7 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace paperbreak::storage
@@ -75,8 +77,8 @@ Result<Json> parse_manifest(const std::string& text)
 {
     auto value = Json::parse(text, nullptr, false);
     if (value.is_discarded() || !value.is_object() || !value.contains("eventId") ||
-        !value["eventId"].is_string() || !value.contains("rawFiles") ||
-        !value["rawFiles"].is_array() || !value.contains("keyFrames") ||
+        !value["eventId"].is_string() || !value.contains("rawBlocks") ||
+        !value["rawBlocks"].is_array() || !value.contains("keyFrames") ||
         !value["keyFrames"].is_array())
         return Result<Json>::failure(inspection_error("EVENT_RECOVERY_FAILED", Severity::critical,
                                                       "事件 manifest 无法解析",
@@ -84,31 +86,100 @@ Result<Json> parse_manifest(const std::string& text)
     return Result<Json>::success(std::move(value));
 }
 
-Result<InspectedRawFrame> raw_frame(const Json& value)
+template <typename T>
+T little_value(const std::span<const std::byte> bytes, const std::size_t offset) noexcept
+{
+    using Unsigned = std::make_unsigned_t<T>;
+    Unsigned result{};
+    for (std::size_t index = 0U; index < sizeof(T); ++index)
+        result |= static_cast<Unsigned>(std::to_integer<unsigned char>(bytes[offset + index]))
+                  << (index * 8U);
+    return static_cast<T>(result);
+}
+
+Result<std::vector<InspectedRawFrame>> raw_block_frames(const Json& value,
+                                                        std::vector<std::byte> contents)
 {
     try
     {
         if (!value.is_object() || !value.at("path").is_string() ||
-            !value.at("cameraId").is_string() ||
-            !value.at("cameraFrameNumber").is_number_unsigned() ||
-            !value.at("sequenceNumber").is_number_unsigned() ||
-            !value.at("wallClockTime").is_string())
+            !value.at("cameraId").is_string() || !value.at("frameCount").is_number_unsigned() ||
+            !value.at("firstSequenceNumber").is_number_unsigned() ||
+            !value.at("lastSequenceNumber").is_number_unsigned() ||
+            !value.at("headerCrc32c").is_number_unsigned() ||
+            !value.at("indexCrc32c").is_number_unsigned() ||
+            !value.at("dataCrc32c").is_number_unsigned() ||
+            !value.at("footerCrc32c").is_number_unsigned())
             throw std::invalid_argument{"shape"};
-        InspectedRawFrame result{
-            .relative_path = value.at("path").get<std::string>(),
-            .camera_id = value.at("cameraId").get<std::string>(),
-            .camera_frame_number = value.at("cameraFrameNumber").get<std::uint64_t>(),
-            .sequence_number = value.at("sequenceNumber").get<std::uint64_t>(),
-            .wall_clock_time_utc_ms =
-                utc_milliseconds(value.at("wallClockTime").get_ref<const std::string&>())};
-        if (!safe_relative_path(result.relative_path) || result.wall_clock_time_utc_ms < 0)
+        const std::filesystem::path path{value.at("path").get<std::string>()};
+        const std::string camera_id = value.at("cameraId").get<std::string>();
+        const auto frame_count = value.at("frameCount").get<std::size_t>();
+        if (!safe_relative_path(path) || camera_id.empty() || frame_count == 0U ||
+            frame_count > event_raw_block_maximum_frames || contents.size() < nvme_page_bytes * 3U)
             throw std::invalid_argument{"value"};
-        return Result<InspectedRawFrame>::success(std::move(result));
+        const auto bytes = std::span<const std::byte>{contents};
+        if (std::string{reinterpret_cast<const char*>(bytes.data()), 7U} != "PBNVME1" ||
+            std::string{reinterpret_cast<const char*>(bytes.data() + bytes.size() - 8U), 7U} !=
+                "COMMIT1" ||
+            little_value<std::uint16_t>(bytes, 8U) != nvme_format_version ||
+            little_value<std::uint16_t>(bytes, 10U) != nvme_page_bytes ||
+            little_value<std::uint32_t>(bytes, 84U) < frame_count ||
+            little_value<std::uint32_t>(bytes, bytes.size() - nvme_page_bytes + 12U) != frame_count)
+            throw std::invalid_argument{"format"};
+        auto header = std::vector<std::byte>(bytes.begin(), bytes.begin() + nvme_page_bytes);
+        const auto header_crc = little_value<std::uint32_t>(header, 128U);
+        std::fill(header.begin() + 128U, header.begin() + 132U, std::byte{0U});
+        auto footer = std::vector<std::byte>(bytes.end() - nvme_page_bytes, bytes.end());
+        const auto footer_crc = little_value<std::uint32_t>(footer, 4084U);
+        std::fill(footer.begin() + 4084U, footer.begin() + 4088U, std::byte{0U});
+        const auto index_size = frame_count * nvme_index_entry_bytes;
+        const auto index = bytes.subspan(nvme_page_bytes, index_size);
+        if (crc32c(header) != header_crc || crc32c(footer) != footer_crc ||
+            crc32c(index) != value.at("indexCrc32c").get<std::uint32_t>() ||
+            header_crc != value.at("headerCrc32c").get<std::uint32_t>() ||
+            footer_crc != value.at("footerCrc32c").get<std::uint32_t>())
+            throw std::invalid_argument{"crc"};
+
+        std::vector<InspectedRawFrame> result;
+        result.reserve(frame_count);
+        std::uint32_t data_crc{};
+        for (std::size_t ordinal = 0U; ordinal < frame_count; ++ordinal)
+        {
+            const auto entry =
+                index.subspan(ordinal * nvme_index_entry_bytes, nvme_index_entry_bytes);
+            auto entry_copy = std::vector<std::byte>{entry.begin(), entry.end()};
+            const auto entry_crc = little_value<std::uint32_t>(entry_copy, 80U);
+            std::fill(entry_copy.begin() + 80U, entry_copy.begin() + 84U, std::byte{0U});
+            const auto data_offset = little_value<std::uint64_t>(entry, 48U);
+            const auto data_size = little_value<std::uint32_t>(entry, 56U);
+            if (entry_crc != crc32c(entry_copy) || data_size == 0U ||
+                data_offset > contents.size() || contents.size() - data_offset < nvme_page_bytes ||
+                data_size > contents.size() - data_offset - nvme_page_bytes)
+                throw std::invalid_argument{"index"};
+            const auto frame_bytes =
+                bytes.subspan(static_cast<std::size_t>(data_offset), data_size);
+            if (crc32c(frame_bytes) != little_value<std::uint32_t>(entry, 76U))
+                throw std::invalid_argument{"frame-crc"};
+            data_crc = crc32c(frame_bytes, data_crc);
+            const auto wall_ns = little_value<std::int64_t>(entry, 24U);
+            result.push_back({.relative_path = path,
+                              .camera_id = camera_id,
+                              .camera_frame_number = little_value<std::uint64_t>(entry, 8U),
+                              .sequence_number = little_value<std::uint64_t>(entry, 0U),
+                              .wall_clock_time_utc_ms = wall_ns / 1000000});
+        }
+        if (data_crc != value.at("dataCrc32c").get<std::uint32_t>() ||
+            result.front().sequence_number !=
+                value.at("firstSequenceNumber").get<std::uint64_t>() ||
+            result.back().sequence_number != value.at("lastSequenceNumber").get<std::uint64_t>())
+            throw std::invalid_argument{"range"};
+        return Result<std::vector<InspectedRawFrame>>::success(std::move(result));
     }
     catch (const std::exception&)
     {
-        return Result<InspectedRawFrame>::failure(inspection_error(
-            "EVENT_RECOVERY_FAILED", Severity::critical, "原始帧索引无效", "event.inspect.raw"));
+        return Result<std::vector<InspectedRawFrame>>::failure(
+            inspection_error("EVENT_RECOVERY_FAILED", Severity::critical, "原始块或帧索引无效",
+                             "event.inspect.rawBlock"));
     }
 }
 
@@ -336,7 +407,7 @@ Result<EventInspectionReport> EventInspector::inspect(
     auto manifest = parse_manifest(manifest_text.value());
     if (!manifest)
         return Result<EventInspectionReport>::failure(std::move(manifest).error());
-    if (manifest.value()["rawFiles"].size() + manifest.value()["keyFrames"].size() + 1U >
+    if (manifest.value()["rawBlocks"].size() + manifest.value()["keyFrames"].size() + 1U >
         impl_->options.maximum_files)
         return Result<EventInspectionReport>::failure(
             inspection_error("EVENT_RECOVERY_FAILED", Severity::critical, "事件文件数超过检查上限",
@@ -349,29 +420,37 @@ Result<EventInspectionReport> EventInspector::inspect(
                                  .key_frames_traceable = true};
     std::map<std::pair<std::string, std::uint64_t>, std::uint64_t> raw_index;
     std::map<std::string, std::uint64_t> previous_sequences;
-    for (const auto& value : manifest.value()["rawFiles"])
+    for (const auto& value : manifest.value()["rawBlocks"])
     {
-        auto raw = raw_frame(value);
-        if (!raw)
-            return Result<EventInspectionReport>::failure(std::move(raw).error());
-        const auto previous = previous_sequences.find(raw.value().camera_id);
-        if (previous != previous_sequences.end())
+        const auto relative = std::filesystem::path{value.at("path").get<std::string>()};
+        auto contents = impl_->file_system->read_file_bounded(report.committed_directory / relative,
+                                                              impl_->options.maximum_file_bytes);
+        if (!contents)
+            return Result<EventInspectionReport>::failure(std::move(contents).error());
+        auto decoded = raw_block_frames(value, std::move(contents).value());
+        if (!decoded)
+            return Result<EventInspectionReport>::failure(std::move(decoded).error());
+        for (auto& raw : decoded.value())
         {
-            if (raw.value().sequence_number <= previous->second)
+            const auto previous = previous_sequences.find(raw.camera_id);
+            if (previous != previous_sequences.end())
+            {
+                if (raw.sequence_number <= previous->second)
+                    return Result<EventInspectionReport>::failure(
+                        inspection_error("EVENT_RECOVERY_FAILED", Severity::critical,
+                                         "manifest 原始帧顺序不是严格递增", "event.inspect.order"));
+                report.observed_sequence_gaps += raw.sequence_number - previous->second - 1U;
+            }
+            previous_sequences[raw.camera_id] = raw.sequence_number;
+            if (!raw_index
+                     .emplace(std::make_pair(raw.camera_id, raw.sequence_number),
+                              raw.camera_frame_number)
+                     .second)
                 return Result<EventInspectionReport>::failure(
                     inspection_error("EVENT_RECOVERY_FAILED", Severity::critical,
-                                     "manifest 原始帧顺序不是严格递增", "event.inspect.order"));
-            report.observed_sequence_gaps += raw.value().sequence_number - previous->second - 1U;
+                                     "manifest 原始帧标识重复", "event.inspect.order"));
+            report.raw_frames.push_back(std::move(raw));
         }
-        previous_sequences[raw.value().camera_id] = raw.value().sequence_number;
-        if (!raw_index
-                 .emplace(std::make_pair(raw.value().camera_id, raw.value().sequence_number),
-                          raw.value().camera_frame_number)
-                 .second)
-            return Result<EventInspectionReport>::failure(
-                inspection_error("EVENT_RECOVERY_FAILED", Severity::critical,
-                                 "manifest 原始帧标识重复", "event.inspect.order"));
-        report.raw_frames.push_back(std::move(raw).value());
     }
     for (const auto& value : manifest.value()["keyFrames"])
     {
@@ -406,10 +485,17 @@ Result<EventExportArchive> EventInspector::export_zip(
     if (!inspected)
         return Result<EventExportArchive>::failure(std::move(inspected).error());
     std::vector<std::filesystem::path> ordered_paths{std::filesystem::path{"event.json"}};
+    std::set<std::filesystem::path> seen_paths{ordered_paths.front()};
     for (const auto& frame : inspected.value().raw_frames)
-        ordered_paths.push_back(frame.relative_path);
+    {
+        if (seen_paths.insert(frame.relative_path).second)
+            ordered_paths.push_back(frame.relative_path);
+    }
     for (const auto& frame : inspected.value().key_frames)
-        ordered_paths.push_back(frame.relative_path);
+    {
+        if (seen_paths.insert(frame.relative_path).second)
+            ordered_paths.push_back(frame.relative_path);
+    }
     if (ordered_paths.size() + 1U > impl_->options.maximum_files)
         return Result<EventExportArchive>::failure(
             inspection_error("EVENT_EXPORT_TOO_LARGE", Severity::error,
@@ -451,10 +537,17 @@ Result<EventExportFile> EventInspector::export_zip_file(
         return Result<EventExportFile>::failure(std::move(inspected).error());
 
     std::vector<std::filesystem::path> ordered_paths{std::filesystem::path{"event.json"}};
+    std::set<std::filesystem::path> seen_paths{ordered_paths.front()};
     for (const auto& frame : inspected.value().raw_frames)
-        ordered_paths.push_back(frame.relative_path);
+    {
+        if (seen_paths.insert(frame.relative_path).second)
+            ordered_paths.push_back(frame.relative_path);
+    }
     for (const auto& frame : inspected.value().key_frames)
-        ordered_paths.push_back(frame.relative_path);
+    {
+        if (seen_paths.insert(frame.relative_path).second)
+            ordered_paths.push_back(frame.relative_path);
+    }
     ordered_paths.push_back(std::filesystem::path{"manifest.json"});
     if (ordered_paths.size() > impl_->options.maximum_files ||
         ordered_paths.size() > (std::numeric_limits<std::uint16_t>::max)())

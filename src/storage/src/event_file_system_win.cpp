@@ -136,6 +136,57 @@ class WindowsEventFileSystem final : public IEventFileSystem
         return Result<void>::success();
     }
 
+    Result<void> write_new_raw_block_durable(const std::filesystem::path& path,
+                                             const std::span<const std::byte> contents) override
+    {
+        if (path.empty() || contents.size() <= 8U)
+            return Result<void>::failure(
+                file_error("原始块路径或内容无效", "event.file.block.write"));
+        auto partial = path;
+        partial += L".partial";
+        {
+            UniqueHandle file{CreateFileW(partial.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                                          nullptr)};
+            if (!file.valid())
+                return Result<void>::failure(file_error("无法创建原始块临时文件",
+                                                        "event.file.block.create", GetLastError()));
+            const auto write_all = [&](const std::span<const std::byte> bytes) -> Result<void> {
+                std::size_t written_total = 0U;
+                while (written_total < bytes.size())
+                {
+                    const DWORD chunk = static_cast<DWORD>(
+                        (std::min)(bytes.size() - written_total,
+                                   static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
+                    DWORD written = 0U;
+                    if (WriteFile(file.get(), bytes.data() + written_total, chunk, &written,
+                                  nullptr) == FALSE ||
+                        written == 0U)
+                        return Result<void>::failure(
+                            file_error("原始块发生短写", "event.file.block.write", GetLastError()));
+                    written_total += written;
+                }
+                return Result<void>::success();
+            };
+            auto body = write_all(contents.first(contents.size() - 8U));
+            if (!body)
+                return body;
+            if (FlushFileBuffers(file.get()) == FALSE)
+                return Result<void>::failure(file_error(
+                    "无法持久刷新原始块主体", "event.file.block.flushBody", GetLastError()));
+            auto marker = write_all(contents.last(8U));
+            if (!marker)
+                return marker;
+            if (FlushFileBuffers(file.get()) == FALSE)
+                return Result<void>::failure(file_error(
+                    "无法持久刷新原始块提交标记", "event.file.block.flushMarker", GetLastError()));
+        }
+        if (MoveFileExW(partial.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) == FALSE)
+            return Result<void>::failure(
+                file_error("无法原子发布原始块", "event.file.block.publish", GetLastError()));
+        return Result<void>::success();
+    }
+
     Result<std::vector<std::byte>> read_file_bounded(const std::filesystem::path& path,
                                                      const std::size_t maximum_bytes) override
     {

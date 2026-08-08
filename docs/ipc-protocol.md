@@ -393,21 +393,25 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
   `false`，客户端不得把配置开关显示成运行成功。
 - `event.updateConfig`：payload 必须且只能包含 `expectedConfigRevision` 和完整 `event`
   对象。沿用配置修订、原子保存、审计、热应用和失败回滚语义。
-- `event.list`：payload 可包含 `startTimeUtcMs`、`endTimeUtcMs`、`eventState`、
-  `cameraId`、`offset` 和 `limit`；`limit` 为 1～200。返回稳定排序的 `events`、`total`、
-  `offset`、`limit`。每项包含当前复核状态/版本、候选时间、触发相机、置信度、上传/存储
-  状态、正式相对目录和缩略图可用性。
-- `event.get`：payload 为 `{"eventId":"..."}`。先复验 manifest、长度和 SHA-256，再
-  返回当前数据库状态、服务解析出的正式绝对目录、manifest 字节数、原始/关键帧数、序列
-  缺口和追溯状态；二进制负载为首张关键帧 JPEG 缩略图。
+- `event.list`：payload 可包含 `startTimeUtcMs`、`endTimeUtcMs`、`decisionState`、
+  `persistenceState`、`reviewState`、`reviewDecision`、`cameraId`、`offset` 和 `limit`；
+  `limit` 为 1～200。持续“截至当前”模式不发送 `endTimeUtcMs`，启动后事件因此不会被旧的
+  固定结束时间过滤。响应返回稳定排序的 `events`、`total`、`offset`、`limit` 及不受当前
+  筛选影响的全局生命周期 `summary`。兼容筛选 `eventState` 暂时等同于
+  `decisionState`。
+- `event.get`：payload 为 `{"eventId":"..."}`。所有生命周期均返回数据库状态；仅当
+  `persistenceState=Committed` 时才复验 manifest、长度和 SHA-256，并返回正式绝对目录、
+  manifest 字节数、原始/关键帧数、序列缺口和追溯状态及首张关键帧 JPEG。列表和详情都
+  包含 `decisionState`、`persistenceState`、`reviewState`、可空 `reviewDecision`、
+  `artifactsAvailable`、`triggerCount`，以及兼容别名 `eventState`。
 - `event.getManifest`：payload 为 `{"eventId":"..."}`。再次校验正式事件后，以不超过
   8 MiB 的二进制 UTF-8 JSON 返回完整不可变 manifest，响应包含 `verified=true`；借此避免
   大事件索引突破 1 MiB JSON 头上限。
 - `event.manualTrigger`：payload 为 `{"cameraId":"CAM01"}`。只在下一张新有效帧触发；
   返回 `accepted` 和 `alreadyPending`，不会停止相机采集或在相机回调中编码/写盘。
-- `event.confirm` / `event.reject`：payload 必须包含 `eventId` 和正整数
+- `event.confirm` / `event.reject`：只允许 `Committed` 事件。payload 必须包含 `eventId` 和正整数
   `expectedReviewRevision`。SQLite 使用乐观版本并发；相同终态重复请求幂等，过期或相反
-  终态返回 `EVENT_VERSION_CONFLICT`，不可变 manifest 不修改。
+  终态返回 `EVENT_VERSION_CONFLICT`；只更新复核字段，不覆盖算法判定，不可变 manifest 不修改。
 - `event.export`：payload 为 `{"eventId":"..."}`。服务再次完整校验，只将正式事件按
   manifest 顺序流式打包到配置缓存根内的受控暂存目录；响应包含 `verified=true`、大小、
   文件数和 `exportSourcePath`，不通过 IPC 传完整原始序列。Qt 客户端只从该服务返回路径
@@ -445,8 +449,10 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
   `cameraFrameNumber`、`sequenceNumber`、源图像 `width`/`height`/`stride`、可选 `brightness`、
   `actualFps`、`cameraStatus`、`roi` 和 `detectionResult`；二进制负载为 JPEG。每个连接/相机
   在服务端只保留最新待发送帧，旧帧可丢弃。二进制负载仍受 16 MiB 通用上限约束。
-- `event.committed` 为事件客户端保留；M5 客户端即使未收到该推送也会以 `event.list`
-  周期补查为事实来源，事件推送不得作为唯一可见性机制。
+- `event.lifecycleChanged` 在候选建立及每个生命周期变化时发布，`event.committed` 在正式
+  提交后发布；两者都走现有有界 IPC 推送队列并按 Event ID 合并。客户端在列表查询在途时
+  只记一次补查，查询完成后立即刷新；即使推送丢失或重连，5 秒 `event.list` 周期补查仍是
+  最终事实来源。
 
 三类报警推送 payload 均包含 `registryRevision` 和完整报警字段。报警推送允许丢弃，
 `alarm.list` 始终是恢复事实来源。

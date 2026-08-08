@@ -502,6 +502,13 @@ Idle → Suspicious → Candidate → Confirmed/Rejected/Timeout
 
 ### 9.3 事件冻结与提交
 
+候选首次取得窗口管理器分配的规范 Event ID 后，服务必须立即在 SQLite 建立
+`Collecting` 行并发布 `event.lifecycleChanged`，不能等待原始证据写盘。合并触发只增加
+同一行的 `triggerCount`；源判定按 `Confirmed > Candidate > Timeout > Rejected` 聚合。
+冻结、JPEG 编码、进入容量 8 的写队列、单线程写入和目录提交分别推进
+`Encoding`、`Queued`、`Writing`、`Committed`。任一阶段失败进入 `Incomplete` 并报警。
+只有 `Committed` 行允许读取 manifest、缩略图、正式目录、导出、上传和人工复核。
+
 ```text
 候选时刻 T
    │
@@ -651,6 +658,19 @@ IPC 层不直接操作相机、数据库或配置文件。业务用例返回稳�
 应用失败时保留旧文件和旧生效快照。启动时若主配置损坏，可从最近有效历史恢复，但必须报警和记录恢复来源。
 
 ### 12.2 事件目录
+
+事件 manifest schema v2 不兼容 v1。`manifest.json` 使用 `decisionState`、算法确认时间、
+`triggerCount` 和 `rawBlocks`；每个块记录相机、墙上/单调时间范围、帧号/序号范围、帧数、
+文件大小、CRC32C 与 SHA-256。原始证据按相机及单调时钟 1 秒窗口分块，单块最多 256 帧，
+格式复用 `PBNVME1` v1 的 4 KiB 头页、固定帧索引、逐帧 CRC32C、尾页和提交标记。
+
+块写入顺序固定为：临时块主体和尾页、持久刷新、最后 8 字节提交标记、再次持久刷新、
+同卷原子发布块名。全部块、关键帧和 `event.json` 完成后最后写 manifest，再原子提交事件
+目录；取消或失败保留 `.transactions` 内的可恢复目录，正式目录绝不能暴露伪提交。
+
+部署 schema v2 前必须由用户人工归档旧 `events.db` 和旧事件目录并提供空事件根目录。
+代码不删除、不移动旧数据；检测到非空旧库、schema v1 manifest 或无法识别的旧 manifest
+时拒绝启动并报告 `EVENT_SCHEMA_UNSUPPORTED`。
 
 - 事件根目录与临时目录必须位于同一卷，以保证最终 rename 语义；
 - 所有文件先写入唯一临时目录；

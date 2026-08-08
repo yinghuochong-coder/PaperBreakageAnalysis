@@ -175,9 +175,11 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `EVENT_KEYFRAME_QUEUE_FULL` | Error | 否 | 固定关键帧任务队列容量不足、内存预算不足或已经停止接收；事件内任务整批拒绝并标记关键帧不完整，原始事件仍优先 |
 | `EVENT_KEYFRAME_ENCODE_FAILED` | Error | 是 | 关键帧像素布局、输入/输出上限或 OpenCV JPEG 编码失败；当前关键帧标损，工作线程继续处理后续已接受任务 |
 | `EVENT_WRITE_FAILED` | Critical | 是 | 事件文件、清单或最终提交写入失败；保留临时目录供恢复 |
+| `EVENT_WRITE_CANCELLED` | Warning | 是 | 持久化收到停止令牌；保留事务目录且不发布正式事件目录 |
 | `EVENT_CHECKSUM_FAILED` | Critical | 视来源 | 本地写后校验不一致；隔离文件，不提交完整事件 |
 | `EVENT_RECOVERY_FAILED` | Critical | 视原因 | 启动时无法恢复/隔离未完成事件；不得伪报已提交 |
-| `EVENT_SCHEMA_UNSUPPORTED` | Error | 否 | 事件清单版本超出读取范围；不得部分解析后宣称完整 |
+| `EVENT_SCHEMA_UNSUPPORTED` | Critical | 否 | 检测到非空旧事件库、schema v1/未知 manifest 或超出读取范围；拒绝启动且不移动、删除或部分解析旧数据 |
+| `EVENT_NOT_COMMITTED` | Warning | 是 | 事件证据尚未提交；manifest、缩略图、目录、导出、上传或人工复核暂不可用 |
 | `EVENT_QUEUE_FULL` | Critical | 是 | 待编码/持久化事件达到固定上限；拒绝新事件，不扩容或反压采集 |
 | `EVENT_EXPORT_TOO_LARGE` | Error | 否 | 已校验事件 ZIP64 超过显式 64 GiB、单文件或文件数上限；不返回截断包或成功标志 |
 | `EVENT_EXPORT_FAILED` | Error | 视 I/O | Qt 客户端无法原子写入事件 ZIP；`QSaveFile` 放弃临时文件且不覆盖既有目标 |

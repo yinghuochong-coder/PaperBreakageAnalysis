@@ -1301,6 +1301,30 @@ class EventMetricSource final : public paperbreak::monitoring::IMetricSource
               .value = static_cast<std::uint64_t>(events.frame_queue_high_watermark),
               .unit = "count",
               .available = runtime != nullptr},
+             {.name = "event.persistence.queue.depth",
+              .value = static_cast<std::uint64_t>(events.persistence_queue_depth),
+              .unit = "count",
+              .available = runtime != nullptr},
+             {.name = "event.persistence.queue.capacity",
+              .value = static_cast<std::uint64_t>(events.persistence_queue_capacity),
+              .unit = "count",
+              .available = runtime != nullptr},
+             {.name = "event.persistence.active_events",
+              .value = static_cast<std::uint64_t>(events.persistence_active_events),
+              .unit = "count",
+              .available = runtime != nullptr},
+             {.name = "event.persistence.last_write_bytes",
+              .value = events.persistence_last_write_bytes,
+              .unit = "bytes",
+              .available = runtime != nullptr},
+             {.name = "event.persistence.last_write_duration_ms",
+              .value = static_cast<std::uint64_t>(events.persistence_last_write_duration.count()),
+              .unit = "milliseconds",
+              .available = runtime != nullptr},
+             {.name = "event.persistence.last_write_mib_per_second",
+              .value = events.persistence_last_write_mib_per_second,
+              .unit = "MiB/s",
+              .available = runtime != nullptr},
              {.name = "event.failures_total",
               .value = events.event_failures,
               .unit = "count",
@@ -1939,6 +1963,31 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     }
     const std::weak_ptr<paperbreak::uplink::PersistentUploadScheduler> weak_upload_scheduler =
         upload_scheduler;
+    auto event_ipc_target = std::make_shared<std::weak_ptr<paperbreak::ipc::IpcServer>>();
+    const auto publish_event_lifecycle = [event_ipc_target](
+                                             const paperbreak::storage::EventMetadataRecord& event,
+                                             const std::string_view event_name) {
+        if (auto server = event_ipc_target->lock())
+        {
+            nlohmann::json payload{{"eventId", event.event_id},
+                                   {"eventState", event.event_state},
+                                   {"decisionState", event.decision_state},
+                                   {"persistenceState", event.persistence_state},
+                                   {"reviewState", event.review_state},
+                                   {"reviewDecision", event.review_decision
+                                                          ? nlohmann::json{*event.review_decision}
+                                                          : nlohmann::json{nullptr}},
+                                   {"artifactsAvailable", event.artifacts_available},
+                                   {"triggerCount", event.trigger_count},
+                                   {"candidateTimeUtcMs", event.candidate_time_utc_ms}};
+            static_cast<void>(server->try_publish({.event_name = std::string{event_name},
+                                                   .timestamp = paperbreak::current_utc_timestamp(),
+                                                   .payload_json = payload.dump(),
+                                                   .binary = {},
+                                                   .coalescing_key = event.event_id},
+                                                  paperbreak::ipc::PushPolicy::coalesce_latest));
+        }
+    };
     const auto enqueue_event_for_upload =
         [weak_upload_scheduler, event_root,
          machine_id = loaded.value().effective->system.machine_id, configuration, weak_event_alarms,
@@ -1968,6 +2017,16 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                     queued.error().business_code + ": " + queued.error().message));
             }
         };
+    const auto on_event_committed = [enqueue_event_for_upload, publish_event_lifecycle](
+                                        const paperbreak::storage::EventMetadataRecord& event) {
+        publish_event_lifecycle(event, "event.committed");
+        enqueue_event_for_upload(event);
+    };
+    const auto on_event_reviewed = [enqueue_event_for_upload, publish_event_lifecycle](
+                                       const paperbreak::storage::EventMetadataRecord& event) {
+        publish_event_lifecycle(event, "event.lifecycleChanged");
+        enqueue_event_for_upload(event);
+    };
     auto event_runtime_result = paperbreak::service::EventRuntime::create(
         {.configuration = *loaded.value().effective,
          .event_root = event_root,
@@ -2001,7 +2060,11 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                                           error.business_code + ": " + error.message));
                  }
              },
-         .committed_observer = enqueue_event_for_upload,
+         .lifecycle_observer =
+             [publish_event_lifecycle](const paperbreak::storage::EventMetadataRecord& event) {
+                 publish_event_lifecycle(event, "event.lifecycleChanged");
+             },
+         .committed_observer = on_event_committed,
          .register_thread = service_thread_registrar,
          .diagnostics = debug_diagnostics(paperbreak::logging::Category::algorithm)});
     if (!event_runtime_result)
@@ -2080,7 +2143,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         delivery_options);
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
         configuration->repository, status, metrics, alarms, logging, config_path.parent_path(),
-        preview, cameras, event_runtime, event_database, event_inspector, enqueue_event_for_upload);
+        preview, cameras, event_runtime, event_database, event_inspector, on_event_reviewed);
     std::shared_ptr<paperbreak::uplink::UplinkRuntime> uplink_runtime;
     if (uplink_transport && upload_scheduler)
     {
@@ -2134,6 +2197,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     ipc_options.diagnostics = debug_diagnostics(paperbreak::logging::Category::ipc);
     auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(
         commands, paperbreak::ipc::make_windows_peer_authorizer(), std::move(ipc_options));
+    *event_ipc_target = ipc_server;
     if (preview_publisher)
         preview_publisher->set_server(ipc_server);
 

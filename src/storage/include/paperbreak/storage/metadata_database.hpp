@@ -15,7 +15,7 @@
 namespace paperbreak::storage
 {
 
-inline constexpr std::uint32_t database_schema_version = 4U;
+inline constexpr std::uint32_t database_schema_version = 5U;
 inline constexpr std::size_t database_default_page_size = 50U;
 inline constexpr std::size_t database_maximum_page_size = 200U;
 inline constexpr std::size_t maximum_upload_job_capacity = 1000000U;
@@ -56,6 +56,12 @@ struct EventMetadataRecord final
     std::string event_id;
     std::uint32_t event_schema_version{};
     std::string event_state;
+    std::string decision_state;
+    std::string persistence_state;
+    std::string review_state;
+    std::optional<std::string> review_decision;
+    bool artifacts_available{};
+    std::uint64_t trigger_count{1U};
     std::uint64_t review_revision{1U};
     std::optional<std::int64_t> reviewed_at_utc_ms;
     std::string reviewed_by;
@@ -82,9 +88,30 @@ struct EventQuery final
     std::optional<std::int64_t> start_time_utc_ms;
     std::optional<std::int64_t> end_time_utc_ms;
     std::optional<std::string> event_state;
+    std::optional<std::string> decision_state;
+    std::optional<std::string> persistence_state;
+    std::optional<std::string> review_state;
+    std::optional<std::string> review_decision;
     std::optional<std::string> camera_id;
     std::size_t offset{};
     std::size_t limit{database_default_page_size};
+};
+
+struct EventLifecycleSummary final
+{
+    std::uint64_t decision_candidates{};
+    std::uint64_t decision_confirmed{};
+    std::uint64_t decision_rejected{};
+    std::uint64_t decision_timeout{};
+    std::uint64_t persistence_collecting{};
+    std::uint64_t persistence_encoding{};
+    std::uint64_t persistence_queued{};
+    std::uint64_t persistence_writing{};
+    std::uint64_t persistence_committed{};
+    std::uint64_t persistence_incomplete{};
+    std::uint64_t review_unreviewed{};
+    std::uint64_t review_confirmed{};
+    std::uint64_t review_rejected{};
 };
 
 enum class EventReviewDecision
@@ -105,6 +132,23 @@ struct EventQueryPage final
     std::size_t total{};
     std::size_t offset{};
     std::size_t limit{};
+    EventLifecycleSummary summary;
+};
+
+struct CollectingEventRecord final
+{
+    std::string event_id;
+    std::string decision_state{"Candidate"};
+    std::int64_t candidate_time_utc_ms{};
+    std::optional<std::int64_t> confirmed_time_utc_ms;
+    std::int64_t start_time_utc_ms{};
+    std::int64_t end_time_utc_ms{};
+    std::vector<std::string> camera_ids;
+    std::string trigger_camera_id;
+    std::uint64_t trigger_frame_number{};
+    std::string trigger_reason;
+    double confidence{};
+    std::uint64_t trigger_count{1U};
 };
 
 struct EventReconcileReport final
@@ -250,6 +294,15 @@ class EventMetadataDatabase final
     /// Verifies and atomically indexes one already committed M5-06 event directory.
     [[nodiscard]] Result<void> index_committed_event(
         const std::filesystem::path& committed_directory);
+
+    /// Creates the query-visible row as soon as the canonical aggregate id is known.
+    [[nodiscard]] Result<EventMetadataRecord> create_collecting_event(
+        const CollectingEventRecord& event);
+    /// Updates one aggregate without changing its review fields.
+    [[nodiscard]] Result<EventMetadataRecord> update_event_lifecycle(
+        std::string_view event_id, std::string_view decision_state,
+        std::string_view persistence_state, std::uint64_t trigger_count,
+        std::optional<std::int64_t> confirmed_time_utc_ms = std::nullopt);
 
     [[nodiscard]] Result<EventQueryPage> query_events(const EventQuery& query) const;
 

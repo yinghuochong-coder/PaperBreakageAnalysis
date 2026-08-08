@@ -224,7 +224,11 @@ TEST(StorageMetadataDatabase, CreatesAllMetadataTablesAndRepeatedOpenIsIdempoten
     TemporaryDirectory temporary{"schema"};
     const auto options = database_options(temporary);
     auto opened = EventMetadataDatabase::open(options);
-    ASSERT_TRUE(opened) << opened.error().business_code;
+    ASSERT_TRUE(opened) << opened.error().business_code << " " << opened.error().message
+                        << (opened.error().details.empty()
+                                ? std::string{}
+                                : " " + opened.error().details.front().key + "=" +
+                                      opened.error().details.front().value);
     EXPECT_TRUE(opened.value()->open_report().created);
     EXPECT_TRUE(opened.value()->open_report().migrated);
     EXPECT_EQ(opened.value()->open_report().schema_version, database_schema_version);
@@ -291,7 +295,7 @@ TEST(StorageMetadataDatabase, MigratesVersionZeroWithBackupAndRollsBackFailedMig
               1);
 }
 
-TEST(StorageMetadataDatabase, MigratesVersionOneRetentionStateWithBackup)
+TEST(StorageMetadataDatabase, RejectsNonEmptyLegacyEventDatabaseWithoutMovingUserData)
 {
     TemporaryDirectory temporary{"migration-v1"};
     const auto options = database_options(temporary);
@@ -312,21 +316,11 @@ TEST(StorageMetadataDatabase, MigratesVersionOneRetentionStateWithBackup)
             "PRAGMA user_version=1;");
     }
     auto opened = EventMetadataDatabase::open(options);
-    ASSERT_TRUE(opened) << opened.error().business_code;
-    EXPECT_TRUE(opened.value()->open_report().migrated);
-    ASSERT_TRUE(opened.value()->open_report().migration_backup.has_value());
-    const auto backup_path = *opened.value()->open_report().migration_backup;
-    EXPECT_TRUE(std::filesystem::is_regular_file(backup_path));
-    opened.value().reset();
-
-    RawDatabase migrated{options.database_path};
-    EXPECT_EQ(migrated.scalar_int64("PRAGMA user_version"), database_schema_version);
-    EXPECT_EQ(migrated.scalar_int64("SELECT COUNT(*) FROM event_retention"), 1);
-    EXPECT_EQ(migrated.scalar_int64("SELECT deletion_allowed FROM event_retention WHERE event_id="
-                                    "'019fcb80-ffff-7000-8000-000000000001'"),
-              0);
-    RawDatabase backup{backup_path};
-    EXPECT_EQ(backup.scalar_int64("PRAGMA user_version"), 1);
+    ASSERT_FALSE(opened);
+    EXPECT_EQ(opened.error().business_code, "EVENT_SCHEMA_UNSUPPORTED");
+    RawDatabase untouched{options.database_path};
+    EXPECT_EQ(untouched.scalar_int64("PRAGMA user_version"), 1);
+    EXPECT_EQ(untouched.scalar_int64("SELECT COUNT(*) FROM events"), 1);
 }
 
 TEST(StorageMetadataDatabase, RejectsUnsupportedAndCorruptDatabasesAndRestoresBackup)
@@ -366,6 +360,25 @@ TEST(StorageMetadataDatabase, RejectsUnsupportedAndCorruptDatabasesAndRestoresBa
     EXPECT_EQ(restored.value()->open_report().schema_version, database_schema_version);
 }
 
+TEST(StorageMetadataDatabase, RejectsLegacyEventDirectoryWithoutDeletingIt)
+{
+    TemporaryDirectory temporary{"legacy-event-directory"};
+    const auto options = database_options(temporary);
+    const auto legacy_directory = options.event_root / "2025" / "01" / "01" / "legacy-event";
+    std::filesystem::create_directories(legacy_directory);
+    const auto manifest_path = legacy_directory / "manifest.json";
+    {
+        std::ofstream manifest{manifest_path};
+        manifest << R"({"schemaVersion":1,"eventId":"legacy-event"})";
+    }
+
+    auto opened = EventMetadataDatabase::open(options);
+
+    ASSERT_FALSE(opened);
+    EXPECT_EQ(opened.error().business_code, "EVENT_SCHEMA_UNSUPPORTED");
+    EXPECT_TRUE(std::filesystem::is_regular_file(manifest_path));
+}
+
 TEST(StorageMetadataDatabase, IndexesAndQueriesByStablePageTimeStateAndCamera)
 {
     TemporaryDirectory temporary{"query"};
@@ -376,7 +389,13 @@ TEST(StorageMetadataDatabase, IndexesAndQueriesByStablePageTimeStateAndCamera)
                                                             "CAM01", "Confirmed", 100ms));
     const auto second = persist_event(options, event_request("019fcb3d-2222-7000-8000-000000000002",
                                                              "CAM02", "Rejected", 2100ms));
-    ASSERT_TRUE(database.value()->index_committed_event(first.committed_directory));
+    auto indexed_first = database.value()->index_committed_event(first.committed_directory);
+    ASSERT_TRUE(indexed_first) << indexed_first.error().business_code << " "
+                               << indexed_first.error().message
+                               << (indexed_first.error().details.empty()
+                                       ? std::string{}
+                                       : " " + indexed_first.error().details.front().key + "=" +
+                                             indexed_first.error().details.front().value);
     ASSERT_TRUE(database.value()->index_committed_event(second.committed_directory));
 
     auto newest = database.value()->query_events({.limit = 1U});
@@ -412,7 +431,7 @@ TEST(StorageMetadataDatabase, IndexesAndQueriesByStablePageTimeStateAndCamera)
     RawDatabase raw{options.database_path};
     EXPECT_EQ(raw.scalar_int64("SELECT COUNT(*) FROM event_cameras"), 2);
     EXPECT_EQ(raw.scalar_int64("SELECT COUNT(*) FROM key_frames"), 2);
-    EXPECT_EQ(raw.scalar_int64("SELECT COUNT(*) FROM event_files"), 8);
+    EXPECT_EQ(raw.scalar_int64("SELECT COUNT(*) FROM event_files"), 6);
 }
 
 TEST(StorageMetadataDatabase, ReviewsWithOptimisticConcurrencyAndReconcilePreservesDecision)
@@ -434,7 +453,10 @@ TEST(StorageMetadataDatabase, ReviewsWithOptimisticConcurrencyAndReconcilePreser
         persisted.event_id, 1U, EventReviewDecision::confirmed, 1234567, "S-1-5-21-operator");
     ASSERT_TRUE(confirmed);
     EXPECT_FALSE(confirmed.value().duplicate);
-    EXPECT_EQ(confirmed.value().event.event_state, "Confirmed");
+    EXPECT_EQ(confirmed.value().event.decision_state, "Candidate");
+    EXPECT_EQ(confirmed.value().event.review_state, "Reviewed");
+    ASSERT_TRUE(confirmed.value().event.review_decision.has_value());
+    EXPECT_EQ(*confirmed.value().event.review_decision, "Confirmed");
     EXPECT_EQ(confirmed.value().event.review_revision, 2U);
     EXPECT_EQ(confirmed.value().event.reviewed_by, "S-1-5-21-operator");
 
@@ -451,8 +473,61 @@ TEST(StorageMetadataDatabase, ReviewsWithOptimisticConcurrencyAndReconcilePreser
     ASSERT_TRUE(database.value()->reconcile());
     auto after_reconcile = database.value()->get_event(persisted.event_id);
     ASSERT_TRUE(after_reconcile);
-    EXPECT_EQ(after_reconcile.value().event_state, "Confirmed");
+    EXPECT_EQ(after_reconcile.value().decision_state, "Candidate");
+    EXPECT_EQ(after_reconcile.value().review_state, "Reviewed");
+    ASSERT_TRUE(after_reconcile.value().review_decision.has_value());
+    EXPECT_EQ(*after_reconcile.value().review_decision, "Confirmed");
     EXPECT_EQ(after_reconcile.value().review_revision, 2U);
+}
+
+TEST(StorageMetadataDatabase, KeepsTwoCanonicalRowsForFourMergedTriggersAndAggregatesPriority)
+{
+    TemporaryDirectory temporary{"collecting-lifecycle"};
+    const auto options = database_options(temporary);
+    auto database = EventMetadataDatabase::open(options);
+    ASSERT_TRUE(database);
+    const auto collecting = [](std::string event_id, const std::int64_t time,
+                               std::string camera_id) {
+        return CollectingEventRecord{.event_id = std::move(event_id),
+                                     .decision_state = "Candidate",
+                                     .candidate_time_utc_ms = time,
+                                     .start_time_utc_ms = time - 1000,
+                                     .end_time_utc_ms = time + 1000,
+                                     .camera_ids = {camera_id},
+                                     .trigger_camera_id = std::move(camera_id),
+                                     .trigger_frame_number = 1U,
+                                     .trigger_reason = "Algorithm",
+                                     .confidence = 0.8,
+                                     .trigger_count = 1U};
+    };
+    ASSERT_TRUE(database.value()->create_collecting_event(
+        collecting("019fcb3d-a111-7000-8000-000000000001", 1000, "CAM01")));
+    ASSERT_TRUE(database.value()->create_collecting_event(
+        collecting("019fcb3d-a222-7000-8000-000000000002", 5000, "CAM02")));
+    ASSERT_TRUE(database.value()->update_event_lifecycle("019fcb3d-a111-7000-8000-000000000001",
+                                                         "Rejected", "Collecting", 2U));
+    ASSERT_TRUE(database.value()->update_event_lifecycle("019fcb3d-a111-7000-8000-000000000001",
+                                                         "Confirmed", "Encoding", 2U, 1200));
+    ASSERT_TRUE(database.value()->update_event_lifecycle("019fcb3d-a111-7000-8000-000000000001",
+                                                         "Rejected", "Queued", 2U));
+    ASSERT_TRUE(database.value()->update_event_lifecycle("019fcb3d-a222-7000-8000-000000000002",
+                                                         "Timeout", "Incomplete", 2U));
+
+    auto page = database.value()->query_events({.limit = 10U});
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page.value().events.size(), 2U);
+    EXPECT_EQ(page.value().summary.decision_candidates, 4U);
+    EXPECT_EQ(page.value().summary.decision_confirmed, 1U);
+    const auto confirmed = std::ranges::find_if(
+        page.value().events, [](const auto& event) { return event.decision_state == "Confirmed"; });
+    ASSERT_NE(confirmed, page.value().events.end());
+    EXPECT_EQ(confirmed->persistence_state, "Queued");
+    EXPECT_EQ(confirmed->trigger_count, 2U);
+    EXPECT_FALSE(confirmed->artifacts_available);
+    const auto timeout = database.value()->query_events(
+        {.decision_state = "Timeout", .persistence_state = "Incomplete", .limit = 10U});
+    ASSERT_TRUE(timeout);
+    ASSERT_EQ(timeout.value().events.size(), 1U);
 }
 
 TEST(StorageMetadataDatabase, SerializesCompetingReviewUpdates)
@@ -488,8 +563,11 @@ TEST(StorageMetadataDatabase, SerializesCompetingReviewUpdates)
     auto final = database.value()->get_event(persisted.event_id);
     ASSERT_TRUE(final);
     EXPECT_EQ(final.value().review_revision, 2U);
-    EXPECT_TRUE(final.value().event_state == "Confirmed" ||
-                final.value().event_state == "Rejected");
+    EXPECT_EQ(final.value().decision_state, "Candidate");
+    EXPECT_EQ(final.value().review_state, "Reviewed");
+    ASSERT_TRUE(final.value().review_decision.has_value());
+    EXPECT_TRUE(*final.value().review_decision == "Confirmed" ||
+                *final.value().review_decision == "Rejected");
 }
 
 TEST(StorageMetadataDatabase, ReconcilesDirectoryOnlyAndDatabaseOnlyEventsWithoutDeletingRows)
@@ -550,7 +628,7 @@ TEST(StorageMetadataDatabase, RejectsDamagedManifestWithoutPartialIndex)
     for (const auto& entry :
          std::filesystem::recursive_directory_iterator{persisted.committed_directory / "raw"})
     {
-        if (entry.is_regular_file() && entry.path().extension() == ".raw")
+        if (entry.is_regular_file() && entry.path().extension() == ".pbnvme")
         {
             raw_path = entry.path();
             break;

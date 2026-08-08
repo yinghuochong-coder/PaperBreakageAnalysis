@@ -253,13 +253,13 @@ class EventClientHandler final : public paperbreak::ipc::IRequestHandler
             last_list_payload = request.payload_json;
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json =
-                     R"({"events":[{"eventId":"event-1","eventState":"Candidate","reviewRevision":1,"candidateTimeUtcMs":1785801600000,"triggerCameraId":"CAM01","confidence":0.875,"uploadState":"Pending","storageState":"Present","thumbnailAvailable":true}],"total":1,"offset":0,"limit":50})",
+                     R"({"events":[{"eventId":"event-1","eventState":"Candidate","decisionState":"Candidate","persistenceState":"Committed","reviewState":"Unreviewed","reviewDecision":null,"artifactsAvailable":true,"triggerCount":2,"reviewRevision":1,"candidateTimeUtcMs":1785801600000,"triggerCameraId":"CAM01","confidence":0.875,"uploadState":"Pending","storageState":"Present","thumbnailAvailable":true}],"total":1,"offset":0,"limit":50,"summary":{"decisionCandidates":2,"decisionConfirmed":0,"persistenceCollecting":0,"persistenceEncoding":0,"persistenceQueued":0,"persistenceWriting":0,"persistenceCommitted":1,"reviewUnreviewed":1,"reviewConfirmed":0,"reviewRejected":0}})",
                  .binary = {}});
         }
         if (request.command == "event.get")
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json =
-                     R"({"event":{"eventId":"event-1","eventState":"Candidate","reviewRevision":1,"candidateTimeUtcMs":1785801600000,"triggerCameraId":"CAM01","confidence":0.875,"uploadState":"Pending","storageState":"Present","thumbnailAvailable":true},"committedDirectory":"C:/事件 数据/2026/08/04/event-1","rawFrameCount":2,"keyFrameCount":1,"observedSequenceGaps":0,"keyFramesTraceable":true,"manifestBytes":21,"thumbnailBytes":4})",
+                     R"({"event":{"eventId":"event-1","eventState":"Candidate","decisionState":"Candidate","persistenceState":"Committed","reviewState":"Unreviewed","reviewDecision":null,"artifactsAvailable":true,"triggerCount":2,"reviewRevision":1,"candidateTimeUtcMs":1785801600000,"triggerCameraId":"CAM01","confidence":0.875,"uploadState":"Pending","storageState":"Present","thumbnailAvailable":true},"committedDirectory":"C:/事件 数据/2026/08/04/event-1","rawFrameCount":2,"keyFrameCount":1,"observedSequenceGaps":0,"keyFramesTraceable":true,"manifestBytes":21,"thumbnailBytes":4})",
                  .binary = {std::byte{0xff}, std::byte{0xd8}, std::byte{0xff}, std::byte{0xd9}}});
         if (request.command == "event.getManifest")
         {
@@ -1212,6 +1212,12 @@ TEST(EventClient, QueriesDetailsReviewsAndExportsVerifiedArchive)
     EXPECT_FALSE(latest.upload_runtime_available);
     ASSERT_EQ(latest.events.size(), 1U);
     EXPECT_EQ(latest.events.front().event_id, "event-1");
+    EXPECT_EQ(latest.events.front().decision_state, "Candidate");
+    EXPECT_EQ(latest.events.front().persistence_state, "Committed");
+    EXPECT_EQ(latest.events.front().review_state, "Unreviewed");
+    EXPECT_EQ(latest.events.front().trigger_count, 2U);
+    EXPECT_EQ(latest.summary.candidate_decisions, 2U);
+    EXPECT_EQ(latest.summary.committed, 1U);
 
     paperbreak::console::EventConfigurationValue changed_configuration;
     changed_configuration.pre_event_seconds = 600U;
@@ -1245,7 +1251,8 @@ TEST(EventClient, QueriesDetailsReviewsAndExportsVerifiedArchive)
 
     ASSERT_TRUE(client.query({.start_time_utc_ms = 1000,
                               .end_time_utc_ms = 2000,
-                              .event_state = std::string{"Candidate"},
+                              .decision_state = std::string{"Candidate"},
+                              .through_now = false,
                               .camera_id = std::string{"CAM01"},
                               .offset = 0U,
                               .limit = 50U}));
@@ -1254,8 +1261,20 @@ TEST(EventClient, QueriesDetailsReviewsAndExportsVerifiedArchive)
         const auto payload = nlohmann::json::parse(handler->last_list_payload);
         return payload.value("startTimeUtcMs", 0) == 1000 &&
                payload.value("endTimeUtcMs", 0) == 2000 &&
-               payload.value("eventState", "") == "Candidate" &&
+               payload.value("decisionState", "") == "Candidate" &&
                payload.value("cameraId", "") == "CAM01";
+    }));
+
+    ASSERT_TRUE(client.query({.start_time_utc_ms = 2500,
+                              .end_time_utc_ms = 3000,
+                              .decision_state = std::string{"Candidate"},
+                              .through_now = true,
+                              .offset = 0U,
+                              .limit = 50U}));
+    ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{handler->mutex};
+        const auto payload = nlohmann::json::parse(handler->last_list_payload);
+        return payload.value("startTimeUtcMs", 0) == 2500 && !payload.contains("endTimeUtcMs");
     }));
 
     ASSERT_TRUE(client.get("event-1"));

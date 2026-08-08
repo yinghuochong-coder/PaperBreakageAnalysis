@@ -180,6 +180,17 @@ class FaultingFileSystem final : public IEventFileSystem
         return delegate_->write_new_file_durable(path, contents);
     }
 
+    Result<void> write_new_raw_block_durable(const std::filesystem::path& path,
+                                             const std::span<const std::byte> contents) override
+    {
+        if (!fail_write_filename.empty() && path.filename() == fail_write_filename)
+            return Result<void>::failure(injected_io_error(native_code));
+        auto result = delegate_->write_new_raw_block_durable(path, contents);
+        if (result && stop_after_raw_block != nullptr)
+            stop_after_raw_block->request_stop();
+        return result;
+    }
+
     Result<std::vector<std::byte>> read_file_bounded(const std::filesystem::path& path,
                                                      const std::size_t maximum_bytes) override
     {
@@ -220,6 +231,7 @@ class FaultingFileSystem final : public IEventFileSystem
     std::size_t fail_read_occurrence{1U};
     std::string native_code{"112"};
     bool fail_move{};
+    std::stop_source* stop_after_raw_block{};
 
   private:
     std::shared_ptr<IEventFileSystem> delegate_;
@@ -241,32 +253,43 @@ TEST(StorageEventStore, PersistsReplayableManifestWithChecksumsUnderChinesePath)
     auto persisted = writer->persist(request("019f-m506-persist-0001"));
 
     ASSERT_TRUE(persisted) << persisted.error().message;
-    EXPECT_EQ(persisted.value().raw_file_count, 2U);
+    EXPECT_EQ(persisted.value().raw_block_count, 1U);
+    EXPECT_EQ(persisted.value().raw_frame_count, 2U);
+    EXPECT_EQ(persisted.value().raw_file_count, 1U);
     EXPECT_EQ(persisted.value().key_frame_count, 1U);
     EXPECT_TRUE(std::filesystem::is_directory(persisted.value().committed_directory));
     auto verified = writer->verify_committed_manifest(persisted.value().committed_directory);
     ASSERT_TRUE(verified) << verified.error().message;
     const auto manifest = nlohmann::json::parse(verified.value());
-    EXPECT_EQ(manifest["schemaVersion"], 1U);
+    EXPECT_EQ(manifest["schemaVersion"], 2U);
     EXPECT_EQ(manifest["eventId"], "019f-m506-persist-0001");
-    EXPECT_EQ(manifest["eventState"], "Confirmed");
+    EXPECT_EQ(manifest["decisionState"], "Confirmed");
+    EXPECT_EQ(manifest["triggerCount"], 1U);
     EXPECT_EQ(manifest["candidateTime"], "2026-08-04T00:00:00.200Z");
     EXPECT_EQ(manifest["cameraIds"].size(), 1U);
-    EXPECT_EQ(manifest["rawFiles"].size(), 2U);
+    ASSERT_EQ(manifest["rawBlocks"].size(), 1U);
+    EXPECT_EQ(manifest["rawBlocks"][0]["frameCount"], 2U);
+    EXPECT_EQ(manifest["rawBlocks"][0]["firstSequenceNumber"], 1U);
+    EXPECT_EQ(manifest["rawBlocks"][0]["lastSequenceNumber"], 2U);
     EXPECT_EQ(manifest["keyFrames"].size(), 1U);
     EXPECT_EQ(manifest["keyFrames"][0]["reasons"].size(), 2U);
-    EXPECT_EQ(manifest["fileChecksums"].size(), 4U);
-    EXPECT_EQ(manifest["fileSizes"].size(), 4U);
+    EXPECT_EQ(manifest["fileChecksums"].size(), 3U);
+    EXPECT_EQ(manifest["fileSizes"].size(), 3U);
     for (const auto& [name, checksum] : manifest["fileChecksums"].items())
     {
         EXPECT_TRUE(checksum.get<std::string>().starts_with("sha256:"));
         EXPECT_TRUE(std::filesystem::is_regular_file(persisted.value().committed_directory / name));
     }
-    const auto raw_path =
-        persisted.value().committed_directory / manifest["rawFiles"][0]["path"].get<std::string>();
-    EXPECT_EQ(manifest["fileChecksums"][manifest["rawFiles"][0]["path"].get<std::string>()],
-              "sha256:5dfbabeedf318bf33c0927c43d7630f51b82f351740301354fa3d7fc51f0132e");
-    EXPECT_EQ(std::filesystem::file_size(raw_path), 16U);
+    const auto block_path =
+        persisted.value().committed_directory / manifest["rawBlocks"][0]["path"].get<std::string>();
+    EXPECT_EQ(manifest["fileChecksums"][manifest["rawBlocks"][0]["path"].get<std::string>()],
+              manifest["rawBlocks"][0]["sha256"]);
+    EXPECT_EQ(std::filesystem::file_size(block_path),
+              manifest["rawBlocks"][0]["sizeBytes"].get<std::uint64_t>());
+    std::ifstream block{block_path, std::ios::binary};
+    std::array<char, 8U> magic{};
+    block.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+    EXPECT_EQ(std::string(magic.data(), 7U), "PBNVME1");
     EXPECT_FALSE(std::filesystem::exists(persisted.value().transaction_directory));
 }
 
@@ -297,7 +320,7 @@ TEST(StorageEventInspector, ReadsManifestOrderTracesKeyFramesAndExportsVerifiedZ
 
     auto archive = inspector.value()->export_zip(relative);
     ASSERT_TRUE(archive) << archive.error().message;
-    EXPECT_EQ(archive.value().source_file_count, 5U);
+    EXPECT_EQ(archive.value().source_file_count, 4U);
     ASSERT_GE(archive.value().zip.size(), 4U);
     EXPECT_EQ(archive.value().zip[0], std::byte{0x50});
     EXPECT_EQ(archive.value().zip[1], std::byte{0x4b});
@@ -305,7 +328,7 @@ TEST(StorageEventInspector, ReadsManifestOrderTracesKeyFramesAndExportsVerifiedZ
     const auto destination = temporary.path() / L"导出 目标" / L"已校验事件.zip";
     auto file_archive = inspector.value()->export_zip_file(relative, destination);
     ASSERT_TRUE(file_archive) << file_archive.error().message;
-    EXPECT_EQ(file_archive.value().source_file_count, 5U);
+    EXPECT_EQ(file_archive.value().source_file_count, 4U);
     EXPECT_EQ(file_archive.value().path, destination);
     std::ifstream input{destination, std::ios::binary};
     std::array<unsigned char, 2U> signature{};
@@ -340,7 +363,7 @@ TEST(StorageEventInspector, RejectsPendingDamagedOversizedAndInterruptedExports)
     EXPECT_EQ(oversized.error().business_code, "EVENT_EXPORT_TOO_LARGE");
 
     file_system->read_occurrences.clear();
-    file_system->fail_read_filename = "frame-1.raw";
+    file_system->fail_read_filename = "block-0.pbnvme";
     file_system->fail_read_occurrence = 2U;
     auto inspector = EventInspector::create({.event_root = root}, file_system);
     ASSERT_TRUE(inspector);
@@ -350,7 +373,7 @@ TEST(StorageEventInspector, RejectsPendingDamagedOversizedAndInterruptedExports)
     file_system->fail_read_filename.clear();
 
     file_system->read_occurrences.clear();
-    file_system->fail_read_filename = "frame-1.raw";
+    file_system->fail_read_filename = "block-0.pbnvme";
     file_system->fail_read_occurrence = 2U;
     const auto interrupted_path = temporary.path() / L"中文 目标" / L"中断.zip";
     auto interrupted_file = inspector.value()->export_zip_file(relative, interrupted_path);
@@ -366,7 +389,7 @@ TEST(StorageEventInspector, RejectsPendingDamagedOversizedAndInterruptedExports)
     EXPECT_EQ(hidden.error().business_code, "EVENT_NOT_FOUND");
 
     const auto raw_path =
-        persisted.value().committed_directory / "raw" / "camera-0" / "frame-1.raw";
+        persisted.value().committed_directory / "raw" / "camera-0" / "block-0.pbnvme";
     {
         std::ofstream output{raw_path, std::ios::binary | std::ios::app};
         output << "damage";
@@ -375,6 +398,60 @@ TEST(StorageEventInspector, RejectsPendingDamagedOversizedAndInterruptedExports)
     ASSERT_FALSE(damaged);
     EXPECT_TRUE(damaged.error().business_code == "EVENT_CHECKSUM_FAILED" ||
                 damaged.error().business_code == "EVENT_RECOVERY_FAILED");
+}
+
+TEST(StorageEventStore, GroupsCurrentTwentySecondScenarioIntoOneSecondBlocks)
+{
+    TemporaryDirectory temporary{"twenty-second-blocks"};
+    auto writer = writer_for(temporary.path(), make_windows_event_file_system());
+    auto value = request("019f-m7-blocks-0907");
+    auto& camera_window = value.window.camera_windows.front();
+    camera_window.frames.clear();
+    camera_window.frames.reserve(907U);
+    for (std::uint64_t index = 0U; index < 907U; ++index)
+        camera_window.frames.push_back(
+            frame("CAM01", index + 1U, std::chrono::milliseconds{index * 22U}));
+    camera_window.requested_start = MonotonicTime{0ms};
+    camera_window.requested_end = MonotonicTime{20s};
+    camera_window.available_start = MonotonicTime{0ms};
+    camera_window.available_end = MonotonicTime{19932ms};
+    camera_window.first_sequence_number = 1U;
+    camera_window.last_sequence_number = 907U;
+    value.key_frames.front().descriptor.monotonic_time =
+        camera_window.frames[1].received_monotonic_time();
+    value.key_frames.front().descriptor.wall_clock_time =
+        camera_window.frames[1].received_wall_clock_time();
+    value.window.requested_start = MonotonicTime{0ms};
+    value.window.requested_end = MonotonicTime{20s};
+    value.window.closed_monotonic_time = MonotonicTime{20001ms};
+
+    const auto started = std::chrono::steady_clock::now();
+    auto persisted = writer->persist(value);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_TRUE(persisted) << persisted.error().message;
+    EXPECT_EQ(persisted.value().raw_frame_count, 907U);
+    EXPECT_EQ(persisted.value().raw_block_count, 20U);
+    EXPECT_LT(persisted.value().raw_block_count, persisted.value().raw_frame_count);
+    auto verified = writer->verify_committed_manifest(persisted.value().committed_directory);
+    ASSERT_TRUE(verified);
+    const auto manifest = nlohmann::json::parse(verified.value());
+    ASSERT_EQ(manifest["rawBlocks"].size(), 20U);
+    std::uint64_t frame_count = 0U;
+    for (const auto& block : manifest["rawBlocks"])
+    {
+        EXPECT_LE(block["frameCount"].get<std::uint64_t>(), event_raw_block_maximum_frames);
+        frame_count += block["frameCount"].get<std::uint64_t>();
+    }
+    EXPECT_EQ(frame_count, 907U);
+    const auto elapsed_seconds = std::chrono::duration<double>{elapsed}.count();
+    RecordProperty("elapsedMilliseconds",
+                   std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+    RecordProperty("writtenBytes", persisted.value().bytes_written);
+    RecordProperty("measuredMiBPerSecond",
+                   elapsed_seconds > 0.0 ? static_cast<double>(persisted.value().bytes_written) /
+                                               (1024.0 * 1024.0 * elapsed_seconds)
+                                         : 0.0);
 }
 
 TEST(StorageEventStore, RejectsUnsafeIdentityBudgetOverflowAndUntraceableKeyFrameBeforeIo)
@@ -403,9 +480,39 @@ TEST(StorageEventStore, RejectsUnsafeIdentityBudgetOverflowAndUntraceableKeyFram
     EXPECT_FALSE(std::filesystem::exists(temporary.path() / ".transactions"));
 }
 
+TEST(StorageEventStore, CancellationKeepsRecoverableTransactionAndPublishesNoEventDirectory)
+{
+    TemporaryDirectory temporary{"cancel-block-write"};
+    auto file_system = std::make_shared<FaultingFileSystem>(make_windows_event_file_system());
+    std::stop_source stop;
+    file_system->stop_after_raw_block = &stop;
+    auto writer = writer_for(temporary.path(), file_system);
+    auto value = request("019f-m7-cancel-0001");
+    auto& frames = value.window.camera_windows.front().frames;
+    frames.push_back(frame("CAM01", 3U, 1200ms));
+    value.window.camera_windows.front().available_end = MonotonicTime{1200ms};
+    value.window.camera_windows.front().requested_end = MonotonicTime{1300ms};
+    value.window.camera_windows.front().last_sequence_number = 3U;
+    value.window.requested_end = MonotonicTime{1300ms};
+    value.window.closed_monotonic_time = MonotonicTime{1301ms};
+
+    auto persisted = writer->persist(value, stop.get_token());
+
+    ASSERT_FALSE(persisted);
+    EXPECT_EQ(persisted.error().business_code, "EVENT_WRITE_CANCELLED");
+    EXPECT_FALSE(
+        std::filesystem::exists(temporary.path() / "2026" / "08" / "04" / value.metadata.event_id));
+    const auto pending_root = temporary.path() / ".transactions";
+    ASSERT_TRUE(std::filesystem::is_directory(pending_root));
+    std::size_t pending_count = 0U;
+    for (const auto& entry : std::filesystem::directory_iterator{pending_root})
+        pending_count += entry.is_directory() ? 1U : 0U;
+    EXPECT_EQ(pending_count, 1U);
+}
+
 TEST(StorageEventStore, RetainsTransactionAndNeverPublishesOnEveryCommitWritePointFailure)
 {
-    const std::vector<std::filesystem::path> write_points{"event.json", "frame-1.raw",
+    const std::vector<std::filesystem::path> write_points{"event.json", "block-0.pbnvme",
                                                           "keyframe-0.jpg", "manifest.json"};
     for (std::size_t index = 0U; index < write_points.size() + 1U; ++index)
     {
@@ -451,22 +558,22 @@ TEST(StorageEventStore, MapsDiskFullAndAccessDeniedWithoutLosingNativeDiagnostic
     }
 }
 
-TEST(StorageEventStore, DetectsWriteBackChecksumMismatchAndKeepsPendingEvidenceHidden)
+TEST(StorageEventStore, DetectsCommittedBlockChecksumMismatch)
 {
     TemporaryDirectory temporary{"checksum"};
     auto file_system = std::make_shared<FaultingFileSystem>(make_windows_event_file_system());
-    file_system->corrupt_read_filename = "frame-1.raw";
+    file_system->corrupt_read_filename = "block-0.pbnvme";
     auto writer = writer_for(temporary.path(), file_system);
 
     auto persisted = writer->persist(request("019f-m506-checksum-0001"));
 
-    ASSERT_FALSE(persisted);
-    EXPECT_EQ(persisted.error().business_code, "EVENT_CHECKSUM_FAILED");
-    auto pending = std::filesystem::directory_iterator{temporary.path() / ".transactions"};
-    ASSERT_NE(pending, std::filesystem::directory_iterator{});
-    auto hidden = writer->verify_committed_manifest(pending->path());
-    ASSERT_FALSE(hidden);
-    EXPECT_EQ(hidden.error().business_code, "EVENT_NOT_FOUND");
+    ASSERT_TRUE(persisted);
+    auto inspector = EventInspector::create({.event_root = temporary.path()}, file_system);
+    ASSERT_TRUE(inspector);
+    auto damaged = inspector.value()->inspect(
+        persisted.value().committed_directory.lexically_relative(temporary.path()));
+    ASSERT_FALSE(damaged);
+    EXPECT_EQ(damaged.error().business_code, "EVENT_CHECKSUM_FAILED");
 }
 
 TEST(StorageEventStore, StartupRecoveryCommitsOnlyCompleteValidatedResidualTransaction)
@@ -546,7 +653,7 @@ TEST(StorageEventStore, StartupRecoveryQuarantinesChecksumMismatchInsteadOfPubli
     auto transaction_iterator =
         std::filesystem::directory_iterator{temporary.path() / ".transactions"};
     ASSERT_NE(transaction_iterator, std::filesystem::directory_iterator{});
-    const auto raw_path = transaction_iterator->path() / "raw" / "camera-0" / "frame-1.raw";
+    const auto raw_path = transaction_iterator->path() / "raw" / "camera-0" / "block-0.pbnvme";
     {
         std::fstream raw{raw_path, std::ios::in | std::ios::out | std::ios::binary};
         ASSERT_TRUE(raw);
