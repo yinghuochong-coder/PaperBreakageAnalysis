@@ -463,7 +463,7 @@ Result<std::optional<MVCC_FLOATVALUE>> optional_float(const MvsApi& api, void* h
 }
 
 Result<std::optional<MVCC_INTVALUE_EX>> optional_integer(const MvsApi& api, void* handle,
-                                                          const char* node)
+                                                         const char* node)
 {
     MVCC_INTVALUE_EX value{};
     const int code = api.get_int_value(handle, node, &value);
@@ -494,12 +494,11 @@ Result<std::optional<std::uint32_t>> optional_integer_current(const MvsApi& api,
     const int code = api.get_int_value(handle, node, &value);
     if (code == MV_OK)
     {
-        if (value.nCurValue < 0 ||
-            value.nCurValue > std::numeric_limits<std::uint32_t>::max())
+        if (value.nCurValue < 0 || value.nCurValue > std::numeric_limits<std::uint32_t>::max())
         {
-            return Result<std::optional<std::uint32_t>>::failure(parameter_error(
-                CameraErrorKind::parameter_read_failed, MV_E_PARAMETER,
-                "camera.hikrobot.capabilities", node, "value-out-of-range"));
+            return Result<std::optional<std::uint32_t>>::failure(
+                parameter_error(CameraErrorKind::parameter_read_failed, MV_E_PARAMETER,
+                                "camera.hikrobot.capabilities", node, "value-out-of-range"));
         }
         return Result<std::optional<std::uint32_t>>::success(
             static_cast<std::uint32_t>(value.nCurValue));
@@ -546,6 +545,23 @@ Result<bool> supports_optional_boolean(const MvsApi& api, void* handle, const ch
     return Result<bool>::failure(parameter_error(CameraErrorKind::parameter_read_failed, code,
                                                  "camera.hikrobot.capabilities", node,
                                                  "read-failed"));
+}
+
+Result<std::optional<bool>> optional_frame_rate_enable(const MvsApi& api, void* handle,
+                                                       const CameraErrorKind error_kind,
+                                                       const std::string_view operation)
+{
+    bool value{};
+    const int code = api.get_bool_value(handle, "AcquisitionFrameRateEnable", &value);
+    if (code == MV_OK)
+        return Result<std::optional<bool>>::success(value);
+    // Some camera families expose AcquisitionFrameRate without a separate enable node.
+    // Only an explicit "not supported" result is compatible; access/read failures must
+    // remain visible to the caller.
+    if (code == static_cast<int>(MV_E_SUPPORT))
+        return Result<std::optional<bool>>::success(std::nullopt);
+    return Result<std::optional<bool>>::failure(
+        parameter_error(error_kind, code, operation, "AcquisitionFrameRateEnable", "read-failed"));
 }
 
 bool supports(const MVCC_ENUMVALUE& value, const unsigned int item) noexcept
@@ -679,16 +695,16 @@ Result<CameraCapabilities> read_capabilities_locked(const MvsApi& api, void* han
                       // 具体 Width/Height + Offset 组合仍由通用能力校验器检查。
                       .offset_x = roi_offset_range(*offset_x.value(), sensor_width,
                                                    static_cast<std::uint32_t>(width.value()->nMin)),
-                      .offset_y = roi_offset_range(
-                          *offset_y.value(), sensor_height,
-                          static_cast<std::uint32_t>(height.value()->nMin))};
+                      .offset_y =
+                          roi_offset_range(*offset_y.value(), sensor_height,
+                                           static_cast<std::uint32_t>(height.value()->nMin))};
     }
 
     const auto reverse_x = supports_optional_boolean(api, handle, "ReverseX");
     const auto reverse_y = supports_optional_boolean(api, handle, "ReverseY");
     if (!reverse_x || !reverse_y)
         return Result<CameraCapabilities>::failure(!reverse_x ? reverse_x.error()
-                                                               : reverse_y.error());
+                                                              : reverse_y.error());
     result.supports_reverse_x = reverse_x.value();
     result.supports_reverse_y = reverse_y.value();
 
@@ -842,9 +858,9 @@ Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* 
         bool value{};
         const int code = api.get_bool_value(handle, "ReverseX", &value);
         if (code != MV_OK)
-            return Result<CameraParameterSnapshot>::failure(parameter_error(
-                CameraErrorKind::parameter_read_failed, code, "camera.hikrobot.readParameters",
-                "ReverseX", "read-failed"));
+            return Result<CameraParameterSnapshot>::failure(
+                parameter_error(CameraErrorKind::parameter_read_failed, code,
+                                "camera.hikrobot.readParameters", "ReverseX", "read-failed"));
         result.reverse_x = value;
     }
     if (capabilities.supports_reverse_y)
@@ -852,9 +868,9 @@ Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* 
         bool value{};
         const int code = api.get_bool_value(handle, "ReverseY", &value);
         if (code != MV_OK)
-            return Result<CameraParameterSnapshot>::failure(parameter_error(
-                CameraErrorKind::parameter_read_failed, code, "camera.hikrobot.readParameters",
-                "ReverseY", "read-failed"));
+            return Result<CameraParameterSnapshot>::failure(
+                parameter_error(CameraErrorKind::parameter_read_failed, code,
+                                "camera.hikrobot.readParameters", "ReverseY", "read-failed"));
         result.reverse_y = value;
     }
     if (!capabilities.pixel_formats.empty())
@@ -944,7 +960,8 @@ Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* 
 Result<void> write_parameters_locked(const MvsApi& api, void* handle,
                                      const CameraParameterSnapshot& parameters,
                                      const CameraCapabilities& capabilities,
-                                     const CameraErrorKind error_kind)
+                                     const CameraErrorKind error_kind,
+                                     const std::optional<bool> frame_rate_enable)
 {
     auto check = [&](const int code, const char* node) -> Result<void> {
         if (code == MV_OK)
@@ -973,13 +990,13 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
             return r;
     }
     if (parameters.reverse_x && capabilities.supports_reverse_x)
-        if (auto r = check(api.set_bool_value(handle, "ReverseX", *parameters.reverse_x),
-                           "ReverseX");
+        if (auto r =
+                check(api.set_bool_value(handle, "ReverseX", *parameters.reverse_x), "ReverseX");
             !r)
             return r;
     if (parameters.reverse_y && capabilities.supports_reverse_y)
-        if (auto r = check(api.set_bool_value(handle, "ReverseY", *parameters.reverse_y),
-                           "ReverseY");
+        if (auto r =
+                check(api.set_bool_value(handle, "ReverseY", *parameters.reverse_y), "ReverseY");
             !r)
             return r;
     if (parameters.pixel_format)
@@ -1001,11 +1018,23 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
             !r)
             return r;
     if (parameters.frame_rate)
+    {
+        if (frame_rate_enable)
+            if (auto r = check(api.set_bool_value(handle, "AcquisitionFrameRateEnable", true),
+                               "AcquisitionFrameRateEnable");
+                !r)
+                return r;
         if (auto r = check(api.set_float_value(handle, "AcquisitionFrameRate",
                                                static_cast<float>(*parameters.frame_rate)),
                            "AcquisitionFrameRate");
             !r)
             return r;
+        if (frame_rate_enable && !*frame_rate_enable)
+            if (auto r = check(api.set_bool_value(handle, "AcquisitionFrameRateEnable", false),
+                               "AcquisitionFrameRateEnable");
+                !r)
+                return r;
+    }
     if (parameters.trigger_delay_us)
         if (auto r = check(api.set_float_value(handle, "TriggerDelay",
                                                static_cast<float>(*parameters.trigger_delay_us)),
@@ -1133,6 +1162,19 @@ struct DeviceHandle::State final
         auto old = read_parameters_locked(api, handle, capabilities.value());
         if (!old)
             return Result<CameraParameterSnapshot>::failure(old.error());
+        std::optional<bool> old_frame_rate_enable;
+        if (old.value().frame_rate)
+        {
+            auto enabled =
+                optional_frame_rate_enable(api, handle, CameraErrorKind::parameter_read_failed,
+                                           "camera.hikrobot.applyParameters");
+            if (!enabled)
+                return Result<CameraParameterSnapshot>::failure(enabled.error());
+            old_frame_rate_enable = enabled.value();
+        }
+        const std::optional<bool> requested_frame_rate_enable =
+            parameters.frame_rate && old_frame_rate_enable ? std::optional<bool>{true}
+                                                           : old_frame_rate_enable;
 
         const bool resume = streaming;
         if (resume)
@@ -1143,14 +1185,24 @@ struct DeviceHandle::State final
         }
 
         auto restore_or_fault = [&](Error original) -> Result<CameraParameterSnapshot> {
-            auto restored = write_parameters_locked(api, handle, old.value(), capabilities.value(),
-                                                    CameraErrorKind::parameter_faulted);
+            auto restored =
+                write_parameters_locked(api, handle, old.value(), capabilities.value(),
+                                        CameraErrorKind::parameter_faulted, old_frame_rate_enable);
             if (restored)
             {
                 auto confirmed = read_parameters_locked(api, handle, capabilities.value());
                 if (!confirmed || confirmed.value() != old.value())
                     restored =
                         Result<void>::failure(faulted_error("camera.hikrobot.rollbackParameters"));
+                if (restored && old_frame_rate_enable)
+                {
+                    auto enabled =
+                        optional_frame_rate_enable(api, handle, CameraErrorKind::parameter_faulted,
+                                                   "camera.hikrobot.rollbackParameters");
+                    if (!enabled || enabled.value() != old_frame_rate_enable)
+                        restored = Result<void>::failure(
+                            faulted_error("camera.hikrobot.rollbackParameters"));
+                }
             }
             if (resume)
             {
@@ -1173,12 +1225,26 @@ struct DeviceHandle::State final
         };
 
         auto written = write_parameters_locked(api, handle, parameters, capabilities.value(),
-                                               CameraErrorKind::parameter_write_failed);
+                                               CameraErrorKind::parameter_write_failed,
+                                               requested_frame_rate_enable);
         if (!written)
             return restore_or_fault(written.error());
         auto actual = read_parameters_locked(api, handle, capabilities.value());
         if (!actual)
             return restore_or_fault(actual.error());
+        if (parameters.frame_rate && requested_frame_rate_enable)
+        {
+            auto enabled =
+                optional_frame_rate_enable(api, handle, CameraErrorKind::parameter_read_failed,
+                                           "camera.hikrobot.applyParameters");
+            if (!enabled)
+                return restore_or_fault(enabled.error());
+            if (enabled.value() != requested_frame_rate_enable)
+                return restore_or_fault(
+                    parameter_error(CameraErrorKind::parameter_read_failed, MV_E_PARAMETER,
+                                    "camera.hikrobot.applyParameters", "AcquisitionFrameRateEnable",
+                                    "readback-mismatch"));
+        }
 
         if (resume)
         {

@@ -176,6 +176,58 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
     std::string last_payload_json;
 };
 
+class DelayedCameraHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    [[nodiscard]] ExecutionClass execution_class(
+        const paperbreak::ipc::RequestMessage& request) const noexcept override
+    {
+        return request.command == "camera.list" || request.command == "camera.discover"
+                   ? ExecutionClass::read_only_query
+                   : ExecutionClass::serial_control;
+    }
+
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage& request, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        if (request.command == "camera.discover")
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = R"({"devices":[]})", .binary = {}});
+        if (request.command == "camera.list")
+        {
+            const std::string state =
+                acquiring.load(std::memory_order_acquire) ? "acquiring" : "connected";
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json =
+                     nlohmann::json{{"cameras", nlohmann::json::array({{{"cameraId", "CAM01"},
+                                                                        {"state", state},
+                                                                        {"enabled", true}}})},
+                                    {"storedConfigRevision", 1U},
+                                    {"topologyRestartRequired", false}}
+                         .dump(),
+                 .binary = {}});
+        }
+        if (request.command == "camera.start")
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{150});
+            acquiring.store(true, std::memory_order_release);
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+                {.payload_json = R"({"state":"acquiring"})", .binary = {}});
+        }
+        if (request.command == "camera.stop" && fail_stop.load(std::memory_order_acquire))
+            return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+                paperbreak::make_error("CAMERA_STREAM_STOP_FAILED", paperbreak::Severity::error,
+                                       "停止采集失败", "test", "camera.stop"));
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+            paperbreak::make_error("IPC_REQUEST_INVALID", paperbreak::Severity::error, "unexpected",
+                                   "test", "camera.handle"));
+    }
+
+    std::atomic_bool acquiring{};
+    std::atomic_bool fail_stop{};
+};
+
 class OperationsHandler final : public paperbreak::ipc::IRequestHandler
 {
   public:
@@ -932,6 +984,53 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
 
     client.stop();
     EXPECT_TRUE(latest.stale);
+    stop_server(server);
+}
+
+TEST(CameraClient, TimeoutBecomesUnknownAndIsConfirmedByLaterListSnapshot)
+{
+    const std::string name = state_name();
+    auto handler = std::make_shared<DelayedCameraHandler>();
+    paperbreak::ipc::IpcServer server(handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name));
+    ASSERT_TRUE(server.start());
+
+    paperbreak::console::CameraClientSnapshot latest;
+    std::atomic_bool saw_unknown{};
+    paperbreak::console::CameraClient client(
+        [&](const auto& snapshot) {
+            latest = snapshot;
+            if (snapshot.operation && snapshot.operation->outcome_unknown)
+                saw_unknown = true;
+        },
+        client_options(name), std::chrono::milliseconds{40});
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until([&] {
+        return !latest.stale && latest.cameras.size() == 1U && latest.operation &&
+               latest.operation->operation == "camera.discover" && !latest.operation->pending;
+    }));
+
+    ASSERT_TRUE(client.control("camera.start", "CAM01"));
+    ASSERT_TRUE(wait_until([&] { return saw_unknown.load(std::memory_order_acquire); }));
+    ASSERT_TRUE(wait_until([&] {
+        return latest.operation && latest.operation->operation == "camera.start" &&
+               latest.operation->confirmed_by_snapshot;
+    }));
+    EXPECT_TRUE(latest.operation->succeeded);
+    EXPECT_FALSE(latest.operation->outcome_unknown);
+    EXPECT_EQ(latest.cameras.front().state, "acquiring");
+
+    handler->fail_stop.store(true, std::memory_order_release);
+    ASSERT_TRUE(client.control("camera.stop", "CAM01"));
+    ASSERT_TRUE(wait_until([&] {
+        return latest.operation && latest.operation->operation == "camera.stop" &&
+               !latest.operation->pending;
+    }));
+    EXPECT_FALSE(latest.operation->succeeded);
+    EXPECT_FALSE(latest.operation->outcome_unknown);
+    EXPECT_EQ(latest.error->business_code, "CAMERA_STREAM_STOP_FAILED");
+
+    client.stop();
     stop_server(server);
 }
 

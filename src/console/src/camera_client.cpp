@@ -2,6 +2,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <QTimer>
+
 #include <algorithm>
 #include <utility>
 
@@ -112,8 +114,7 @@ bool parse_roi_capabilities(const Json& source, CameraRoiCapabilitiesValue& targ
     if (!source.is_object() || !source.contains("sensorWidth") ||
         !source["sensorWidth"].is_number_unsigned() || !source.contains("sensorHeight") ||
         !source["sensorHeight"].is_number_unsigned() || !source.contains("width") ||
-        !source.contains("height") || !source.contains("offsetX") ||
-        !source.contains("offsetY"))
+        !source.contains("height") || !source.contains("offsetX") || !source.contains("offsetY"))
         return false;
     CameraRoiCapabilitiesValue parsed;
     parsed.sensor_width = source["sensorWidth"].get<std::uint32_t>();
@@ -170,15 +171,47 @@ Json parameter_json(const CameraParameterValue& value)
         result["interPacketDelayNs"] = *value.inter_packet_delay_ns;
     return result;
 }
+
+bool uses_control_timeout(const std::string_view command) noexcept
+{
+    return command != "camera.list" && command != "camera.discover" &&
+           command != "camera.getConfig";
+}
+
+bool confirms_operation(const CameraOperationResult& operation,
+                        const std::vector<CameraClientItem>& cameras)
+{
+    const auto camera = std::ranges::find_if(
+        cameras, [&](const CameraClientItem& item) { return item.id == operation.camera_id; });
+    if (camera == cameras.end())
+        return false;
+    if (operation.operation == "camera.start")
+        return camera->state == "acquiring";
+    if (operation.operation == "camera.stop")
+        return camera->state == "connected";
+    if (operation.operation == "camera.connect")
+        return camera->state == "connected" || camera->state == "acquiring";
+    if (operation.operation == "camera.disconnect")
+        return camera->state == "disconnected";
+    return false;
+}
 } // namespace
 
-CameraClient::CameraClient(CameraClientObserver observer, ipc::IpcClientOptions options)
+CameraClient::CameraClient(CameraClientObserver observer, ipc::IpcClientOptions options,
+                           const std::chrono::milliseconds control_operation_timeout)
     : observer_(std::move(observer)),
       client_(std::make_unique<ipc::IpcClient>(
           ipc::IpcClientCallbacks{
               .connection_changed = [this](const auto& value) { connection_changed(value); }},
-          std::move(options)))
+          std::move(options))),
+      reconciliation_timer_(std::make_unique<QTimer>()),
+      control_operation_timeout_(control_operation_timeout > std::chrono::milliseconds::zero()
+                                     ? control_operation_timeout
+                                     : std::chrono::seconds{30})
 {
+    reconciliation_timer_->setSingleShot(true);
+    reconciliation_timer_->setInterval(250);
+    QObject::connect(reconciliation_timer_.get(), &QTimer::timeout, [this] { refresh(); });
 }
 
 CameraClient::~CameraClient()
@@ -193,6 +226,8 @@ Result<void> CameraClient::start()
 
 void CameraClient::stop() noexcept
 {
+    if (reconciliation_timer_)
+        reconciliation_timer_->stop();
     if (client_)
         client_->stop();
     list_request_.reset();
@@ -212,11 +247,13 @@ void CameraClient::connection_changed(const ipc::ClientConnectionSnapshot& conne
     snapshot_.stale = true;
     if (connection.state != ipc::ClientConnectionState::connected)
     {
+        reconciliation_timer_->stop();
         list_request_.reset();
         if (operation_request_ && snapshot_.operation && snapshot_.operation->pending)
         {
             snapshot_.operation->pending = false;
-            snapshot_.operation->message = "后台服务连接中断，操作结果未知";
+            snapshot_.operation->outcome_unknown = true;
+            snapshot_.operation->message = "后台服务连接中断，操作结果未知，正在同步";
         }
         operation_request_.reset();
     }
@@ -319,6 +356,22 @@ void CameraClient::list_completed(ipc::ClientRequestHandle handle,
     snapshot_.topology_restart_required = payload["topologyRestartRequired"].get<bool>();
     snapshot_.stale = false;
     snapshot_.error.reset();
+    if (snapshot_.operation && snapshot_.operation->outcome_unknown)
+    {
+        if (confirms_operation(*snapshot_.operation, snapshot_.cameras))
+        {
+            snapshot_.operation->outcome_unknown = false;
+            snapshot_.operation->confirmed_by_snapshot = true;
+            snapshot_.operation->succeeded = true;
+            snapshot_.operation->message = "操作已由状态快照确认成功";
+            reconciliation_timer_->stop();
+        }
+        else
+        {
+            snapshot_.operation->message = "操作结果未知，正在同步";
+            reconciliation_timer_->start();
+        }
+    }
     notify();
 }
 
@@ -367,10 +420,15 @@ Result<void> CameraClient::send_operation(std::string command, std::string camer
                                                 "console.camera.command", true));
     snapshot_.operation = CameraOperationResult{
         .operation = command, .camera_id = camera_id, .pending = true, .message = "正在执行"};
-    auto sent = client_->send_request(std::move(command), std::move(payload_json), {},
-                                      [this](auto handle, auto result) {
-                                          operation_completed(std::move(handle), std::move(result));
-                                      });
+    reconciliation_timer_->stop();
+    const auto timeout = uses_control_timeout(command) ? control_operation_timeout_
+                                                       : std::chrono::milliseconds::zero();
+    auto sent = client_->send_request(
+        std::move(command), std::move(payload_json), {},
+        [this](auto handle, auto result) {
+            operation_completed(std::move(handle), std::move(result));
+        },
+        timeout);
     if (!sent)
     {
         snapshot_.operation->pending = false;
@@ -399,8 +457,18 @@ void CameraClient::operation_completed(ipc::ClientRequestHandle handle,
     {
         const Error error =
             result ? result.value().error.value_or(protocol_error("操作失败")) : result.error();
+        if (error.business_code == "IPC_REQUEST_TIMEOUT")
+        {
+            snapshot_.operation->outcome_unknown = true;
+            snapshot_.operation->message = "操作结果未知，正在同步";
+            snapshot_.error.reset();
+            notify();
+            refresh();
+            return;
+        }
         snapshot_.operation->message = error.message;
         snapshot_.error = error;
+        reconciliation_timer_->stop();
         notify();
         return;
     }

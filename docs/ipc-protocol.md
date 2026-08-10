@@ -31,7 +31,8 @@ binaryLength bytes optional binary payload
 | 活动连接 | 4 |
 | 每连接在途请求 | 16 |
 | 每连接近期 requestId | 1024 |
-| 命令队列 | 64 |
+| 顺序控制命令队列 | 128 |
+| 只读查询命令队列 | 512 |
 | 每连接出站消息 | 128 |
 | 每连接推送子队列 | 32 |
 | 每连接出站字节 | 32 MiB |
@@ -258,6 +259,12 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 相机拓扑与当前运行拓扑不同，连接、采集和参数
 下发均应等待服务重启。
 
+设备已连接后，`device`、`capabilities` 和 `actual` 表示最近一次成功连接或参数更新时的已验证
+回读值。采集期间 `camera.list` 和 `camera.getConfig` 读取该缓存及线程安全采集统计，不周期性访问
+MVS 参数节点；因此状态查询不会与取帧争用设备互斥。配置 `frameRate` 时适配器先启用
+`AcquisitionFrameRateEnable`（节点明确不支持时兼容直写），再写入并回读帧率；enable 状态属于同一
+参数事务并在失败时回滚。
+
 `camera.discover` 返回结构如下；字段名是 IPC v1 的固定名称：
 
 ```json
@@ -478,7 +485,8 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
 - 客户端状态为 `stopped`、`connecting`、`connected` 或 `retry-wait`；每次连接尝试分配新的单调递增连接代次；
 - 首次立即连接，失败后从 250 ms 开始指数退避，最大 10 秒，并应用 ±20% 抖动；收到有效服务消息或稳定连接 5 秒后重置退避；
 - 客户端最多保留 128 个在途请求和 32 MiB 待发送数据；达到上限返回 `IPC_BUSY`，断线期间不缓存新请求；
-- 默认连接截止时间为 2 秒，请求截止时间为 5 秒。显式取消返回 `IPC_REQUEST_CANCELLED`，超时返回 `IPC_REQUEST_TIMEOUT`；
+- 默认连接截止时间为 2 秒，普通查询请求截止时间为 5 秒；相机控制操作默认使用 30 秒且可由客户端构造参数调整。显式取消返回 `IPC_REQUEST_CANCELLED`，超时返回 `IPC_REQUEST_TIMEOUT`；
+- 相机开始/停止等控制请求超时只表示响应未在客户端截止时间内到达，不能据此宣称设备操作失败。控制台显示“结果未知，正在同步”，并使用后续 `camera.list` 快照确认目标状态；快照确认结果必须与普通成功响应区分标记；
 - 请求句柄同时包含 requestId 和连接代次。断线以 `IPC_CONNECTION_LOST` 完成该代请求，旧 socket 回调、未知 requestId 和迟到响应不能修改新连接状态；
 - 请求不跨连接自动重放。Qt 状态模型在每次新连接后重新发起幂等的 `system.getStatus`，同步完成前及断线后将服务状态标为过期；
 - 客户端停止只 abort 自身 QLocalSocket、定时器和在途请求，不发送服务停止命令。
@@ -487,7 +495,7 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
 
 - 当前只支持 `protocolVersion=1`；其他版本返回 `IPC_PROTOCOL_VERSION_UNSUPPORTED`，写完响应后关闭；
 - 未知命令或字段返回 `IPC_REQUEST_INVALID`；重复 ID 返回 `IPC_REQUEST_CONFLICT`；
-- 命令队列或在途请求达到上限返回 `IPC_BUSY`；
+- 控制队列、查询队列或在途请求达到各自上限时返回 `IPC_BUSY`；只读查询由两个工作线程执行，顺序控制由一个工作线程执行，未知命令按控制命令处理；
 - 未认证或非本机请求返回 `IPC_UNAUTHORIZED`；服务停止后拒绝新写请求并返回
   `SYS_SERVICE_STOPPING`；
 - 同一版本只通过 `extensions` 增加可忽略扩展；改名、删除、语义变化或新增必需字段必须提升版本。

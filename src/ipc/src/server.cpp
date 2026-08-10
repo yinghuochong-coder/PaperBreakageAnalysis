@@ -12,6 +12,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -102,8 +103,8 @@ class IpcServer::Impl final
                 static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
             options_.maximum_in_flight_per_connection == 0U ||
             options_.recent_request_ids_per_connection == 0U ||
-            options_.command_queue_capacity == 0U || options_.outbound_message_capacity == 0U ||
-            options_.push_queue_capacity == 0U ||
+            options_.control_queue_capacity == 0U || options_.query_queue_capacity == 0U ||
+            options_.outbound_message_capacity == 0U || options_.push_queue_capacity == 0U ||
             options_.push_queue_capacity > options_.outbound_message_capacity ||
             options_.outbound_byte_capacity == 0U || options_.publish_ingress_capacity == 0U ||
             options_.incomplete_frame_timeout <= std::chrono::milliseconds::zero() ||
@@ -128,7 +129,7 @@ class IpcServer::Impl final
         instance_guard_ = std::move(guard).value();
         accepting_commands_.store(true, std::memory_order_release);
         stopping_.store(false, std::memory_order_release);
-        command_done_.store(false, std::memory_order_release);
+        command_workers_done_.store(0U, std::memory_order_release);
         event_done_.store(false, std::memory_order_release);
         finish_scheduled_ = false;
         {
@@ -142,8 +143,15 @@ class IpcServer::Impl final
             startup_error_.reset();
         }
 
-        command_thread_ =
-            std::jthread([this](const std::stop_token token) { run_command_thread(token); });
+        control_thread_ = std::jthread([this](const std::stop_token token) {
+            run_command_thread(token, IRequestHandler::ExecutionClass::serial_control, 0U);
+        });
+        for (std::size_t index = 0U; index < query_threads_.size(); ++index)
+        {
+            query_threads_[index] = std::jthread([this, index](const std::stop_token token) {
+                run_command_thread(token, IRequestHandler::ExecutionClass::read_only_query, index);
+            });
+        }
         event_thread_.start();
 
         std::unique_lock lock{startup_mutex_};
@@ -176,6 +184,11 @@ class IpcServer::Impl final
         }
         const bool already_stopping = stopping_.exchange(true, std::memory_order_acq_rel);
         accepting_commands_.store(false, std::memory_order_release);
+        if (control_thread_.joinable())
+            control_thread_.request_stop();
+        for (auto& thread : query_threads_)
+            if (thread.joinable())
+                thread.request_stop();
         command_condition_.notify_all();
         if (!already_stopping)
         {
@@ -193,7 +206,8 @@ class IpcServer::Impl final
         {
             std::unique_lock lock{completion_mutex_};
             if (!completion_condition_.wait_until(lock, deadline, [this] {
-                    return command_done_.load(std::memory_order_acquire) &&
+                    return command_workers_done_.load(std::memory_order_acquire) ==
+                               command_worker_count &&
                            event_done_.load(std::memory_order_acquire);
                 }))
             {
@@ -202,10 +216,11 @@ class IpcServer::Impl final
                                  "IPC 线程未在共享截止时间内停止", "ipc.join"));
             }
         }
-        if (command_thread_.joinable())
-        {
-            command_thread_.join();
-        }
+        if (control_thread_.joinable())
+            control_thread_.join();
+        for (auto& thread : query_threads_)
+            if (thread.joinable())
+                thread.join();
         if (event_thread_.isRunning())
         {
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -271,11 +286,21 @@ class IpcServer::Impl final
         const std::uint64_t durations = completed_request_count_.load(std::memory_order_relaxed);
         const std::uint64_t total_microseconds =
             request_duration_total_us_.load(std::memory_order_relaxed);
+        const std::uint64_t control_durations =
+            completed_control_request_count_.load(std::memory_order_relaxed);
+        const std::uint64_t query_durations =
+            completed_query_request_count_.load(std::memory_order_relaxed);
         return {.active_connections = active_connections_.load(std::memory_order_relaxed),
                 .in_flight_requests = in_flight_requests_.load(std::memory_order_relaxed),
                 .command_queue_depth = command_queue_depth_.load(std::memory_order_relaxed),
                 .command_queue_high_watermark =
                     command_queue_high_watermark_.load(std::memory_order_relaxed),
+                .control_queue_depth = control_queue_depth_.load(std::memory_order_relaxed),
+                .control_queue_high_watermark =
+                    control_queue_high_watermark_.load(std::memory_order_relaxed),
+                .query_queue_depth = query_queue_depth_.load(std::memory_order_relaxed),
+                .query_queue_high_watermark =
+                    query_queue_high_watermark_.load(std::memory_order_relaxed),
                 .publish_queue_depth = publish_queue_depth_.load(std::memory_order_relaxed),
                 .publish_queue_high_watermark =
                     publish_queue_high_watermark_.load(std::memory_order_relaxed),
@@ -291,10 +316,33 @@ class IpcServer::Impl final
                                                          static_cast<double>(durations) / 1000.0,
                 .maximum_request_duration_ms =
                     static_cast<double>(request_duration_max_us_.load(std::memory_order_relaxed)) /
+                    1000.0,
+                .average_control_request_duration_ms =
+                    control_durations == 0U
+                        ? 0.0
+                        : static_cast<double>(
+                              control_request_duration_total_us_.load(std::memory_order_relaxed)) /
+                              static_cast<double>(control_durations) / 1000.0,
+                .maximum_control_request_duration_ms =
+                    static_cast<double>(
+                        control_request_duration_max_us_.load(std::memory_order_relaxed)) /
+                    1000.0,
+                .average_query_request_duration_ms =
+                    query_durations == 0U
+                        ? 0.0
+                        : static_cast<double>(
+                              query_request_duration_total_us_.load(std::memory_order_relaxed)) /
+                              static_cast<double>(query_durations) / 1000.0,
+                .maximum_query_request_duration_ms =
+                    static_cast<double>(
+                        query_request_duration_max_us_.load(std::memory_order_relaxed)) /
                     1000.0};
     }
 
   private:
+    static constexpr std::size_t query_worker_count = 2U;
+    static constexpr std::uint64_t command_worker_count = query_worker_count + 1U;
+
     struct QueuedCommand final
     {
         std::uint64_t connection_id{};
@@ -631,14 +679,21 @@ class IpcServer::Impl final
 
         PeerIdentity peer = client.peer.value();
         peer.connection_id = identifier;
+        const auto execution_class = handler_->execution_class(request.value());
         QueuedCommand command{.connection_id = identifier,
                               .request = std::move(request).value(),
                               .peer = std::move(peer),
                               .queued_at = std::chrono::steady_clock::now()};
         {
             std::scoped_lock lock{command_mutex_};
-            if (!accepting_commands_.load(std::memory_order_acquire) ||
-                command_queue_.size() >= options_.command_queue_capacity)
+            auto& queue = execution_class == IRequestHandler::ExecutionClass::read_only_query
+                              ? query_queue_
+                              : control_queue_;
+            const auto capacity =
+                execution_class == IRequestHandler::ExecutionClass::read_only_query
+                    ? options_.query_queue_capacity
+                    : options_.control_queue_capacity;
+            if (!accepting_commands_.load(std::memory_order_acquire) || queue.size() >= capacity)
             {
                 enqueue_response(
                     identifier,
@@ -649,13 +704,24 @@ class IpcServer::Impl final
                 return;
             }
             ++client.in_flight;
-            command_queue_.push_back(std::move(command));
+            queue.push_back(std::move(command));
             requests_total_.fetch_add(1U, std::memory_order_relaxed);
             in_flight_requests_.fetch_add(1U, std::memory_order_relaxed);
-            command_queue_depth_.store(command_queue_.size(), std::memory_order_relaxed);
-            update_high_watermark(command_queue_high_watermark_, command_queue_.size());
+            if (execution_class == IRequestHandler::ExecutionClass::read_only_query)
+            {
+                query_queue_depth_.store(queue.size(), std::memory_order_relaxed);
+                update_high_watermark(query_queue_high_watermark_, queue.size());
+            }
+            else
+            {
+                control_queue_depth_.store(queue.size(), std::memory_order_relaxed);
+                update_high_watermark(control_queue_high_watermark_, queue.size());
+            }
+            const auto total_depth = control_queue_.size() + query_queue_.size();
+            command_queue_depth_.store(total_depth, std::memory_order_relaxed);
+            update_high_watermark(command_queue_high_watermark_, total_depth);
         }
-        command_condition_.notify_one();
+        command_condition_.notify_all();
     }
 
     bool ensure_peer(const std::uint64_t identifier)
@@ -692,20 +758,25 @@ class IpcServer::Impl final
         }
     }
 
-    void run_command_thread(const std::stop_token stop_token)
+    void run_command_thread(const std::stop_token stop_token,
+                            const IRequestHandler::ExecutionClass execution_class,
+                            const std::size_t worker_index)
     {
+        const bool query = execution_class == IRequestHandler::ExecutionClass::read_only_query;
+        const std::string thread_name =
+            query ? "ipc-query-" + std::to_string(worker_index + 1U) : "ipc-control";
         const auto thread_registration =
-            options_.register_thread ? options_.register_thread("ipc-command") : nullptr;
+            options_.register_thread ? options_.register_thread(thread_name) : nullptr;
         while (true)
         {
             QueuedCommand command;
             {
                 std::unique_lock lock{command_mutex_};
-                command_condition_.wait(lock, stop_token, [this] {
-                    return !command_queue_.empty() ||
-                           !accepting_commands_.load(std::memory_order_acquire);
+                auto& queue = query ? query_queue_ : control_queue_;
+                command_condition_.wait(lock, stop_token, [this, &queue] {
+                    return !queue.empty() || !accepting_commands_.load(std::memory_order_acquire);
                 });
-                if (command_queue_.empty())
+                if (queue.empty())
                 {
                     if (!accepting_commands_.load(std::memory_order_acquire) ||
                         stop_token.stop_requested())
@@ -714,9 +785,14 @@ class IpcServer::Impl final
                     }
                     continue;
                 }
-                command = std::move(command_queue_.front());
-                command_queue_.pop_front();
-                command_queue_depth_.store(command_queue_.size(), std::memory_order_relaxed);
+                command = std::move(queue.front());
+                queue.pop_front();
+                if (query)
+                    query_queue_depth_.store(queue.size(), std::memory_order_relaxed);
+                else
+                    control_queue_depth_.store(queue.size(), std::memory_order_relaxed);
+                command_queue_depth_.store(control_queue_.size() + query_queue_.size(),
+                                           std::memory_order_relaxed);
             }
 
             Result<CommandResponse> handled = Result<CommandResponse>::failure(server_error(
@@ -741,7 +817,9 @@ class IpcServer::Impl final
                     " binaryBytes=" + std::to_string(command.request.binary.size()) +
                     " result=" + (handled ? "success" : "failure") + " businessCode=" +
                     (handled ? "OK" : handled.error().business_code) + " queueDepth=" +
-                    std::to_string(command_queue_depth_.load(std::memory_order_relaxed)));
+                    std::to_string(query ? query_queue_depth_.load(std::memory_order_relaxed)
+                                         : control_queue_depth_.load(std::memory_order_relaxed)) +
+                    " lane=" + (query ? "query" : "control"));
 
             ResponseMessage response;
             response.request_id = command.request.request_id;
@@ -767,6 +845,21 @@ class IpcServer::Impl final
             request_duration_total_us_.fetch_add(duration_us, std::memory_order_relaxed);
             completed_request_count_.fetch_add(1U, std::memory_order_relaxed);
             update_high_watermark(request_duration_max_us_, static_cast<std::size_t>(duration_us));
+            if (query)
+            {
+                query_request_duration_total_us_.fetch_add(duration_us, std::memory_order_relaxed);
+                completed_query_request_count_.fetch_add(1U, std::memory_order_relaxed);
+                update_high_watermark(query_request_duration_max_us_,
+                                      static_cast<std::size_t>(duration_us));
+            }
+            else
+            {
+                control_request_duration_total_us_.fetch_add(duration_us,
+                                                             std::memory_order_relaxed);
+                completed_control_request_count_.fetch_add(1U, std::memory_order_relaxed);
+                update_high_watermark(control_request_duration_max_us_,
+                                      static_cast<std::size_t>(duration_us));
+            }
             static_cast<void>(post_event([this, identifier = command.connection_id,
                                           response = std::move(response)]() mutable {
                 auto iterator = clients_.find(identifier);
@@ -779,7 +872,7 @@ class IpcServer::Impl final
             }));
         }
 
-        command_done_.store(true, std::memory_order_release);
+        command_workers_done_.fetch_add(1U, std::memory_order_acq_rel);
         completion_condition_.notify_all();
         static_cast<void>(post_event([this] { maybe_finish_event_stop(); }));
     }
@@ -1022,8 +1115,8 @@ class IpcServer::Impl final
     void maybe_finish_event_stop()
     {
         if (!stopping_.load(std::memory_order_acquire) ||
-            !command_done_.load(std::memory_order_acquire) || finish_scheduled_ ||
-            event_loop_ == nullptr)
+            command_workers_done_.load(std::memory_order_acquire) != command_worker_count ||
+            finish_scheduled_ || event_loop_ == nullptr)
         {
             return;
         }
@@ -1082,7 +1175,7 @@ class IpcServer::Impl final
     std::atomic_bool started_{false};
     std::atomic_bool stopping_{false};
     std::atomic_bool accepting_commands_{false};
-    std::atomic_bool command_done_{true};
+    std::atomic_uint64_t command_workers_done_{command_worker_count};
     std::atomic_bool event_done_{true};
 
     std::mutex startup_mutex_;
@@ -1095,8 +1188,10 @@ class IpcServer::Impl final
 
     std::mutex command_mutex_;
     std::condition_variable_any command_condition_;
-    std::deque<QueuedCommand> command_queue_;
-    std::jthread command_thread_;
+    std::deque<QueuedCommand> control_queue_;
+    std::deque<QueuedCommand> query_queue_;
+    std::jthread control_thread_;
+    std::array<std::jthread, query_worker_count> query_threads_;
 
     std::mutex publish_mutex_;
     std::deque<QueuedPublish> publish_queue_;
@@ -1116,6 +1211,10 @@ class IpcServer::Impl final
     std::atomic_uint64_t in_flight_requests_{};
     std::atomic_uint64_t command_queue_depth_{};
     std::atomic_uint64_t command_queue_high_watermark_{};
+    std::atomic_uint64_t control_queue_depth_{};
+    std::atomic_uint64_t control_queue_high_watermark_{};
+    std::atomic_uint64_t query_queue_depth_{};
+    std::atomic_uint64_t query_queue_high_watermark_{};
     std::atomic_uint64_t publish_queue_depth_{};
     std::atomic_uint64_t publish_queue_high_watermark_{};
     std::atomic_uint64_t outbound_messages_{};
@@ -1127,6 +1226,12 @@ class IpcServer::Impl final
     std::atomic_uint64_t completed_request_count_{};
     std::atomic_uint64_t request_duration_total_us_{};
     std::atomic_uint64_t request_duration_max_us_{};
+    std::atomic_uint64_t completed_control_request_count_{};
+    std::atomic_uint64_t control_request_duration_total_us_{};
+    std::atomic_uint64_t control_request_duration_max_us_{};
+    std::atomic_uint64_t completed_query_request_count_{};
+    std::atomic_uint64_t query_request_duration_total_us_{};
+    std::atomic_uint64_t query_request_duration_max_us_{};
 };
 
 IpcServer::IpcServer(std::shared_ptr<IRequestHandler> handler,

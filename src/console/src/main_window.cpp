@@ -71,10 +71,10 @@ void normalize_stepped_spin_box(QSpinBox* input)
     if (increment <= 1)
         return;
     const auto delta = static_cast<std::int64_t>(input->value()) - minimum;
-    const auto aligned = static_cast<std::int64_t>(minimum) +
-                         ((delta + increment / 2) / increment) * increment;
-    input->setValue(static_cast<int>(std::clamp<std::int64_t>(
-        aligned, input->minimum(), input->maximum())));
+    const auto aligned =
+        static_cast<std::int64_t>(minimum) + ((delta + increment / 2) / increment) * increment;
+    input->setValue(
+        static_cast<int>(std::clamp<std::int64_t>(aligned, input->minimum(), input->maximum())));
 }
 
 class ResponsiveGrid final : public QWidget
@@ -2185,6 +2185,9 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
         if (operation.pending)
             camera_operation_value_->setText(
                 QStringLiteral("正在执行 %1").arg(QString::fromStdString(operation.operation)));
+        else if (operation.outcome_unknown)
+            camera_operation_value_->setText(QStringLiteral("结果未知，正在同步：%1")
+                                                 .arg(QString::fromStdString(operation.message)));
         else if (!operation.succeeded)
         {
             if (snapshot.error && snapshot.error->business_code == "SYS_NOT_SUPPORTED")
@@ -2201,6 +2204,8 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
             camera_operation_value_->setText(
                 QStringLiteral("相机已连接，但保存参数未应用：%1。请读取当前参数并确认保存。")
                     .arg(QString::fromStdString(operation.message)));
+        else if (operation.confirmed_by_snapshot)
+            camera_operation_value_->setText(QStringLiteral("成功：已由最新相机状态确认。"));
         else
             camera_operation_value_->setText(
                 QStringLiteral("成功：已保存=%1，已下发=%2，已应用=%3，需重启=%4")
@@ -2251,8 +2256,7 @@ void MainWindow::update_camera_configuration_summary()
     if (selected_index < 0 ||
         static_cast<std::size_t>(selected_index) >= camera_snapshot_.cameras.size())
     {
-        summary = QStringLiteral(
-            "当前保存配置未包含相机。可从网络发现设备列表选择可用设备绑定。");
+        summary = QStringLiteral("当前保存配置未包含相机。可从网络发现设备列表选择可用设备绑定。");
     }
     else
     {
@@ -3301,11 +3305,11 @@ bool MainWindow::camera_configuration_ready() const noexcept
 {
     return camera_selector_ && camera_exposure_ && camera_gain_ && camera_fps_ &&
            camera_roi_width_ && camera_roi_height_ && camera_roi_x_ && camera_roi_y_ &&
-           camera_reverse_x_ && camera_reverse_y_ &&
-           camera_pixel_format_ && camera_trigger_mode_ && camera_trigger_source_ &&
-           camera_trigger_delay_ && camera_packet_size_ && camera_packet_delay_ &&
-           discovered_devices_ && camera_bind_slot_ && camera_bind_location_ &&
-           camera_bind_button_ && camera_configuration_value_ && camera_operation_value_ &&
+           camera_reverse_x_ && camera_reverse_y_ && camera_pixel_format_ && camera_trigger_mode_ &&
+           camera_trigger_source_ && camera_trigger_delay_ && camera_packet_size_ &&
+           camera_packet_delay_ && discovered_devices_ && camera_bind_slot_ &&
+           camera_bind_location_ && camera_bind_button_ && camera_configuration_value_ &&
+           camera_operation_value_ &&
            findChild<QWidget*>(QStringLiteral("camera-device-sidebar")) &&
            findChild<QWidget*>(QStringLiteral("camera-control-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-acquisition-panel")) &&

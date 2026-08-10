@@ -86,6 +86,16 @@ struct PreviewRuntimeOptions final
 
 struct PreviewRuntimeSnapshot final
 {
+    struct CameraStatistics final
+    {
+        std::string camera_id;
+        std::uint64_t sampled{};
+        std::uint64_t replaced_before_encoding{};
+        std::uint64_t encoded{};
+        std::uint64_t deliveries{};
+        std::optional<camera::WallClockTime> last_delivery_time;
+    };
+
     bool started{};
     std::size_t subscriptions{};
     std::uint64_t frames_received{};
@@ -99,6 +109,7 @@ struct PreviewRuntimeSnapshot final
     std::uint64_t delivery_failures{};
     std::uint64_t rejected_unknown_camera{};
     std::uint64_t rejected_after_stop{};
+    std::vector<CameraStatistics> cameras;
 };
 
 /// Best-effort low-rate preview branch. It never blocks the frame producer.
@@ -137,6 +148,11 @@ class PreviewRuntime final
     PreviewDeliveryCallback delivery_;
     PreviewRuntimeOptions options_;
     std::unordered_map<std::string, std::unique_ptr<CameraSlot>> cameras_;
+    std::vector<std::string> camera_order_;
+    std::mutex work_mutex_;
+    std::condition_variable_any work_condition_;
+    std::atomic_size_t pending_slots_{};
+    std::size_t rotation_start_{};
     mutable std::mutex subscriptions_mutex_;
     std::unordered_map<std::uint64_t, std::unordered_set<std::string>> subscriptions_;
     mutable std::mutex lifecycle_mutex_;

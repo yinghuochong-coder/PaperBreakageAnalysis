@@ -235,6 +235,20 @@ paperbreak::storage::EventPersistenceRequest command_event_request(const std::st
 
 } // namespace
 
+TEST(SystemCommand, ClassifiesOnlyKnownReadCommandsAsQueries)
+{
+    CommandFixture fixture;
+    using ExecutionClass = paperbreak::ipc::IRequestHandler::ExecutionClass;
+    EXPECT_EQ(fixture.commands.execution_class(fixture.request("camera.list")),
+              ExecutionClass::read_only_query);
+    EXPECT_EQ(fixture.commands.execution_class(fixture.request("system.getMetrics")),
+              ExecutionClass::read_only_query);
+    EXPECT_EQ(fixture.commands.execution_class(fixture.request("camera.start")),
+              ExecutionClass::serial_control);
+    EXPECT_EQ(fixture.commands.execution_class(fixture.request("future.unknown")),
+              ExecutionClass::serial_control);
+}
+
 TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
 {
     CommandFixture fixture;

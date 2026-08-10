@@ -149,6 +149,95 @@ class BlockingHandler final : public paperbreak::ipc::IRequestHandler
     bool released_{};
 };
 
+class LaneBlockingHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    [[nodiscard]] ExecutionClass execution_class(
+        const paperbreak::ipc::RequestMessage& request) const noexcept override
+    {
+        return request.command == "system.getStatus" ? ExecutionClass::read_only_query
+                                                     : ExecutionClass::serial_control;
+    }
+
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage& request, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        if (request.command == "camera.start")
+        {
+            std::unique_lock lock{mutex_};
+            control_entered_ = true;
+            condition_.notify_all();
+            condition_.wait(lock, [this] { return released_; });
+        }
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+            {.payload_json = Json{{"command", request.command}}.dump(), .binary = {}});
+    }
+
+    bool wait_until_control_entered()
+    {
+        std::unique_lock lock{mutex_};
+        return condition_.wait_for(lock, std::chrono::seconds{2},
+                                   [this] { return control_entered_; });
+    }
+
+    void release()
+    {
+        {
+            std::scoped_lock lock{mutex_};
+            released_ = true;
+        }
+        condition_.notify_all();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool control_entered_{};
+    bool released_{};
+};
+
+class QueryBlockingHandler final : public paperbreak::ipc::IRequestHandler
+{
+  public:
+    [[nodiscard]] ExecutionClass execution_class(
+        const paperbreak::ipc::RequestMessage&) const noexcept override
+    {
+        return ExecutionClass::read_only_query;
+    }
+    [[nodiscard]] paperbreak::Result<paperbreak::ipc::CommandResponse> handle(
+        const paperbreak::ipc::RequestMessage&, const paperbreak::ipc::PeerIdentity&,
+        std::stop_token) override
+    {
+        std::unique_lock lock{mutex_};
+        ++entered_;
+        condition_.notify_all();
+        condition_.wait(lock, [this] { return released_; });
+        return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
+            {.payload_json = "{}", .binary = {}});
+    }
+    bool wait_for_two_workers()
+    {
+        std::unique_lock lock{mutex_};
+        return condition_.wait_for(lock, std::chrono::seconds{2},
+                                   [this] { return entered_ == 2U; });
+    }
+    void release()
+    {
+        {
+            std::scoped_lock lock{mutex_};
+            released_ = true;
+        }
+        condition_.notify_all();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::size_t entered_{};
+    bool released_{};
+};
+
 paperbreak::ipc::IpcServerOptions unique_options()
 {
     static std::atomic_uint64_t sequence{0U};
@@ -163,12 +252,13 @@ paperbreak::ipc::IpcServerOptions unique_options()
 }
 
 paperbreak::ipc::Frame request_frame(const std::string& request_id,
-                                     const std::string& payload = "{}")
+                                     const std::string& payload = "{}",
+                                     const std::string& command = "system.getStatus")
 {
     Json header{{"protocolVersion", 1},
                 {"messageType", "request"},
                 {"requestId", request_id},
-                {"command", "system.getStatus"},
+                {"command", command},
                 {"timestamp", "2026-08-01T12:00:00.123Z"},
                 {"payload", Json::parse(payload)}};
     return {.header_json = header.dump(), .binary = {}};
@@ -324,7 +414,7 @@ TEST(IpcServer, DisconnectsSlowIncompleteFrameOnAbsoluteDeadline)
 TEST(IpcServer, EnforcesCommandQueueCapacityWithoutBlockingEventThread)
 {
     auto options = unique_options();
-    options.command_queue_capacity = 1U;
+    options.control_queue_capacity = 1U;
     options.maximum_in_flight_per_connection = 3U;
     auto handler = std::make_shared<BlockingHandler>();
     paperbreak::ipc::IpcServer server{handler, std::make_unique<FixedAuthorizer>(), options};
@@ -341,6 +431,62 @@ TEST(IpcServer, EnforcesCommandQueueCapacityWithoutBlockingEventThread)
     EXPECT_EQ(busy.at("error").at("businessCode"), "IPC_BUSY");
 
     handler->release();
+    static_cast<void>(read_header(socket));
+    static_cast<void>(read_header(socket));
+    stop_server(server);
+}
+
+TEST(IpcServer, BlockedControlDoesNotDelayReadOnlyQuery)
+{
+    auto options = unique_options();
+    auto handler = std::make_shared<LaneBlockingHandler>();
+    paperbreak::ipc::IpcServer server{handler, std::make_unique<FixedAuthorizer>(), options};
+    ASSERT_TRUE(server.start());
+    QLocalSocket socket;
+    ASSERT_TRUE(connect_socket(socket, options.server_name));
+
+    ASSERT_TRUE(send_frame(
+        socket, request_frame("019870f2-6c80-7a31-9b52-6e3b9ca1d821", "{}", "camera.start")));
+    ASSERT_TRUE(handler->wait_until_control_entered());
+    ASSERT_TRUE(send_frame(socket, request_frame("019870f2-6c80-7a31-9b52-6e3b9ca1d822")));
+
+    const Json query = read_header(socket);
+    ASSERT_TRUE(query.at("success").get<bool>());
+    EXPECT_EQ(query.at("requestId"), "019870f2-6c80-7a31-9b52-6e3b9ca1d822");
+    EXPECT_EQ(query.at("payload").at("command"), "system.getStatus");
+    const auto metrics = server.metrics_snapshot();
+    EXPECT_GE(metrics.control_queue_high_watermark, 1U);
+    EXPECT_GE(metrics.query_queue_high_watermark, 1U);
+
+    handler->release();
+    const Json control = read_header(socket);
+    EXPECT_EQ(control.at("requestId"), "019870f2-6c80-7a31-9b52-6e3b9ca1d821");
+    stop_server(server);
+}
+
+TEST(IpcServer, EnforcesIndependentQueryQueueCapacity)
+{
+    auto options = unique_options();
+    options.query_queue_capacity = 1U;
+    options.maximum_in_flight_per_connection = 4U;
+    auto handler = std::make_shared<QueryBlockingHandler>();
+    paperbreak::ipc::IpcServer server{handler, std::make_unique<FixedAuthorizer>(), options};
+    ASSERT_TRUE(server.start());
+    QLocalSocket socket;
+    ASSERT_TRUE(connect_socket(socket, options.server_name));
+
+    ASSERT_TRUE(send_frame(socket, request_frame("019870f2-6c80-7a31-9b52-6e3b9ca1d831")));
+    ASSERT_TRUE(send_frame(socket, request_frame("019870f2-6c80-7a31-9b52-6e3b9ca1d832")));
+    ASSERT_TRUE(handler->wait_for_two_workers());
+    ASSERT_TRUE(send_frame(socket, request_frame("019870f2-6c80-7a31-9b52-6e3b9ca1d833")));
+    ASSERT_TRUE(send_frame(socket, request_frame("019870f2-6c80-7a31-9b52-6e3b9ca1d834")));
+    const Json busy = read_header(socket);
+    EXPECT_EQ(busy.at("requestId"), "019870f2-6c80-7a31-9b52-6e3b9ca1d834");
+    EXPECT_EQ(busy.at("error").at("businessCode"), "IPC_BUSY");
+    EXPECT_EQ(server.metrics_snapshot().query_queue_high_watermark, 1U);
+
+    handler->release();
+    static_cast<void>(read_header(socket));
     static_cast<void>(read_header(socket));
     static_cast<void>(read_header(socket));
     stop_server(server);

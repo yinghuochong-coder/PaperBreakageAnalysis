@@ -3,6 +3,7 @@
 #include "paperbreak/camera/frame.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <limits>
@@ -16,12 +17,17 @@ struct CameraControlRuntime::Session final
 {
     std::string id;
     std::string serial;
-    CameraControlState state{CameraControlState::disconnected};
+    std::atomic<CameraControlState> state{CameraControlState::disconnected};
+    std::mutex operation_mutex;
+    std::mutex cache_mutex;
     std::unique_ptr<ICameraDevice> device;
+    std::optional<CameraDeviceDescriptor> descriptor;
+    std::optional<CameraCapabilities> capabilities;
+    std::optional<CameraParameterSnapshot> actual;
     std::optional<Error> error;
     std::unique_ptr<FrameBufferPool> frame_pool;
     std::unique_ptr<AcquisitionQueue> acquisition_queue;
-    std::unique_ptr<AcquisitionWorker> acquisition;
+    std::shared_ptr<AcquisitionWorker> acquisition;
     std::jthread frame_forwarder;
 };
 namespace
@@ -49,20 +55,21 @@ CameraControlRuntime::~CameraControlRuntime()
     std::scoped_lock lock{mutex_};
     for (auto& session : sessions_)
     {
+        std::scoped_lock operation_lock{session->operation_mutex};
         if (!session->device)
             continue;
-        if (session->state == CameraControlState::acquiring)
+        if (session->state.load(std::memory_order_acquire) == CameraControlState::acquiring)
         {
             static_cast<void>(stop_frame_delivery(*session));
             static_cast<void>(session->device->stop_acquisition());
         }
         static_cast<void>(session->device->disconnect());
         session->device.reset();
-        session->state = CameraControlState::disconnected;
+        session->state.store(CameraControlState::disconnected, std::memory_order_release);
     }
 }
 
-Result<void> CameraControlRuntime::start_frame_delivery(Session& session)
+Result<void> CameraControlRuntime::prepare_frame_delivery(Session& session)
 {
     if (!frame_observer_)
         return Result<void>::success();
@@ -71,17 +78,23 @@ Result<void> CameraControlRuntime::start_frame_delivery(Session& session)
         delivery_options_.receive_timeout <= std::chrono::milliseconds::zero())
         return Result<void>::failure(
             make_camera_error(CameraErrorKind::config_failed, "相机帧投递容量配置无效",
-                              "camera.control.startFrameDelivery", session.id));
+                              "camera.control.prepareFrameDelivery", session.id));
 
-    auto capabilities = session.device->capabilities();
-    if (!capabilities)
-        return Result<void>::failure(capabilities.error());
-    const auto payload_bytes = capabilities.value().maximum_payload_bytes;
+    std::optional<CameraCapabilities> cached_capabilities;
+    {
+        std::scoped_lock lock{session.cache_mutex};
+        cached_capabilities = session.capabilities;
+    }
+    if (!cached_capabilities)
+        return Result<void>::failure(
+            make_camera_error(CameraErrorKind::invalid_state_transition, "相机能力缓存不可用",
+                              "camera.control.prepareFrameDelivery", session.id));
+    const auto payload_bytes = cached_capabilities->maximum_payload_bytes;
     if (payload_bytes == 0U || payload_bytes > maximum_operator_snapshot_bytes)
     {
         return Result<void>::failure(
             make_camera_error(CameraErrorKind::config_failed, "预览采集缓冲区大小超出安全范围",
-                              "camera.control.startFrameDelivery", session.id));
+                              "camera.control.prepareFrameDelivery", session.id));
     }
 
     try
@@ -90,7 +103,7 @@ Result<void> CameraControlRuntime::start_frame_delivery(Session& session)
             std::make_unique<FrameBufferPool>(delivery_options_.frame_pool_capacity, payload_bytes);
         session.acquisition_queue =
             std::make_unique<AcquisitionQueue>(delivery_options_.queue_capacity);
-        session.acquisition = std::make_unique<AcquisitionWorker>(
+        auto acquisition = std::make_shared<AcquisitionWorker>(
             *session.device, *session.frame_pool, *session.acquisition_queue,
             AcquisitionWorkerOptions{.camera_id = session.id,
                                      .receive_timeout = delivery_options_.receive_timeout,
@@ -99,34 +112,71 @@ Result<void> CameraControlRuntime::start_frame_delivery(Session& session)
                                          std::numeric_limits<std::size_t>::max(),
                                      .register_thread = delivery_options_.register_thread,
                                      .diagnostics = delivery_options_.diagnostics});
-        auto started = session.acquisition->start();
-        if (!started)
         {
-            session.acquisition.reset();
-            session.acquisition_queue.reset();
-            session.frame_pool.reset();
-            return started;
+            std::scoped_lock lock{session.cache_mutex};
+            session.acquisition = std::move(acquisition);
         }
+    }
+    catch (const std::exception&)
+    {
+        {
+            std::scoped_lock lock{session.cache_mutex};
+            session.acquisition.reset();
+        }
+        session.acquisition_queue.reset();
+        session.frame_pool.reset();
+        return Result<void>::failure(
+            make_camera_error(CameraErrorKind::stream_start_failed, "无法创建相机预览取帧通道",
+                              "camera.control.prepareFrameDelivery", session.id));
+    }
+    return Result<void>::success();
+}
+
+Result<void> CameraControlRuntime::start_frame_delivery(Session& session)
+{
+    if (!frame_observer_)
+        return Result<void>::success();
+    std::shared_ptr<AcquisitionWorker> acquisition;
+    {
+        std::scoped_lock lock{session.cache_mutex};
+        acquisition = session.acquisition;
+    }
+    if (!acquisition || !session.acquisition_queue || !session.frame_pool)
+        return Result<void>::failure(
+            make_camera_error(CameraErrorKind::invalid_state_transition, "相机帧投递通道尚未准备",
+                              "camera.control.startFrameDelivery", session.id));
+
+    auto started = acquisition->start();
+    if (!started)
+    {
+        {
+            std::scoped_lock lock{session.cache_mutex};
+            session.acquisition.reset();
+        }
+        session.acquisition_queue.reset();
+        session.frame_pool.reset();
+        return started;
+    }
+    try
+    {
         session.frame_forwarder = std::jthread(
             [this, &session](const std::stop_token token) { forward_frames(session, token); });
     }
     catch (const std::exception&)
     {
-        if (session.acquisition)
+        acquisition->request_stop();
+        static_cast<void>(
+            acquisition->join(std::chrono::steady_clock::now() + preview_shutdown_timeout));
+        session.acquisition_queue->close();
+        session.frame_pool->close();
         {
-            session.acquisition->request_stop();
-            static_cast<void>(session.acquisition->join(std::chrono::steady_clock::now() +
-                                                        preview_shutdown_timeout));
+            std::scoped_lock lock{session.cache_mutex};
+            session.acquisition.reset();
         }
-        if (session.acquisition_queue)
-            session.acquisition_queue->close();
-        if (session.frame_pool)
-            session.frame_pool->close();
-        session.acquisition.reset();
         session.acquisition_queue.reset();
         session.frame_pool.reset();
         return Result<void>::failure(
-            make_camera_error(CameraErrorKind::stream_start_failed, "无法创建相机预览取帧通道",
+            make_camera_error(CameraErrorKind::stream_start_failed, "无法启动相机帧投递线程",
                               "camera.control.startFrameDelivery", session.id));
     }
     return Result<void>::success();
@@ -134,24 +184,31 @@ Result<void> CameraControlRuntime::start_frame_delivery(Session& session)
 
 Result<void> CameraControlRuntime::stop_frame_delivery(Session& session)
 {
-    if (session.acquisition)
-        session.acquisition->request_stop();
+    std::shared_ptr<AcquisitionWorker> acquisition;
+    {
+        std::scoped_lock lock{session.cache_mutex};
+        acquisition = session.acquisition;
+    }
+    if (acquisition)
+        acquisition->request_stop();
     if (session.acquisition_queue)
         session.acquisition_queue->close();
     if (session.frame_forwarder.joinable())
         session.frame_forwarder.request_stop();
 
     Result<void> joined = Result<void>::success();
-    if (session.acquisition)
+    if (acquisition)
     {
-        joined =
-            session.acquisition->join(std::chrono::steady_clock::now() + preview_shutdown_timeout);
+        joined = acquisition->join(std::chrono::steady_clock::now() + preview_shutdown_timeout);
     }
     if (session.frame_forwarder.joinable())
         session.frame_forwarder.join();
     if (session.frame_pool)
         session.frame_pool->close();
-    session.acquisition.reset();
+    {
+        std::scoped_lock lock{session.cache_mutex};
+        session.acquisition.reset();
+    }
     session.acquisition_queue.reset();
     session.frame_pool.reset();
     return joined;
@@ -221,36 +278,55 @@ Result<CameraControlRuntime::Session*> CameraControlRuntime::find(std::string_vi
 }
 Result<CameraControlSnapshot> CameraControlRuntime::read(Session& s)
 {
-    CameraControlSnapshot r{
-        .camera_id = s.id, .serial_number = s.serial, .state = s.state, .last_error = s.error};
-    if (s.acquisition)
-        r.acquisition = s.acquisition->snapshot();
+    CameraControlSnapshot r{.camera_id = s.id, .state = s.state.load(std::memory_order_acquire)};
+    std::shared_ptr<AcquisitionWorker> acquisition;
+    {
+        std::scoped_lock lock{s.cache_mutex};
+        r.serial_number = s.serial;
+        r.last_error = s.error;
+        r.device = s.descriptor;
+        r.capabilities = s.capabilities;
+        r.actual = s.actual;
+        acquisition = s.acquisition;
+    }
+    if (acquisition)
+        r.acquisition = acquisition->snapshot();
+    return Result<CameraControlSnapshot>::success(std::move(r));
+}
+
+Result<void> CameraControlRuntime::refresh_cache(Session& s)
+{
     if (!s.device)
-        return Result<CameraControlSnapshot>::success(std::move(r));
-    r.device = s.device->descriptor();
+        return Result<void>::failure(make_camera_error(CameraErrorKind::invalid_state_transition,
+                                                       "相机尚未连接",
+                                                       "camera.control.refreshCache", s.id));
+    const auto descriptor = s.device->descriptor();
     auto caps = s.device->capabilities();
     if (!caps)
     {
+        std::scoped_lock lock{s.cache_mutex};
         s.error = caps.error();
-        r.last_error = s.error;
-        return Result<CameraControlSnapshot>::success(std::move(r));
+        return Result<void>::failure(caps.error());
     }
-    r.capabilities = std::move(caps).value();
+    auto capabilities = std::move(caps).value();
     auto actual = s.device->read_parameters();
     if (!actual)
     {
+        std::scoped_lock lock{s.cache_mutex};
         s.error = actual.error();
-        r.last_error = s.error;
-        return Result<CameraControlSnapshot>::success(std::move(r));
+        return Result<void>::failure(actual.error());
     }
-    s.error.reset();
-    r.last_error.reset();
-    r.actual = std::move(actual).value();
-    return Result<CameraControlSnapshot>::success(std::move(r));
+    {
+        std::scoped_lock lock{s.cache_mutex};
+        s.descriptor = descriptor;
+        s.capabilities = std::move(capabilities);
+        s.actual = std::move(actual).value();
+        s.error.reset();
+    }
+    return Result<void>::success();
 }
 Result<std::vector<CameraDeviceDescriptor>> CameraControlRuntime::discover()
 {
-    std::scoped_lock l{mutex_};
     if (!provider_)
         return Result<std::vector<CameraDeviceDescriptor>>::failure(unsupported("camera.discover"));
     auto r = provider_->enumerate_devices();
@@ -268,172 +344,282 @@ Result<std::vector<CameraDeviceDescriptor>> CameraControlRuntime::discover()
 Result<CameraControlSnapshot> CameraControlRuntime::get(std::string_view id,
                                                         std::string_view serial)
 {
-    std::scoped_lock l{mutex_};
-    auto s = find(id);
-    if (!s)
+    Session* session{};
+    {
+        std::scoped_lock lock{mutex_};
+        auto found = find(id);
+        if (found)
+            session = found.value();
+    }
+    if (session == nullptr)
         return Result<CameraControlSnapshot>::success(
             {.camera_id = std::string{id}, .serial_number = std::string{serial}});
-    return read(*s.value());
+    return read(*session);
 }
 Result<CameraControlSnapshot> CameraControlRuntime::connect(std::string_view id,
                                                             std::string_view serial)
 {
-    std::scoped_lock l{mutex_};
     if (!provider_)
         return Result<CameraControlSnapshot>::failure(unsupported("camera.connect"));
-    auto old = find(id);
-    if (old)
+    Session* session{};
     {
-        if (old.value()->serial != serial)
+        std::scoped_lock lock{mutex_};
+        auto found = find(id);
+        if (found)
+            session = found.value();
+        else
+        {
+            if (sessions_.size() >= 4U)
+                return Result<CameraControlSnapshot>::failure(make_camera_error(
+                    CameraErrorKind::config_failed, "相机数量超过四路", "camera.control.connect"));
+            auto created = std::make_unique<Session>();
+            created->id = id;
+            created->serial = serial;
+            session = created.get();
+            sessions_.push_back(std::move(created));
+        }
+    }
+    std::scoped_lock operation_lock{session->operation_mutex};
+    if (session->device)
+    {
+        bool serial_matches{};
+        {
+            std::scoped_lock cache_lock{session->cache_mutex};
+            serial_matches = session->serial == serial;
+        }
+        if (!serial_matches)
             return Result<CameraControlSnapshot>::failure(make_camera_error(
                 CameraErrorKind::config_failed, "逻辑相机已连接到不同序列号的设备",
                 "camera.control.connect", std::string{id}));
-        return read(*old.value());
+        return read(*session);
     }
-    if (sessions_.size() >= 4U)
-        return Result<CameraControlSnapshot>::failure(make_camera_error(
-            CameraErrorKind::config_failed, "相机数量超过四路", "camera.control.connect"));
+    {
+        std::scoped_lock cache_lock{session->cache_mutex};
+        session->serial = serial;
+    }
     auto device = provider_->create_device(serial);
     if (!device)
         return Result<CameraControlSnapshot>::failure(device.error());
     auto open = device.value()->connect();
     if (!open)
         return Result<CameraControlSnapshot>::failure(open.error());
-    auto s = std::make_unique<Session>();
-    s->id = id;
-    s->serial = serial;
-    s->state = CameraControlState::connected;
-    s->device = std::move(device).value();
-    sessions_.push_back(std::move(s));
-    return read(*sessions_.back());
+    session->device = std::move(device).value();
+    auto refreshed = refresh_cache(*session);
+    if (!refreshed)
+    {
+        static_cast<void>(session->device->disconnect());
+        session->device.reset();
+        return Result<CameraControlSnapshot>::failure(refreshed.error());
+    }
+    session->state.store(CameraControlState::connected, std::memory_order_release);
+    return read(*session);
 }
 Result<CameraControlSnapshot> CameraControlRuntime::disconnect(std::string_view id)
 {
-    std::scoped_lock l{mutex_};
-    auto s = find(id);
-    if (!s)
-        return Result<CameraControlSnapshot>::failure(s.error());
-    auto* x = s.value();
-    if (x->state == CameraControlState::acquiring)
+    Session* session{};
     {
-        auto delivery = stop_frame_delivery(*x);
+        std::scoped_lock lock{mutex_};
+        auto found = find(id);
+        if (found)
+            session = found.value();
+    }
+    if (session == nullptr)
+        return Result<CameraControlSnapshot>::success(
+            {.camera_id = std::string{id}, .state = CameraControlState::disconnected});
+    std::scoped_lock operation_lock{session->operation_mutex};
+    if (!session->device)
+        return read(*session);
+    if (session->state.load(std::memory_order_acquire) == CameraControlState::acquiring)
+    {
+        auto delivery = stop_frame_delivery(*session);
         if (!delivery)
             return Result<CameraControlSnapshot>::failure(delivery.error());
-        auto r = x->device->stop_acquisition();
+        auto r = session->device->stop_acquisition();
         if (!r)
             return Result<CameraControlSnapshot>::failure(r.error());
     }
-    auto r = x->device->disconnect();
+    auto r = session->device->disconnect();
     if (!r)
         return Result<CameraControlSnapshot>::failure(r.error());
-    CameraControlSnapshot result{
-        .camera_id = x->id, .serial_number = x->serial, .state = CameraControlState::disconnected};
-    sessions_.erase(std::remove_if(sessions_.begin(), sessions_.end(),
-                                   [id](const auto& item) { return item->id == id; }),
-                    sessions_.end());
-    return Result<CameraControlSnapshot>::success(std::move(result));
+    session->device.reset();
+    session->state.store(CameraControlState::disconnected, std::memory_order_release);
+    return read(*session);
 }
 Result<CameraControlSnapshot> CameraControlRuntime::start(std::string_view id)
 {
-    std::scoped_lock l{mutex_};
-    auto s = find(id);
-    if (!s)
-        return Result<CameraControlSnapshot>::failure(s.error());
-    auto r = s.value()->device->start_acquisition();
+    Session* session{};
+    {
+        std::scoped_lock lock{mutex_};
+        auto found = find(id);
+        if (!found)
+            return Result<CameraControlSnapshot>::failure(found.error());
+        session = found.value();
+    }
+    std::scoped_lock operation_lock{session->operation_mutex};
+    if (!session->device)
+        return Result<CameraControlSnapshot>::failure(
+            make_camera_error(CameraErrorKind::invalid_state_transition, "相机尚未连接",
+                              "camera.control.start", std::string{id}));
+    if (session->state.load(std::memory_order_acquire) == CameraControlState::acquiring)
+        return read(*session);
+    auto prepared = prepare_frame_delivery(*session);
+    if (!prepared)
+        return Result<CameraControlSnapshot>::failure(prepared.error());
+    auto r = session->device->start_acquisition();
     if (!r)
+    {
+        static_cast<void>(stop_frame_delivery(*session));
         return Result<CameraControlSnapshot>::failure(r.error());
-    s.value()->state = CameraControlState::acquiring;
-    auto snapshot = read(*s.value());
-    auto delivery = start_frame_delivery(*s.value());
+    }
+    session->state.store(CameraControlState::acquiring, std::memory_order_release);
+    auto delivery = start_frame_delivery(*session);
     if (!delivery)
     {
-        static_cast<void>(s.value()->device->stop_acquisition());
-        s.value()->state = CameraControlState::connected;
+        static_cast<void>(session->device->stop_acquisition());
+        session->state.store(CameraControlState::connected, std::memory_order_release);
         return Result<CameraControlSnapshot>::failure(delivery.error());
     }
-    return snapshot;
+    return read(*session);
 }
 Result<CameraControlSnapshot> CameraControlRuntime::stop(std::string_view id)
 {
-    std::scoped_lock l{mutex_};
-    auto s = find(id);
-    if (!s)
-        return Result<CameraControlSnapshot>::failure(s.error());
-    auto delivery = stop_frame_delivery(*s.value());
+    Session* session{};
+    {
+        std::scoped_lock lock{mutex_};
+        auto found = find(id);
+        if (!found)
+            return Result<CameraControlSnapshot>::failure(found.error());
+        session = found.value();
+    }
+    std::scoped_lock operation_lock{session->operation_mutex};
+    if (!session->device)
+        return Result<CameraControlSnapshot>::failure(
+            make_camera_error(CameraErrorKind::invalid_state_transition, "相机尚未连接",
+                              "camera.control.stop", std::string{id}));
+    if (session->state.load(std::memory_order_acquire) == CameraControlState::connected)
+        return read(*session);
+    auto delivery = stop_frame_delivery(*session);
     if (!delivery)
         return Result<CameraControlSnapshot>::failure(delivery.error());
-    auto r = s.value()->device->stop_acquisition();
+    auto r = session->device->stop_acquisition();
     if (!r)
         return Result<CameraControlSnapshot>::failure(r.error());
-    s.value()->state = CameraControlState::connected;
-    return read(*s.value());
+    session->state.store(CameraControlState::connected, std::memory_order_release);
+    return read(*session);
 }
 Result<CameraControlSnapshot> CameraControlRuntime::update(std::string_view id,
                                                            const CameraParameterSnapshot& p)
 {
-    std::scoped_lock l{mutex_};
-    auto s = find(id);
-    if (!s)
-        return Result<CameraControlSnapshot>::failure(s.error());
-    const bool resume_acquisition = s.value()->state == CameraControlState::acquiring;
+    Session* session{};
+    {
+        std::scoped_lock lock{mutex_};
+        auto found = find(id);
+        if (!found)
+            return Result<CameraControlSnapshot>::failure(found.error());
+        session = found.value();
+    }
+    std::scoped_lock operation_lock{session->operation_mutex};
+    if (!session->device)
+        return Result<CameraControlSnapshot>::failure(
+            make_camera_error(CameraErrorKind::invalid_state_transition, "相机尚未连接",
+                              "camera.control.update", std::string{id}));
+    const bool resume_acquisition =
+        session->state.load(std::memory_order_acquire) == CameraControlState::acquiring;
     if (resume_acquisition)
     {
-        auto delivery = stop_frame_delivery(*s.value());
+        auto delivery = stop_frame_delivery(*session);
         if (!delivery)
             return Result<CameraControlSnapshot>::failure(delivery.error());
-        auto stopped = s.value()->device->stop_acquisition();
+        auto stopped = session->device->stop_acquisition();
         if (!stopped)
         {
-            static_cast<void>(start_frame_delivery(*s.value()));
+            if (prepare_frame_delivery(*session))
+                static_cast<void>(start_frame_delivery(*session));
             return Result<CameraControlSnapshot>::failure(stopped.error());
         }
-        s.value()->state = CameraControlState::connected;
+        session->state.store(CameraControlState::connected, std::memory_order_release);
     }
-    auto r = apply_validated_parameters(*s.value()->device, p);
+    auto r = apply_validated_parameters(*session->device, p);
+    {
+        std::scoped_lock cache_lock{session->cache_mutex};
+        if (r)
+        {
+            session->actual = r.value();
+            session->error.reset();
+        }
+        else
+            session->error = r.error();
+    }
     Result<void> resumed = Result<void>::success();
     if (resume_acquisition)
     {
-        resumed = s.value()->device->start_acquisition();
+        resumed = prepare_frame_delivery(*session);
         if (resumed)
         {
-            s.value()->state = CameraControlState::acquiring;
-            resumed = start_frame_delivery(*s.value());
-            if (!resumed)
+            resumed = session->device->start_acquisition();
+            if (resumed)
             {
-                static_cast<void>(s.value()->device->stop_acquisition());
-                s.value()->state = CameraControlState::connected;
+                session->state.store(CameraControlState::acquiring, std::memory_order_release);
+                resumed = start_frame_delivery(*session);
+                if (!resumed)
+                {
+                    static_cast<void>(session->device->stop_acquisition());
+                    session->state.store(CameraControlState::connected, std::memory_order_release);
+                }
             }
+            else
+                static_cast<void>(stop_frame_delivery(*session));
         }
     }
     if (!resumed)
         return Result<CameraControlSnapshot>::failure(resumed.error());
     if (!r)
         return Result<CameraControlSnapshot>::failure(r.error());
-    return read(*s.value());
+    return read(*session);
 }
 Result<CapturedFrameMetadata> CameraControlRuntime::capture_snapshot(std::string_view id)
 {
-    std::scoped_lock l{mutex_};
-    auto s = find(id);
-    if (!s)
-        return Result<CapturedFrameMetadata>::failure(s.error());
-    auto caps = s.value()->device->capabilities();
-    if (!caps)
-        return Result<CapturedFrameMetadata>::failure(caps.error());
-    if (caps.value().maximum_payload_bytes == 0U ||
-        caps.value().maximum_payload_bytes > maximum_operator_snapshot_bytes)
+    Session* session{};
+    {
+        std::scoped_lock lock{mutex_};
+        auto found = find(id);
+        if (!found)
+            return Result<CapturedFrameMetadata>::failure(found.error());
+        session = found.value();
+    }
+    std::scoped_lock operation_lock{session->operation_mutex};
+    std::optional<CameraCapabilities> capabilities;
+    {
+        std::scoped_lock cache_lock{session->cache_mutex};
+        capabilities = session->capabilities;
+    }
+    if (!capabilities)
+        return Result<CapturedFrameMetadata>::failure(
+            make_camera_error(CameraErrorKind::invalid_state_transition, "相机能力缓存不可用",
+                              "camera.control.captureSnapshot", std::string{id}));
+    if (capabilities->maximum_payload_bytes == 0U ||
+        capabilities->maximum_payload_bytes > maximum_operator_snapshot_bytes)
         return Result<CapturedFrameMetadata>::failure(
             make_camera_error(CameraErrorKind::config_failed, "快照缓冲区大小超出安全范围",
                               "camera.control.captureSnapshot", std::string{id}));
-    FrameBuffer buffer{caps.value().maximum_payload_bytes};
-    return s.value()->device->capture_into(buffer, std::chrono::milliseconds{1000});
+    FrameBuffer buffer{capabilities->maximum_payload_bytes};
+    return session->device->capture_into(buffer, std::chrono::milliseconds{1000});
 }
 Result<void> CameraControlRuntime::software_trigger(std::string_view id)
 {
-    std::scoped_lock l{mutex_};
-    auto s = find(id);
-    if (!s)
-        return Result<void>::failure(s.error());
-    return s.value()->device->software_trigger();
+    Session* session{};
+    {
+        std::scoped_lock lock{mutex_};
+        auto found = find(id);
+        if (!found)
+            return Result<void>::failure(found.error());
+        session = found.value();
+    }
+    std::scoped_lock operation_lock{session->operation_mutex};
+    if (!session->device)
+        return Result<void>::failure(
+            make_camera_error(CameraErrorKind::invalid_state_transition, "相机尚未连接",
+                              "camera.control.softwareTrigger", std::string{id}));
+    return session->device->software_trigger();
 }
 } // namespace paperbreak::camera

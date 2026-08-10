@@ -62,6 +62,8 @@ class SystemCommandService final : public ipc::IRequestHandler
     [[nodiscard]] Result<ipc::CommandResponse> handle(const ipc::RequestMessage& request,
                                                       const ipc::PeerIdentity& peer,
                                                       std::stop_token stop_token) override;
+    [[nodiscard]] ipc::IRequestHandler::ExecutionClass execution_class(
+        const ipc::RequestMessage& request) const noexcept override;
 
     /// Executes one validated Uplink v1 command through the same service-side dispatcher used by
     /// local IPC. Mutating commands require operator confirmation and an available audit logger.

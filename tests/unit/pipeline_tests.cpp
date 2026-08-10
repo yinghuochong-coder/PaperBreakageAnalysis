@@ -3,8 +3,8 @@
 
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -87,13 +87,14 @@ class SlowNode final : public IPreprocessingNode
 class CountingPreviewEncoder final : public IPreviewEncoder
 {
   public:
-    explicit CountingPreviewEncoder(const bool fail = false, const std::chrono::milliseconds delay = {})
+    explicit CountingPreviewEncoder(const bool fail = false,
+                                    const std::chrono::milliseconds delay = {})
         : fail_(fail), delay_(delay)
     {
     }
 
     [[nodiscard]] Result<std::vector<std::byte>> encode(const FrameView& frame,
-                                                         const PreviewEncodeOptions&) override
+                                                        const PreviewEncodeOptions&) override
     {
         calls.fetch_add(1U, std::memory_order_relaxed);
         if (delay_ > 0ms)
@@ -408,8 +409,8 @@ TEST(PipelinePreviewRuntime, DoesNotEncodeWithoutSubscribersAndSamplesAtConfigur
 {
     auto encoder = std::make_unique<CountingPreviewEncoder>();
     auto* encoder_ptr = encoder.get();
-    PreviewRuntime runtime{{"CAM01"}, std::move(encoder), [](PreviewDelivery) {},
-                           {.frames_per_second = 3.0}};
+    PreviewRuntime runtime{
+        {"CAM01"}, std::move(encoder), [](PreviewDelivery) {}, {.frames_per_second = 3.0}};
     ASSERT_TRUE(runtime.start());
     AcquisitionQueue acquisition{2U};
     auto source_packet = make_packet(1U);
@@ -418,9 +419,8 @@ TEST(PipelinePreviewRuntime, DoesNotEncodeWithoutSubscribersAndSamplesAtConfigur
     ASSERT_EQ(acquisition.push(source_packet), FrameEnqueueStatus::enqueued);
     const auto before_preview = acquisition.snapshot();
     runtime.submit(std::move(source_view).value());
-    ASSERT_TRUE(wait_preview([&] {
-        return runtime.snapshot().frames_skipped_without_subscribers == 1U;
-    }));
+    ASSERT_TRUE(
+        wait_preview([&] { return runtime.snapshot().frames_skipped_without_subscribers == 1U; }));
     EXPECT_EQ(encoder_ptr->calls.load(), 0U);
     const auto after_preview = acquisition.snapshot();
     EXPECT_EQ(after_preview.enqueued, before_preview.enqueued);
@@ -442,7 +442,8 @@ TEST(PipelinePreviewRuntime, ReplacesPendingFramesDeliversToFourSubscribersAndSu
     std::mutex deliveries_mutex;
     std::vector<PreviewDelivery> deliveries;
     auto slow_encoder = std::make_unique<CountingPreviewEncoder>(false, 40ms);
-    PreviewRuntime runtime{{"CAM01", "CAM02", "CAM03", "CAM04"}, std::move(slow_encoder),
+    PreviewRuntime runtime{{"CAM01", "CAM02", "CAM03", "CAM04"},
+                           std::move(slow_encoder),
                            [&](PreviewDelivery delivery) {
                                std::scoped_lock lock{deliveries_mutex};
                                deliveries.push_back(std::move(delivery));
@@ -471,12 +472,65 @@ TEST(PipelinePreviewRuntime, ReplacesPendingFramesDeliversToFourSubscribersAndSu
     EXPECT_TRUE(runtime.join(std::chrono::steady_clock::now() + 1s));
 
     auto failing_encoder = std::make_unique<CountingPreviewEncoder>(true);
-    PreviewRuntime failing{{"CAM01"}, std::move(failing_encoder), [](PreviewDelivery) {},
-                           {.frames_per_second = 3.0}};
+    PreviewRuntime failing{
+        {"CAM01"}, std::move(failing_encoder), [](PreviewDelivery) {}, {.frames_per_second = 3.0}};
     ASSERT_TRUE(failing.start());
     ASSERT_TRUE(failing.subscribe(9U, {"CAM01"}));
     failing.submit(preview_frame(1U));
     ASSERT_TRUE(wait_preview([&] { return failing.snapshot().encoding_failures == 1U; }));
     failing.request_stop();
     EXPECT_TRUE(failing.join(std::chrono::steady_clock::now() + 1s));
+}
+
+TEST(PipelinePreviewRuntime, RotatesFairlyAcrossTwoContinuouslyBusyCameras)
+{
+    std::mutex mutex;
+    std::vector<std::string> delivery_order;
+    auto encoder = std::make_unique<CountingPreviewEncoder>(false, 3ms);
+    PreviewRuntime runtime{{"CAM01", "CAM02"},
+                           std::move(encoder),
+                           [&](PreviewDelivery delivery) {
+                               std::scoped_lock lock{mutex};
+                               delivery_order.push_back(std::move(delivery.camera_id));
+                           },
+                           {.frames_per_second = 5.0}};
+    ASSERT_TRUE(runtime.start());
+    ASSERT_TRUE(runtime.subscribe(1U, {"CAM01", "CAM02"}));
+
+    for (std::uint64_t sequence = 1U; sequence <= 100U; ++sequence)
+    {
+        runtime.submit(preview_frame(sequence * 1000U, "CAM01"));
+        runtime.submit(preview_frame(sequence * 1000U, "CAM02"));
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_TRUE(wait_preview([&] {
+        std::scoped_lock lock{mutex};
+        return std::count(delivery_order.begin(), delivery_order.end(), "CAM01") >= 8 &&
+               std::count(delivery_order.begin(), delivery_order.end(), "CAM02") >= 8;
+    }));
+
+    std::size_t longest_run = 0U;
+    {
+        std::scoped_lock lock{mutex};
+        std::size_t run = 0U;
+        std::string previous;
+        for (const auto& camera_id : delivery_order)
+        {
+            run = camera_id == previous ? run + 1U : 1U;
+            previous = camera_id;
+            longest_run = std::max(longest_run, run);
+        }
+    }
+    EXPECT_LE(longest_run, 2U);
+    const auto snapshot = runtime.snapshot();
+    ASSERT_EQ(snapshot.cameras.size(), 2U);
+    for (const auto& camera : snapshot.cameras)
+    {
+        EXPECT_GT(camera.sampled, 0U);
+        EXPECT_GT(camera.encoded, 0U);
+        EXPECT_GT(camera.deliveries, 0U);
+        EXPECT_TRUE(camera.last_delivery_time.has_value());
+    }
+    runtime.request_stop();
+    EXPECT_TRUE(runtime.join(std::chrono::steady_clock::now() + 1s));
 }

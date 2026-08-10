@@ -106,6 +106,11 @@ struct PreviewRuntime::CameraSlot final
     std::mutex mutex;
     std::optional<PendingFrame> pending;
     std::optional<camera::MonotonicTime> last_sample;
+    std::uint64_t sampled{};
+    std::uint64_t replaced_before_encoding{};
+    std::uint64_t encoded{};
+    std::uint64_t deliveries{};
+    std::optional<camera::WallClockTime> last_delivery_time;
 };
 
 std::unique_ptr<IPreviewEncoder> make_opencv_preview_encoder()
@@ -131,6 +136,7 @@ PreviewRuntime::PreviewRuntime(std::vector<std::string> camera_ids,
         if (camera_id.empty() ||
             !cameras_.emplace(camera_id, std::make_unique<CameraSlot>()).second)
             throw std::invalid_argument{"PreviewRuntime camera identifiers are invalid"};
+        camera_order_.push_back(std::move(camera_id));
     }
 }
 
@@ -166,6 +172,7 @@ void PreviewRuntime::request_stop() noexcept
 {
     if (worker_.joinable())
         worker_.request_stop();
+    work_condition_.notify_all();
 }
 
 Result<void> PreviewRuntime::join(const std::chrono::steady_clock::time_point deadline)
@@ -251,10 +258,18 @@ void PreviewRuntime::submit(camera::FrameView frame, PreviewFrameMetadata metada
         return;
     }
     slot.last_sample = frame.received_monotonic_time();
-    if (slot.pending.has_value())
+    const bool replacing = slot.pending.has_value();
+    if (replacing)
+    {
         frames_replaced_before_encoding_.fetch_add(1U, std::memory_order_relaxed);
+        ++slot.replaced_before_encoding;
+    }
     slot.pending = PendingFrame{std::move(frame), std::move(metadata)};
+    ++slot.sampled;
     frames_sampled_.fetch_add(1U, std::memory_order_relaxed);
+    if (!replacing)
+        pending_slots_.fetch_add(1U, std::memory_order_release);
+    work_condition_.notify_one();
 }
 
 void PreviewRuntime::run(const std::stop_token token) noexcept
@@ -263,18 +278,31 @@ void PreviewRuntime::run(const std::stop_token token) noexcept
         options_.register_thread ? options_.register_thread("preview-encoder") : nullptr;
     while (!token.stop_requested())
     {
-        bool did_work = false;
-        for (auto& [camera_id, slot_ptr] : cameras_)
         {
+            std::unique_lock lock{work_mutex_};
+            work_condition_.wait(lock, token, [this] {
+                return pending_slots_.load(std::memory_order_acquire) > 0U;
+            });
+        }
+        if (token.stop_requested())
+            break;
+
+        const std::size_t round_start = rotation_start_;
+        rotation_start_ = (rotation_start_ + 1U) % camera_order_.size();
+        for (std::size_t offset = 0U; offset < camera_order_.size(); ++offset)
+        {
+            const std::string& camera_id =
+                camera_order_[(round_start + offset) % camera_order_.size()];
+            CameraSlot& slot = *cameras_.at(camera_id);
             std::optional<PendingFrame> pending;
             {
-                std::scoped_lock lock{slot_ptr->mutex};
-                pending = std::move(slot_ptr->pending);
-                slot_ptr->pending.reset();
+                std::scoped_lock lock{slot.mutex};
+                pending = std::move(slot.pending);
+                slot.pending.reset();
             }
             if (!pending)
                 continue;
-            did_work = true;
+            pending_slots_.fetch_sub(1U, std::memory_order_acq_rel);
             auto encoded = encoder_->encode(pending->frame, options_.encoding);
             if (!encoded)
             {
@@ -288,6 +316,10 @@ void PreviewRuntime::run(const std::stop_token token) noexcept
                 continue;
             }
             encoded_.fetch_add(1U, std::memory_order_relaxed);
+            {
+                std::scoped_lock lock{slot.mutex};
+                ++slot.encoded;
+            }
             std::vector<std::uint64_t> subscribers;
             {
                 std::scoped_lock lock{subscriptions_mutex_};
@@ -315,6 +347,11 @@ void PreviewRuntime::run(const std::stop_token token) noexcept
                                .metadata = pending->metadata,
                                .jpeg = encoded.value()});
                     deliveries_.fetch_add(1U, std::memory_order_relaxed);
+                    {
+                        std::scoped_lock lock{slot.mutex};
+                        ++slot.deliveries;
+                        slot.last_delivery_time = std::chrono::system_clock::now();
+                    }
                 }
                 catch (...)
                 {
@@ -322,8 +359,6 @@ void PreviewRuntime::run(const std::stop_token token) noexcept
                 }
             }
         }
-        if (!did_work)
-            std::this_thread::sleep_for(std::chrono::milliseconds{2});
     }
     finish();
 }
@@ -344,6 +379,19 @@ PreviewRuntimeSnapshot PreviewRuntime::snapshot() const noexcept
         std::scoped_lock lock{subscriptions_mutex_};
         subscriptions = subscriptions_.size();
     }
+    std::vector<PreviewRuntimeSnapshot::CameraStatistics> camera_statistics;
+    camera_statistics.reserve(camera_order_.size());
+    for (const auto& camera_id : camera_order_)
+    {
+        CameraSlot& slot = *cameras_.at(camera_id);
+        std::scoped_lock lock{slot.mutex};
+        camera_statistics.push_back({.camera_id = camera_id,
+                                     .sampled = slot.sampled,
+                                     .replaced_before_encoding = slot.replaced_before_encoding,
+                                     .encoded = slot.encoded,
+                                     .deliveries = slot.deliveries,
+                                     .last_delivery_time = slot.last_delivery_time});
+    }
     std::scoped_lock lock{lifecycle_mutex_};
     return {.started = started_ && !completed_,
             .subscriptions = subscriptions,
@@ -359,7 +407,8 @@ PreviewRuntimeSnapshot PreviewRuntime::snapshot() const noexcept
             .deliveries = deliveries_.load(std::memory_order_relaxed),
             .delivery_failures = delivery_failures_.load(std::memory_order_relaxed),
             .rejected_unknown_camera = rejected_unknown_camera_.load(std::memory_order_relaxed),
-            .rejected_after_stop = rejected_after_stop_.load(std::memory_order_relaxed)};
+            .rejected_after_stop = rejected_after_stop_.load(std::memory_order_relaxed),
+            .cameras = std::move(camera_statistics)};
 }
 
 } // namespace paperbreak::pipeline

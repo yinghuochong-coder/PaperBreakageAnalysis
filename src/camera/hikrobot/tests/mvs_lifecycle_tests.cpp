@@ -265,6 +265,8 @@ int __stdcall fake_get_bool(void*, const char* node, bool* value)
 {
     auto& state = context();
     state.calls.emplace_back("getb:" + std::string{node});
+    if (state.fail_get_node == node)
+        return state.fail_get_code;
     const auto found = state.booleans.find(node);
     if (found == state.booleans.end())
         return MV_E_SUPPORT;
@@ -368,7 +370,8 @@ void configure_parameter_nodes(FakeContext& state)
         {"PixelFormat", {PixelType_Gvsp_Mono8, {PixelType_Gvsp_Mono8, PixelType_Gvsp_Mono12}}},
         {"TriggerMode", {0U, {0U, 1U}}},
         {"TriggerSource", {0U, {0U, 7U}}}};
-    state.booleans = {{"ReverseX", false}, {"ReverseY", true}};
+    state.booleans = {
+        {"ReverseX", false}, {"ReverseY", true}, {"AcquisitionFrameRateEnable", false}};
 }
 
 TEST_F(MvsLifecycleTest, DeviceListOwnsBoundedSdkListValue)
@@ -555,6 +558,106 @@ TEST_F(MvsLifecycleTest, ParameterApplyPausesWritesReadsBackAndResumesStreaming)
     EXPECT_LT(stop, first_write);
     EXPECT_LT(first_write, restart);
     EXPECT_TRUE(std::move(stream).value().active());
+}
+
+TEST_F(MvsLifecycleTest, FrameRateEnableIsWrittenBeforeRateAndReadBack)
+{
+    configure_parameter_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.calls.clear();
+
+    const auto applied = handle.apply_parameters({.frame_rate = 25.0});
+
+    ASSERT_TRUE(applied);
+    EXPECT_EQ(applied.value().frame_rate, 25.0);
+    EXPECT_TRUE(context_.booleans.at("AcquisitionFrameRateEnable"));
+    const auto enable =
+        std::find(context_.calls.begin(), context_.calls.end(), "setb:AcquisitionFrameRateEnable");
+    const auto rate =
+        std::find(context_.calls.begin(), context_.calls.end(), "setf:AcquisitionFrameRate");
+    ASSERT_NE(enable, context_.calls.end());
+    ASSERT_NE(rate, context_.calls.end());
+    EXPECT_LT(enable, rate);
+    EXPECT_NE(std::find(rate, context_.calls.end(), "getb:AcquisitionFrameRateEnable"),
+              context_.calls.end());
+}
+
+TEST_F(MvsLifecycleTest, FrameRateEnableExplicitlyUnsupportedUsesDirectRateWrite)
+{
+    configure_parameter_nodes(context_);
+    context_.booleans.erase("AcquisitionFrameRateEnable");
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.calls.clear();
+
+    const auto applied = handle.apply_parameters({.frame_rate = 20.0});
+
+    ASSERT_TRUE(applied);
+    EXPECT_EQ(applied.value().frame_rate, 20.0);
+    EXPECT_EQ(
+        std::find(context_.calls.begin(), context_.calls.end(), "setb:AcquisitionFrameRateEnable"),
+        context_.calls.end());
+}
+
+TEST_F(MvsLifecycleTest, FrameRateEnableReadFailureIsNotTreatedAsUnsupported)
+{
+    configure_parameter_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.fail_get_node = "AcquisitionFrameRateEnable";
+    context_.fail_get_code = MV_E_GC_ACCESS;
+
+    const auto applied = handle.apply_parameters({.frame_rate = 20.0});
+
+    ASSERT_FALSE(applied);
+    EXPECT_EQ(applied.error().business_code, "CAMERA_PARAMETER_READ_FAILED");
+    EXPECT_EQ(applied.error().native_code, "0x80000106");
+}
+
+TEST_F(MvsLifecycleTest, FrameRateWriteFailureRestoresRateAndEnableState)
+{
+    configure_parameter_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.fail_set_node = "AcquisitionFrameRate";
+    context_.fail_set_code = MV_E_PARAMETER_RANGE;
+    context_.fail_set_remaining = 1U;
+
+    const auto applied = handle.apply_parameters({.frame_rate = 20.0});
+
+    ASSERT_FALSE(applied);
+    EXPECT_EQ(applied.error().business_code, "CAMERA_PARAMETER_WRITE_FAILED");
+    EXPECT_FLOAT_EQ(context_.floats.at("AcquisitionFrameRate").current, 30.0F);
+    EXPECT_FALSE(context_.booleans.at("AcquisitionFrameRateEnable"));
+    const auto restored = handle.read_parameters();
+    ASSERT_TRUE(restored);
+    EXPECT_EQ(restored.value().frame_rate, 30.0);
+}
+
+TEST_F(MvsLifecycleTest, FrameRateEnableWriteFailureRestoresCompleteTransaction)
+{
+    configure_parameter_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.fail_set_node = "AcquisitionFrameRateEnable";
+    context_.fail_set_code = MV_E_GC_ACCESS;
+    context_.fail_set_remaining = 1U;
+
+    const auto applied = handle.apply_parameters({.frame_rate = 20.0});
+
+    ASSERT_FALSE(applied);
+    EXPECT_EQ(applied.error().business_code, "CAMERA_PARAMETER_WRITE_FAILED");
+    EXPECT_FLOAT_EQ(context_.floats.at("AcquisitionFrameRate").current, 30.0F);
+    EXPECT_FALSE(context_.booleans.at("AcquisitionFrameRateEnable"));
+    const auto restored = handle.read_parameters();
+    ASSERT_TRUE(restored);
+    EXPECT_EQ(restored.value().frame_rate, 30.0);
 }
 
 TEST_F(MvsLifecycleTest, ParameterReadFailureUsesStableBusinessAndNativeDiagnostics)

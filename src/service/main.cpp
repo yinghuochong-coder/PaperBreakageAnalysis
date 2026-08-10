@@ -1113,6 +1113,16 @@ class IpcMetricSource final : public paperbreak::monitoring::IMetricSource
              {.name = "ipc.command_queue.high_watermark",
               .value = metrics.command_queue_high_watermark,
               .unit = "count"},
+             {.name = "ipc.control_queue.depth",
+              .value = metrics.control_queue_depth,
+              .unit = "count"},
+             {.name = "ipc.control_queue.high_watermark",
+              .value = metrics.control_queue_high_watermark,
+              .unit = "count"},
+             {.name = "ipc.query_queue.depth", .value = metrics.query_queue_depth, .unit = "count"},
+             {.name = "ipc.query_queue.high_watermark",
+              .value = metrics.query_queue_high_watermark,
+              .unit = "count"},
              {.name = "ipc.publish_queue.depth",
               .value = metrics.publish_queue_depth,
               .unit = "count"},
@@ -1134,6 +1144,18 @@ class IpcMetricSource final : public paperbreak::monitoring::IMetricSource
               .unit = "milliseconds"},
              {.name = "ipc.request_duration.maximum_ms",
               .value = metrics.maximum_request_duration_ms,
+              .unit = "milliseconds"},
+             {.name = "ipc.control_request_duration.average_ms",
+              .value = metrics.average_control_request_duration_ms,
+              .unit = "milliseconds"},
+             {.name = "ipc.control_request_duration.maximum_ms",
+              .value = metrics.maximum_control_request_duration_ms,
+              .unit = "milliseconds"},
+             {.name = "ipc.query_request_duration.average_ms",
+              .value = metrics.average_query_request_duration_ms,
+              .unit = "milliseconds"},
+             {.name = "ipc.query_request_duration.maximum_ms",
+              .value = metrics.maximum_query_request_duration_ms,
               .unit = "milliseconds"}});
     }
 
@@ -2117,12 +2139,12 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
             bool event_accepted = false;
             bool nvme_accepted = false;
             const bool preview_accepted = !weak_preview.expired();
+            if (auto runtime = weak_preview.lock())
+                runtime->submit(frame, {.camera_status = "acquiring"});
             if (auto runtime = weak_event_runtime.lock())
                 event_accepted = static_cast<bool>(runtime->submit_frame(frame));
             if (auto runtime = weak_nvme_cache.lock())
                 nvme_accepted = static_cast<bool>(runtime->submit_frame(frame));
-            if (auto runtime = weak_preview.lock())
-                runtime->submit(std::move(frame), {.camera_status = "acquiring"});
             if (const auto log_runtime = weak_event_logging.lock();
                 log_runtime && log_runtime->enabled(paperbreak::logging::Level::debug))
                 static_cast<void>(log_runtime->log(

@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -181,6 +182,111 @@ class FakeCameraProvider final : public ICameraProvider
         std::unique_ptr<ICameraDevice> device = std::make_unique<FakeCameraDevice>();
         return Result<std::unique_ptr<ICameraDevice>>::success(std::move(device));
     }
+};
+
+struct CachedReadState final
+{
+    std::atomic_int capabilities_calls{};
+    std::atomic_int parameter_calls{};
+    std::atomic_bool block_reads{};
+    std::atomic_bool block_start{};
+    std::atomic_bool start_entered{};
+};
+
+class CachedReadDevice final : public ICameraDevice
+{
+  public:
+    explicit CachedReadDevice(std::shared_ptr<CachedReadState> state) : state_(std::move(state)) {}
+    [[nodiscard]] const CameraDeviceDescriptor& descriptor() const noexcept override
+    {
+        return descriptor_;
+    }
+    [[nodiscard]] Result<void> connect() override
+    {
+        return Result<void>::success();
+    }
+    [[nodiscard]] Result<void> disconnect() override
+    {
+        return Result<void>::success();
+    }
+    [[nodiscard]] Result<CameraCapabilities> capabilities() override
+    {
+        ++state_->capabilities_calls;
+        block_if_requested();
+        auto result = rich_capabilities();
+        result.maximum_payload_bytes = 4U;
+        return Result<CameraCapabilities>::success(std::move(result));
+    }
+    [[nodiscard]] Result<CameraParameterSnapshot> read_parameters() override
+    {
+        ++state_->parameter_calls;
+        block_if_requested();
+        return Result<CameraParameterSnapshot>::success(valid_parameters());
+    }
+    [[nodiscard]] Result<CameraParameterSnapshot> apply_parameters(
+        const CameraParameterSnapshot& parameters) override
+    {
+        return Result<CameraParameterSnapshot>::success(parameters);
+    }
+    [[nodiscard]] Result<void> start_acquisition() override
+    {
+        state_->start_entered.store(true, std::memory_order_release);
+        while (state_->block_start.load(std::memory_order_acquire))
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        return Result<void>::success();
+    }
+    [[nodiscard]] Result<CapturedFrameMetadata> capture_into(FrameBuffer&,
+                                                             std::chrono::milliseconds) override
+    {
+        return Result<CapturedFrameMetadata>::failure(
+            make_camera_error(CameraErrorKind::frame_timeout, "测试超时", "camera.capture"));
+    }
+    [[nodiscard]] Result<void> software_trigger() override
+    {
+        return Result<void>::success();
+    }
+    [[nodiscard]] Result<void> stop_acquisition() override
+    {
+        return Result<void>::success();
+    }
+    [[nodiscard]] Result<void> save_user_set(std::string_view) override
+    {
+        return Result<void>::success();
+    }
+    [[nodiscard]] Result<CameraParameterSnapshot> restore_defaults() override
+    {
+        return Result<CameraParameterSnapshot>::success({});
+    }
+
+  private:
+    void block_if_requested() const
+    {
+        if (state_->block_reads.load(std::memory_order_acquire))
+            std::this_thread::sleep_for(std::chrono::milliseconds{500});
+    }
+    std::shared_ptr<CachedReadState> state_;
+    CameraDeviceDescriptor descriptor_{"MockCamera", "MOCK-CACHE", "192.0.2.11", "mock0"};
+};
+
+class CachedReadProvider final : public ICameraProvider
+{
+  public:
+    explicit CachedReadProvider(std::shared_ptr<CachedReadState> state) : state_(std::move(state))
+    {
+    }
+    [[nodiscard]] Result<std::vector<CameraDeviceDescriptor>> enumerate_devices() override
+    {
+        return Result<std::vector<CameraDeviceDescriptor>>::success(
+            {{"MockCamera", "MOCK-CACHE", "192.0.2.11", "mock0"}});
+    }
+    [[nodiscard]] Result<std::unique_ptr<ICameraDevice>> create_device(std::string_view) override
+    {
+        std::unique_ptr<ICameraDevice> device = std::make_unique<CachedReadDevice>(state_);
+        return Result<std::unique_ptr<ICameraDevice>>::success(std::move(device));
+    }
+
+  private:
+    std::shared_ptr<CachedReadState> state_;
 };
 } // namespace
 
@@ -493,6 +599,70 @@ TEST(CameraControlRuntime, ControlsMockDeviceAndReadsBackActualValues)
     ASSERT_TRUE(runtime.start("CAM01"));
     ASSERT_TRUE(runtime.stop("CAM01"));
     ASSERT_TRUE(runtime.disconnect("CAM01"));
+}
+
+TEST(CameraControlRuntime, AcquiringQueriesUseCachedDeviceStateWithoutReadingDeviceNodes)
+{
+    auto state = std::make_shared<CachedReadState>();
+    auto provider = std::make_shared<CachedReadProvider>(state);
+    CameraControlRuntime runtime{provider};
+    ASSERT_TRUE(runtime.connect("CAM01", "MOCK-CACHE"));
+    EXPECT_EQ(state->capabilities_calls.load(), 1);
+    EXPECT_EQ(state->parameter_calls.load(), 1);
+    state->block_reads.store(true, std::memory_order_release);
+    state->block_start.store(true, std::memory_order_release);
+    std::atomic_bool start_succeeded{};
+    std::jthread starter{[&] {
+        start_succeeded.store(static_cast<bool>(runtime.start("CAM01")), std::memory_order_release);
+    }};
+    const auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    while (!state->start_entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < start_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    EXPECT_TRUE(state->start_entered.load(std::memory_order_acquire));
+
+    const auto started = std::chrono::steady_clock::now();
+    auto snapshot = runtime.get("CAM01", "MOCK-CACHE");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    state->block_start.store(false, std::memory_order_release);
+    starter.join();
+
+    ASSERT_TRUE(snapshot);
+    EXPECT_EQ(snapshot.value().state, CameraControlState::connected);
+    EXPECT_TRUE(snapshot.value().capabilities.has_value());
+    EXPECT_TRUE(snapshot.value().actual.has_value());
+    EXPECT_LT(elapsed, std::chrono::milliseconds{100});
+    EXPECT_EQ(state->capabilities_calls.load(), 1);
+    EXPECT_EQ(state->parameter_calls.load(), 1);
+    EXPECT_TRUE(start_succeeded.load(std::memory_order_acquire));
+    EXPECT_TRUE(runtime.start("CAM01"));
+    EXPECT_TRUE(runtime.stop("CAM01"));
+    EXPECT_TRUE(runtime.stop("CAM01"));
+}
+
+TEST(CameraControlRuntime, FrameDeliveryPreparationFailureLeavesCameraConnected)
+{
+    auto provider = paperbreak::camera::mock::MockCameraProvider::create(
+        {{.descriptor = {.model_name = "Mock",
+                         .serial_number = "MOCK-PREPARE-01",
+                         .ip_address = "127.0.0.1",
+                         .network_interface = "loopback"},
+          .width = 64U,
+          .height = 48U,
+          .frame_rate = 30.0}});
+    ASSERT_TRUE(provider);
+    std::shared_ptr<ICameraProvider> shared{std::move(provider).value()};
+    CameraControlRuntime runtime{shared, [](FrameView) {}, {.frame_pool_capacity = 0U}};
+    ASSERT_TRUE(runtime.connect("CAM01", "MOCK-PREPARE-01"));
+
+    const auto started = runtime.start("CAM01");
+
+    ASSERT_FALSE(started);
+    EXPECT_EQ(started.error().business_code, "CAMERA_CONFIG_FAILED");
+    const auto snapshot = runtime.get("CAM01", "MOCK-PREPARE-01");
+    ASSERT_TRUE(snapshot);
+    EXPECT_EQ(snapshot.value().state, CameraControlState::connected);
+    EXPECT_FALSE(snapshot.value().acquisition.has_value());
 }
 
 TEST(CameraControlRuntime, ForwardsBoundedFramesWhileAcquiringAndStopsDeterministically)

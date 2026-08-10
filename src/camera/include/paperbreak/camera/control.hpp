@@ -67,6 +67,8 @@ class CameraControlRuntime final
     struct Session;
     [[nodiscard]] Result<Session*> find(std::string_view id);
     [[nodiscard]] Result<CameraControlSnapshot> read(Session& session);
+    [[nodiscard]] Result<void> refresh_cache(Session& session);
+    [[nodiscard]] Result<void> prepare_frame_delivery(Session& session);
     [[nodiscard]] Result<void> start_frame_delivery(Session& session);
     [[nodiscard]] Result<void> stop_frame_delivery(Session& session);
     void forward_frames(Session& session, std::stop_token stop_token) noexcept;

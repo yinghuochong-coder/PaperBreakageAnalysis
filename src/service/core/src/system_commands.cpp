@@ -916,6 +916,28 @@ bool is_camera_write_command(const std::string_view command)
            command == "camera.softwareTrigger";
 }
 
+bool is_read_only_query_command(const std::string_view command) noexcept
+{
+    constexpr std::array commands{std::string_view{"uplink.getConfig"},
+                                  std::string_view{"storage.getConfig"},
+                                  std::string_view{"algorithm.getConfig"},
+                                  std::string_view{"event.getConfig"},
+                                  std::string_view{"event.list"},
+                                  std::string_view{"event.get"},
+                                  std::string_view{"event.getSummary"},
+                                  std::string_view{"event.getManifest"},
+                                  std::string_view{"camera.discover"},
+                                  std::string_view{"camera.list"},
+                                  std::string_view{"camera.getConfig"},
+                                  std::string_view{"system.getStatus"},
+                                  std::string_view{"system.getVersion"},
+                                  std::string_view{"system.getLocations"},
+                                  std::string_view{"system.getMetrics"},
+                                  std::string_view{"alarm.list"},
+                                  std::string_view{"log.tail"}};
+    return std::ranges::find(commands, command) != commands.end();
+}
+
 bool topology_restart_required(const config::ConfigSnapshot& snapshot)
 {
     return std::find(snapshot.pending_restart_paths.begin(), snapshot.pending_restart_paths.end(),
@@ -960,9 +982,7 @@ Result<ipc::CommandResponse> algorithm_configuration_response(config::ConfigRepo
 
 template <typename T> Json stepped_range_json(const camera::SteppedRange<T>& value)
 {
-    return {{"minimum", value.minimum},
-            {"maximum", value.maximum},
-            {"increment", value.increment}};
+    return {{"minimum", value.minimum}, {"maximum", value.maximum}, {"increment", value.increment}};
 }
 
 Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
@@ -978,13 +998,12 @@ Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
     if (value.capabilities && value.capabilities->roi)
     {
         const auto& roi = *value.capabilities->roi;
-        result["capabilities"]["roi"] = {
-            {"sensorWidth", roi.sensor_width},
-            {"sensorHeight", roi.sensor_height},
-            {"width", stepped_range_json(roi.width)},
-            {"height", stepped_range_json(roi.height)},
-            {"offsetX", stepped_range_json(roi.offset_x)},
-            {"offsetY", stepped_range_json(roi.offset_y)}};
+        result["capabilities"]["roi"] = {{"sensorWidth", roi.sensor_width},
+                                         {"sensorHeight", roi.sensor_height},
+                                         {"width", stepped_range_json(roi.width)},
+                                         {"height", stepped_range_json(roi.height)},
+                                         {"offsetX", stepped_range_json(roi.offset_x)},
+                                         {"offsetY", stepped_range_json(roi.offset_y)}};
     }
     if (value.actual)
     {
@@ -1421,6 +1440,14 @@ SystemCommandService::SystemCommandService(
       event_database_(std::move(event_database)), event_inspector_(std::move(event_inspector)),
       event_review_observer_(std::move(event_review_observer))
 {
+}
+
+ipc::IRequestHandler::ExecutionClass SystemCommandService::execution_class(
+    const ipc::RequestMessage& request) const noexcept
+{
+    return is_read_only_query_command(request.command)
+               ? ipc::IRequestHandler::ExecutionClass::read_only_query
+               : ipc::IRequestHandler::ExecutionClass::serial_control;
 }
 
 Result<ipc::CommandResponse> SystemCommandService::handle(const ipc::RequestMessage& request,
@@ -2510,10 +2537,12 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                     "ipc.camera.updateConfig"));
             const Json& parameters = payload.value()["parameters"];
             static constexpr std::array<std::string_view, 12U> allowed{
-                "exposureUs",    "gainDb",         "frameRate",
-                "roi",           "pixelFormat",    "triggerMode",
-                "triggerSource", "triggerDelayUs", "packetSizeBytes",
-                "interPacketDelayNs", "reverseX", "reverseY"};
+                "exposureUs",      "gainDb",
+                "frameRate",       "roi",
+                "pixelFormat",     "triggerMode",
+                "triggerSource",   "triggerDelayUs",
+                "packetSizeBytes", "interPacketDelayNs",
+                "reverseX",        "reverseY"};
             for (auto it = parameters.begin(); it != parameters.end(); ++it)
                 if (std::find(allowed.begin(), allowed.end(), it.key()) == allowed.end())
                     return Result<ipc::CommandResponse>::failure(command_error(

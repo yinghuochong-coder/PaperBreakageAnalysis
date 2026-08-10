@@ -3,12 +3,15 @@
 #include "paperbreak/common/result.hpp"
 #include "paperbreak/ipc/client.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+
+class QTimer;
 
 namespace paperbreak::console
 {
@@ -88,6 +91,8 @@ struct CameraOperationResult final
     bool dispatched{};
     bool applied{};
     bool restart_required{};
+    bool outcome_unknown{};
+    bool confirmed_by_snapshot{};
     std::string message;
 };
 
@@ -108,7 +113,9 @@ using CameraClientObserver = std::function<void(const CameraClientSnapshot&)>;
 class CameraClient final
 {
   public:
-    explicit CameraClient(CameraClientObserver observer = {}, ipc::IpcClientOptions options = {});
+    explicit CameraClient(
+        CameraClientObserver observer = {}, ipc::IpcClientOptions options = {},
+        std::chrono::milliseconds control_operation_timeout = std::chrono::seconds{30});
     ~CameraClient();
     CameraClient(const CameraClient&) = delete;
     CameraClient& operator=(const CameraClient&) = delete;
@@ -135,6 +142,8 @@ class CameraClient final
     CameraClientObserver observer_;
     CameraClientSnapshot snapshot_;
     std::unique_ptr<ipc::IpcClient> client_;
+    std::unique_ptr<QTimer> reconciliation_timer_;
+    std::chrono::milliseconds control_operation_timeout_;
     std::optional<ipc::ClientRequestHandle> list_request_;
     std::optional<ipc::ClientRequestHandle> operation_request_;
 };

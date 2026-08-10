@@ -37,6 +37,15 @@ class IRequestHandler
 {
   public:
     virtual ~IRequestHandler() = default;
+    enum class ExecutionClass
+    {
+        serial_control,
+        read_only_query,
+    };
+    [[nodiscard]] virtual ExecutionClass execution_class(const RequestMessage&) const noexcept
+    {
+        return ExecutionClass::serial_control;
+    }
     [[nodiscard]] virtual Result<CommandResponse> handle(const RequestMessage& request,
                                                          const PeerIdentity& peer,
                                                          std::stop_token stop_token) = 0;
@@ -55,7 +64,8 @@ struct IpcServerOptions final
     std::size_t maximum_connections{8U};
     std::size_t maximum_in_flight_per_connection{16U};
     std::size_t recent_request_ids_per_connection{1024U};
-    std::size_t command_queue_capacity{640U};
+    std::size_t control_queue_capacity{128U};
+    std::size_t query_queue_capacity{512U};
     std::size_t outbound_message_capacity{128U};
     std::size_t push_queue_capacity{32U};
     std::size_t outbound_byte_capacity{32U * 1024U * 1024U};
@@ -73,6 +83,10 @@ struct IpcServerMetrics final
     std::uint64_t in_flight_requests{};
     std::uint64_t command_queue_depth{};
     std::uint64_t command_queue_high_watermark{};
+    std::uint64_t control_queue_depth{};
+    std::uint64_t control_queue_high_watermark{};
+    std::uint64_t query_queue_depth{};
+    std::uint64_t query_queue_high_watermark{};
     std::uint64_t publish_queue_depth{};
     std::uint64_t publish_queue_high_watermark{};
     std::uint64_t outbound_messages{};
@@ -83,6 +97,10 @@ struct IpcServerMetrics final
     std::uint64_t pushes_dropped_total{};
     double average_request_duration_ms{};
     double maximum_request_duration_ms{};
+    double average_control_request_duration_ms{};
+    double maximum_control_request_duration_ms{};
+    double average_query_request_duration_ms{};
+    double maximum_query_request_duration_ms{};
 };
 
 class IpcServer final
