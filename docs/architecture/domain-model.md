@@ -112,6 +112,7 @@ EVT-019870f2-6c80-7a31-9b52-6e3b9ca1d88f
 | `persistenceState` | Collecting/Encoding/Queued/Writing/Committed/Incomplete | 事件证据收集、编码、排队和写入；只有 `Committed` 有可读制品 |
 | `reviewState` | Unreviewed/Reviewed | 人工复核是否已完成；结论单独存入 `reviewDecision` |
 | `uploadState` | NotQueued/Queued/InProgress/Succeeded/Failed | 汇总显示；真实工作项在 `UploadTask` |
+| `integrityState` | Unverified/Verified/Failed | 制品内容是否完成按需校验；不替代判定、持久化或复核状态 |
 
 任何接口必须注明返回的是哪个状态维度，不能只返回含糊的 `status`。
 
@@ -119,6 +120,12 @@ EVT-019870f2-6c80-7a31-9b52-6e3b9ca1d88f
 `decisionState`，也不改写不可变 manifest。兼容字段 `eventState` 暂时等同于
 `decisionState`，新客户端不得依赖它。合并事件的算法聚合优先级固定为
 `Confirmed > Candidate > Timeout > Rejected`；一旦任一来源确认，规范事件保持确认。
+
+`Committed` 只表示文件关闭且目录已原子发布到操作系统命名空间，不表示突然断电后可恢复。
+新提交和数据库迁移事件默认为 `Unverified`，允许列表和结构检查。详情、导出或在线上传完整
+校验成功后为 `Verified`；失败后保持 `decisionState`、`reviewState` 和
+`persistenceState=Committed`，同时令 `storageState=Damaged`、`artifactsAvailable=false`、
+`integrityState=Failed`，并禁止内容访问和上传，文件不删除。
 
 ### 3.3 候选合并
 
@@ -138,6 +145,8 @@ EVT-019870f2-6c80-7a31-9b52-6e3b9ca1d88f
 - 任务至少区分 `Queued`、`InProgress`、`RetryWait`、`Succeeded`、`PermanentFailed`；
 - `retryable=true` 只表示允许受限重试，不允许无界重试；
 - 网络离线时任务保持持久状态，本地检测和事件保存继续。
+- 上传执行器必须先确认连接；离线不得读取或散列源文件。在线单遍读取同时计算整文件和分块
+  SHA，只发送服务端缺失块；源摘要变化转人工处理且不得调用完成接口。
 
 ## 4. 时间语义
 
@@ -165,7 +174,9 @@ EVT-019870f2-6c80-7a31-9b52-6e3b9ca1d88f
 - 对应墙上时间，供清单、数据库和 UI 使用；
 - `clockQuality` 和发生过的时间跳变摘要。
 
-单调时间只在拥有它的进程生命周期内有效，不写入可供下次启动直接比较的协议或持久格式。崩溃恢复根据已持久化帧索引、墙上时间、序号和恢复状态重建事实，不拿上次进程的 `steady_clock` 数值继续计时。
+单调时间只在拥有它的进程生命周期内有效，不写入可供下次启动直接比较的协议或持久格式。
+NVMe 滚动缓存的索引和租约也只在当前 session 有效；新进程不扫描或恢复旧 session，更不会拿
+上次进程的 `steady_clock` 数值继续计时。
 
 ### 4.3 外部时间格式和时区
 
@@ -276,6 +287,8 @@ JSON、IPC、事件清单、审计导出和网络协议的规范输出统一为 
 8. 配置 revision 与所有 schema/协议版本独立；
 9. 已提交事件不原地改写；
 10. 上传重试不创建重复事件或新的内容身份。
+11. 完整性失败不改写算法判定、人工复核和已提交事实，但禁止损坏制品继续流出。
+12. 滚动缓存 session 之间互不恢复、互不覆盖、互不自动清理。
 
 ## 7. 需求追踪
 

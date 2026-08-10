@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 2,
+  "decision": "ADR-017",
+  "hardwareValidationStatus": "not-validated",
+  "format": {
+    "name": "PaperBreak buffered raw block",
+    "formatVersion": 2,
+    "byteOrder": "little-endian",
+    "blockDurationMs": 1000,
+    "pageAlignmentBytes": 4096,
+    "headerBytes": 4096,
+    "indexEntryBytes": 96,
+    "footerBytes": 4096,
+    "compression": "none",
+    "headerMagicAsciiEscaped": "PBNVME2\\0",
+    "footerMagicAscii": "PBCOMMIT",
+    "commitMarkerAsciiEscaped": "COMMIT2\\0"
+  },
+  "integrity": {
+    "contentDigest": "SHA-256",
+    "contentDigestProvider": "Windows CNG bcrypt",
+    "headerCrc32c": true,
+    "indexEntryCrc32c": true,
+    "indexRegionCrc32c": true,
+    "footerCrc32c": true,
+    "indexPayloadCrc32cReservedZero": true,
+    "dataRegionCrc32cReservedZero": true,
+    "crc32cRuntimeDispatch": [
+      "SSE4.2",
+      "table-fallback"
+    ]
+  },
+  "writePolicy": {
+    "mode": "buffered",
+    "writeThrough": false,
+    "flushFileBuffers": false,
+    "publish": "close-then-same-volume-atomic-rename-no-overwrite",
+    "powerLossDurable": false,
+    "verification": "upload-or-on-demand"
+  },
+  "rollingCachePolicy": {
+    "root": "cacheRoot/sessions/<session-id>",
+    "generationStartsAt": 1,
+    "crossRestartRecovery": false,
+    "oldSessionEnumeration": false,
+    "oldSessionAutomaticCleanup": false,
+    "maximumCacheStorageGiBScope": "current-session"
+  },
+  "performanceAcceptance": {
+    "workload": "1624x1240 Mono8, 911 frames, approximately 1.709 GiB",
+    "build": "Release",
+    "minimumCommitMiBps": 100,
+    "maximumFreezeToCommittedSeconds": 18,
+    "excludesPostWindowAcquisition": true,
+    "targetDrive": "WD Green SN350",
+    "status": "requires-local-measurement"
+  }
+}

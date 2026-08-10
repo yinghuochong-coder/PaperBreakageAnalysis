@@ -22,7 +22,8 @@
 namespace paperbreak::storage
 {
 
-inline constexpr std::uint32_t event_manifest_schema_version = 2U;
+inline constexpr std::uint32_t event_manifest_schema_version = 3U;
+inline constexpr std::uint32_t event_manifest_legacy_schema_version = 2U;
 inline constexpr std::size_t event_persist_default_capacity = 8U;
 inline constexpr std::size_t event_raw_block_maximum_frames = 256U;
 inline constexpr std::chrono::milliseconds event_raw_block_duration{1000};
@@ -77,6 +78,18 @@ enum class EventPathKind
     other,
 };
 
+struct BufferedFileWriteResult final
+{
+    std::uint64_t bytes_written{};
+    std::string sha256;
+};
+
+struct HashedFileContents final
+{
+    std::vector<std::byte> contents;
+    std::string sha256;
+};
+
 /// Injectable, bounded file-system boundary used by event transactions and recovery tests.
 class IEventFileSystem
 {
@@ -86,24 +99,33 @@ class IEventFileSystem
     [[nodiscard]] virtual Result<void> create_directories(const std::filesystem::path& path) = 0;
     [[nodiscard]] virtual Result<void> create_directory_exclusive(
         const std::filesystem::path& path) = 0;
-    [[nodiscard]] virtual Result<void> write_new_file_durable(
-        const std::filesystem::path& path, std::span<const std::byte> contents) = 0;
-    /// Persists a PBNVME1 block in two flush phases and atomically publishes the final name.
-    /// The last eight bytes are the commit marker and are written only after the body flush.
-    [[nodiscard]] virtual Result<void> write_new_raw_block_durable(
-        const std::filesystem::path& path, std::span<const std::byte> contents) = 0;
+    /// Writes a new file through the ordinary Windows cache and hashes each successfully written
+    /// byte exactly once. No power-loss durability flush is requested.
+    [[nodiscard]] virtual Result<BufferedFileWriteResult> write_new_file_buffered(
+        const std::filesystem::path& path, std::span<const std::byte> contents,
+        std::stop_token stop_token = {}) = 0;
+    /// Writes a complete PBNVME2 block to a unique temporary file, closes it, then publishes the
+    /// final name with a same-directory, non-replacing atomic rename.
+    [[nodiscard]] virtual Result<BufferedFileWriteResult> write_new_raw_block_buffered(
+        const std::filesystem::path& path, std::span<const std::byte> contents,
+        std::stop_token stop_token = {}) = 0;
     [[nodiscard]] virtual Result<std::vector<std::byte>> read_file_bounded(
         const std::filesystem::path& path, std::size_t maximum_bytes) = 0;
+    /// Reads one file once and computes SHA-256 from the same successfully read byte stream.
+    [[nodiscard]] virtual Result<HashedFileContents> read_file_bounded_hashed(
+        const std::filesystem::path& path, std::size_t maximum_bytes) = 0;
+    [[nodiscard]] virtual Result<std::uint64_t> file_size(const std::filesystem::path& path) = 0;
     [[nodiscard]] virtual Result<EventPathKind> path_kind(const std::filesystem::path& path) = 0;
     [[nodiscard]] virtual Result<std::vector<std::filesystem::path>> list_directories_bounded(
         const std::filesystem::path& path, std::size_t maximum_entries) = 0;
     /// Moves a directory without replacing the destination. Implementations must reject
-    /// cross-volume moves and make the rename durable to the extent supported by the platform.
+    /// cross-volume moves. The rename publishes into the OS namespace but is not power-loss
+    /// durable.
     [[nodiscard]] virtual Result<void> move_directory_atomically(
         const std::filesystem::path& source, const std::filesystem::path& destination) = 0;
 };
 
-/// Creates the Windows implementation using CREATE_NEW, FlushFileBuffers, and MoveFileExW.
+/// Creates the Windows implementation using CREATE_NEW, CNG SHA-256, and ordinary MoveFileExW.
 [[nodiscard]] std::shared_ptr<IEventFileSystem> make_windows_event_file_system();
 
 struct EventStoreOptions final
@@ -203,8 +225,8 @@ class EventTransactionWriter final : public IEventTransactionWriter
                                                           std::stop_token stop_token) override;
     [[nodiscard]] Result<EventRecoveryReport> recover_pending();
 
-    /// Reads and verifies an already committed directory. Internal transaction/quarantine paths
-    /// and paths outside the configured root are rejected.
+    /// Reads and structurally checks an already committed directory. It validates manifest shape,
+    /// path constraints, file presence, and declared lengths without reading artifact contents.
     [[nodiscard]] Result<std::string> verify_committed_manifest(
         const std::filesystem::path& committed_directory) const;
 

@@ -151,4 +151,19 @@ if(NOT evidence_count EQUAL 5)
     message(FATAL_ERROR "M7-01 must keep all five target deployment evidence groups")
 endif()
 
-message(STATUS "M7-01 NVMe v1 format, capacity, and bandwidth design is internally consistent")
+set(buffered_design_path "${SOURCE_DIR}/docs/validation/m7-01/nvme-block-format-v2.json")
+file(READ "${buffered_design_path}" buffered_design)
+string(JSON buffered_schema GET "${buffered_design}" schemaVersion)
+string(JSON buffered_version GET "${buffered_design}" format formatVersion)
+string(JSON buffered_magic GET "${buffered_design}" format headerMagicAsciiEscaped)
+string(JSON buffered_flush GET "${buffered_design}" writePolicy flushFileBuffers)
+string(JSON buffered_recovery GET "${buffered_design}" rollingCachePolicy crossRestartRecovery)
+string(JSON buffered_limit_scope GET "${buffered_design}" rollingCachePolicy maximumCacheStorageGiBScope)
+string(JSON buffered_minimum_mibps GET "${buffered_design}" performanceAcceptance minimumCommitMiBps)
+if(NOT buffered_schema EQUAL 2 OR NOT buffered_version EQUAL 2 OR
+   NOT buffered_magic STREQUAL "PBNVME2\\0" OR buffered_flush OR buffered_recovery OR
+   NOT buffered_limit_scope STREQUAL "current-session" OR NOT buffered_minimum_mibps EQUAL 100)
+    message(FATAL_ERROR "ADR-017 NVMe v2 buffered/session contract is inconsistent")
+endif()
+
+message(STATUS "M7-01 NVMe v1 compatibility and ADR-017 v2 buffered design are internally consistent")

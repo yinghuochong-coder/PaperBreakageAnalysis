@@ -564,9 +564,18 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
     EXPECT_EQ(listed["events"][0]["decisionState"], "Candidate");
     EXPECT_EQ(listed["events"][0]["persistenceState"], "Committed");
     EXPECT_EQ(listed["events"][0]["reviewState"], "Unreviewed");
+    EXPECT_EQ(listed["events"][0]["integrityState"], "Unverified");
+    EXPECT_TRUE(listed["events"][0]["integrityCheckedAtUtcMs"].is_null());
     EXPECT_TRUE(listed["events"][0]["artifactsAvailable"].get<bool>());
     EXPECT_EQ(listed["events"][0]["reviewRevision"], 1U);
     EXPECT_TRUE(listed["events"][0]["thumbnailAvailable"].get<bool>());
+
+    auto structural_manifest = commands.handle(
+        fixture.request("event.getManifest", Json{{"eventId", event_id}}.dump()), reader, {});
+    ASSERT_TRUE(structural_manifest);
+    const auto structural_header = Json::parse(structural_manifest.value().payload_json);
+    EXPECT_FALSE(structural_header["verified"].get<bool>());
+    EXPECT_EQ(structural_header["integrityState"], "Unverified");
 
     auto detail = commands.handle(fixture.request("event.get", Json{{"eventId", event_id}}.dump()),
                                   reader, {});
@@ -575,6 +584,7 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
     EXPECT_GT(detail_json["manifestBytes"].get<std::size_t>(), 0U);
     EXPECT_TRUE(detail_json["keyFramesTraceable"].get<bool>());
     EXPECT_EQ(detail_json["thumbnailBytes"], detail.value().binary.size());
+    EXPECT_EQ(detail_json["event"]["integrityState"], "Verified");
     EXPECT_FALSE(detail.value().binary.empty());
     auto manifest = commands.handle(
         fixture.request("event.getManifest", Json{{"eventId", event_id}}.dump()), reader, {});

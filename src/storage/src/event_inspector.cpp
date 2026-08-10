@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -118,10 +119,15 @@ Result<std::vector<InspectedRawFrame>> raw_block_frames(const Json& value,
             frame_count > event_raw_block_maximum_frames || contents.size() < nvme_page_bytes * 3U)
             throw std::invalid_argument{"value"};
         const auto bytes = std::span<const std::byte>{contents};
-        if (std::string{reinterpret_cast<const char*>(bytes.data()), 7U} != "PBNVME1" ||
-            std::string{reinterpret_cast<const char*>(bytes.data() + bytes.size() - 8U), 7U} !=
-                "COMMIT1" ||
-            little_value<std::uint16_t>(bytes, 8U) != nvme_format_version ||
+        const auto magic = std::string{reinterpret_cast<const char*>(bytes.data()), 7U};
+        const bool legacy = magic == "PBNVME1";
+        const bool buffered = magic == "PBNVME2";
+        const auto marker =
+            std::string{reinterpret_cast<const char*>(bytes.data() + bytes.size() - 8U), 7U};
+        if ((!legacy && !buffered) || (legacy && marker != "COMMIT1") ||
+            (buffered && marker != "COMMIT2") ||
+            little_value<std::uint16_t>(bytes, 8U) !=
+                (legacy ? nvme_legacy_format_version : nvme_format_version) ||
             little_value<std::uint16_t>(bytes, 10U) != nvme_page_bytes ||
             little_value<std::uint32_t>(bytes, 84U) < frame_count ||
             little_value<std::uint32_t>(bytes, bytes.size() - nvme_page_bytes + 12U) != frame_count)
@@ -158,9 +164,14 @@ Result<std::vector<InspectedRawFrame>> raw_block_frames(const Json& value,
                 throw std::invalid_argument{"index"};
             const auto frame_bytes =
                 bytes.subspan(static_cast<std::size_t>(data_offset), data_size);
-            if (crc32c(frame_bytes) != little_value<std::uint32_t>(entry, 76U))
-                throw std::invalid_argument{"frame-crc"};
-            data_crc = crc32c(frame_bytes, data_crc);
+            if (legacy)
+            {
+                if (crc32c(frame_bytes) != little_value<std::uint32_t>(entry, 76U))
+                    throw std::invalid_argument{"frame-crc"};
+                data_crc = crc32c(frame_bytes, data_crc);
+            }
+            else if (little_value<std::uint32_t>(entry, 76U) != 0U)
+                throw std::invalid_argument{"reserved-frame-crc"};
             const auto wall_ns = little_value<std::int64_t>(entry, 24U);
             result.push_back({.relative_path = path,
                               .camera_id = camera_id,
@@ -168,7 +179,8 @@ Result<std::vector<InspectedRawFrame>> raw_block_frames(const Json& value,
                               .sequence_number = little_value<std::uint64_t>(entry, 0U),
                               .wall_clock_time_utc_ms = wall_ns / 1000000});
         }
-        if (data_crc != value.at("dataCrc32c").get<std::uint32_t>() ||
+        if ((legacy && data_crc != value.at("dataCrc32c").get<std::uint32_t>()) ||
+            (buffered && value.at("dataCrc32c").get<std::uint32_t>() != 0U) ||
             result.front().sequence_number !=
                 value.at("firstSequenceNumber").get<std::uint64_t>() ||
             result.back().sequence_number != value.at("lastSequenceNumber").get<std::uint64_t>())
@@ -355,6 +367,9 @@ std::vector<std::byte> text_bytes(const std::string& value)
 
 struct EventInspector::Impl final
 {
+    using FileSink =
+        std::function<Result<void>(const std::filesystem::path&, std::span<const std::byte>)>;
+
     EventInspectorOptions options;
     std::shared_ptr<IEventFileSystem> file_system;
 
@@ -374,6 +389,36 @@ struct EventInspector::Impl final
             return Result<std::string>::failure(std::move(writer).error());
         return writer.value()->verify_committed_manifest(options.event_root / relative);
     }
+
+    Result<HashedFileContents> read_verified_file(const Json& manifest,
+                                                  const std::filesystem::path& directory,
+                                                  const std::filesystem::path& relative) const
+    {
+        const auto key = relative.generic_string();
+        if (!safe_relative_path(relative) || !manifest.contains("fileChecksums") ||
+            !manifest["fileChecksums"].contains(key) ||
+            !manifest["fileChecksums"][key].is_string() || !manifest.contains("fileSizes") ||
+            !manifest["fileSizes"].contains(key) ||
+            !manifest["fileSizes"][key].is_number_unsigned())
+            return Result<HashedFileContents>::failure(
+                inspection_error("EVENT_RECOVERY_FAILED", Severity::critical,
+                                 "事件文件校验清单无效", "event.inspect.fileList"));
+        auto read =
+            file_system->read_file_bounded_hashed(directory / relative, options.maximum_file_bytes);
+        if (!read)
+            return read;
+        const auto expected_size = manifest["fileSizes"][key].get<std::uint64_t>();
+        const auto expected_hash = manifest["fileChecksums"][key].get<std::string>();
+        if (read.value().contents.size() != expected_size ||
+            expected_hash != "sha256:" + read.value().sha256)
+            return Result<HashedFileContents>::failure(
+                inspection_error("EVENT_INTEGRITY_FAILED", Severity::critical,
+                                 "事件文件长度或 SHA-256 不匹配", "event.inspect.integrity"));
+        return read;
+    }
+
+    [[nodiscard]] Result<EventInspectionReport> load_event(
+        const std::filesystem::path& committed_relative_directory, const FileSink& sink) const;
 };
 
 Result<std::unique_ptr<EventInspector>> EventInspector::create(
@@ -398,24 +443,24 @@ EventInspector::EventInspector(ConstructionKey, EventInspectorOptions options,
 
 EventInspector::~EventInspector() = default;
 
-Result<EventInspectionReport> EventInspector::inspect(
-    const std::filesystem::path& committed_relative_directory) const
+Result<EventInspectionReport> EventInspector::Impl::load_event(
+    const std::filesystem::path& committed_relative_directory, const FileSink& sink) const
 {
-    auto manifest_text = impl_->verified_manifest(committed_relative_directory);
+    auto manifest_text = verified_manifest(committed_relative_directory);
     if (!manifest_text)
         return Result<EventInspectionReport>::failure(std::move(manifest_text).error());
     auto manifest = parse_manifest(manifest_text.value());
     if (!manifest)
         return Result<EventInspectionReport>::failure(std::move(manifest).error());
     if (manifest.value()["rawBlocks"].size() + manifest.value()["keyFrames"].size() + 1U >
-        impl_->options.maximum_files)
+        options.maximum_files)
         return Result<EventInspectionReport>::failure(
             inspection_error("EVENT_RECOVERY_FAILED", Severity::critical, "事件文件数超过检查上限",
                              "event.inspect.files"));
 
     EventInspectionReport report{.event_id = manifest.value()["eventId"].get<std::string>(),
                                  .committed_directory =
-                                     impl_->options.event_root / committed_relative_directory,
+                                     options.event_root / committed_relative_directory,
                                  .manifest_json = manifest_text.value(),
                                  .key_frames_traceable = true};
     std::map<std::pair<std::string, std::uint64_t>, std::uint64_t> raw_index;
@@ -423,11 +468,13 @@ Result<EventInspectionReport> EventInspector::inspect(
     for (const auto& value : manifest.value()["rawBlocks"])
     {
         const auto relative = std::filesystem::path{value.at("path").get<std::string>()};
-        auto contents = impl_->file_system->read_file_bounded(report.committed_directory / relative,
-                                                              impl_->options.maximum_file_bytes);
+        auto contents = read_verified_file(manifest.value(), report.committed_directory, relative);
         if (!contents)
             return Result<EventInspectionReport>::failure(std::move(contents).error());
-        auto decoded = raw_block_frames(value, std::move(contents).value());
+        auto accepted = sink(relative, contents.value().contents);
+        if (!accepted)
+            return Result<EventInspectionReport>::failure(std::move(accepted).error());
+        auto decoded = raw_block_frames(value, std::move(contents).value().contents);
         if (!decoded)
             return Result<EventInspectionReport>::failure(std::move(decoded).error());
         for (auto& raw : decoded.value())
@@ -460,57 +507,63 @@ Result<EventInspectionReport> EventInspector::inspect(
         const auto raw = raw_index.find({key.value().camera_id, key.value().sequence_number});
         if (raw == raw_index.end() || raw->second != key.value().camera_frame_number)
             report.key_frames_traceable = false;
+        auto contents = read_verified_file(manifest.value(), report.committed_directory,
+                                           key.value().relative_path);
+        if (!contents)
+            return Result<EventInspectionReport>::failure(std::move(contents).error());
+        auto accepted = sink(key.value().relative_path, contents.value().contents);
+        if (!accepted)
+            return Result<EventInspectionReport>::failure(std::move(accepted).error());
+        if (report.thumbnail_jpeg.empty())
+            report.thumbnail_jpeg = contents.value().contents;
         report.key_frames.push_back(std::move(key).value());
     }
     if (!report.key_frames_traceable)
         return Result<EventInspectionReport>::failure(
             inspection_error("EVENT_RECOVERY_FAILED", Severity::critical, "关键帧无法追溯到原始帧",
                              "event.inspect.trace"));
-    if (!report.key_frames.empty())
-    {
-        auto thumbnail = impl_->file_system->read_file_bounded(
-            report.committed_directory / report.key_frames.front().relative_path,
-            impl_->options.maximum_file_bytes);
-        if (!thumbnail)
-            return Result<EventInspectionReport>::failure(std::move(thumbnail).error());
-        report.thumbnail_jpeg = std::move(thumbnail).value();
-    }
+    auto event_metadata =
+        read_verified_file(manifest.value(), report.committed_directory, "event.json");
+    if (!event_metadata)
+        return Result<EventInspectionReport>::failure(std::move(event_metadata).error());
+    auto accepted = sink("event.json", event_metadata.value().contents);
+    if (!accepted)
+        return Result<EventInspectionReport>::failure(std::move(accepted).error());
     return Result<EventInspectionReport>::success(std::move(report));
+}
+
+Result<EventInspectionReport> EventInspector::inspect(
+    const std::filesystem::path& committed_relative_directory) const
+{
+    return impl_->load_event(committed_relative_directory,
+                             [](const std::filesystem::path&, const std::span<const std::byte>) {
+                                 return Result<void>::success();
+                             });
+}
+
+Result<std::string> EventInspector::get_manifest(
+    const std::filesystem::path& committed_relative_directory) const
+{
+    return impl_->verified_manifest(committed_relative_directory);
 }
 
 Result<EventExportArchive> EventInspector::export_zip(
     const std::filesystem::path& committed_relative_directory) const
 {
-    auto inspected = inspect(committed_relative_directory);
+    std::vector<ArchiveEntry> entries;
+    auto inspected = impl_->load_event(
+        committed_relative_directory, [&entries](const std::filesystem::path& relative,
+                                                 const std::span<const std::byte> contents) {
+            entries.push_back({.name = relative.generic_string(),
+                               .contents = {contents.begin(), contents.end()}});
+            return Result<void>::success();
+        });
     if (!inspected)
         return Result<EventExportArchive>::failure(std::move(inspected).error());
-    std::vector<std::filesystem::path> ordered_paths{std::filesystem::path{"event.json"}};
-    std::set<std::filesystem::path> seen_paths{ordered_paths.front()};
-    for (const auto& frame : inspected.value().raw_frames)
-    {
-        if (seen_paths.insert(frame.relative_path).second)
-            ordered_paths.push_back(frame.relative_path);
-    }
-    for (const auto& frame : inspected.value().key_frames)
-    {
-        if (seen_paths.insert(frame.relative_path).second)
-            ordered_paths.push_back(frame.relative_path);
-    }
-    if (ordered_paths.size() + 1U > impl_->options.maximum_files)
+    if (entries.size() + 1U > impl_->options.maximum_files)
         return Result<EventExportArchive>::failure(
             inspection_error("EVENT_EXPORT_TOO_LARGE", Severity::error,
                              "事件导出文件数超过固定上限", "event.export.files"));
-    std::vector<ArchiveEntry> entries;
-    entries.reserve(ordered_paths.size() + 1U);
-    for (const auto& relative : ordered_paths)
-    {
-        auto bytes = impl_->file_system->read_file_bounded(
-            inspected.value().committed_directory / relative, impl_->options.maximum_file_bytes);
-        if (!bytes)
-            return Result<EventExportArchive>::failure(std::move(bytes).error());
-        entries.push_back(
-            {.name = relative.generic_string(), .contents = std::move(bytes).value()});
-    }
     entries.push_back(
         {.name = "manifest.json", .contents = text_bytes(inspected.value().manifest_json)});
     auto archive = make_zip(entries, impl_->options.maximum_export_bytes);
@@ -532,29 +585,6 @@ Result<EventExportFile> EventInspector::export_zip_file(
         return Result<EventExportFile>::failure(
             inspection_error("IPC_REQUEST_INVALID", Severity::error, "事件导出暂存目标无效",
                              "event.export.file.path"));
-    auto inspected = inspect(committed_relative_directory);
-    if (!inspected)
-        return Result<EventExportFile>::failure(std::move(inspected).error());
-
-    std::vector<std::filesystem::path> ordered_paths{std::filesystem::path{"event.json"}};
-    std::set<std::filesystem::path> seen_paths{ordered_paths.front()};
-    for (const auto& frame : inspected.value().raw_frames)
-    {
-        if (seen_paths.insert(frame.relative_path).second)
-            ordered_paths.push_back(frame.relative_path);
-    }
-    for (const auto& frame : inspected.value().key_frames)
-    {
-        if (seen_paths.insert(frame.relative_path).second)
-            ordered_paths.push_back(frame.relative_path);
-    }
-    ordered_paths.push_back(std::filesystem::path{"manifest.json"});
-    if (ordered_paths.size() > impl_->options.maximum_files ||
-        ordered_paths.size() > (std::numeric_limits<std::uint16_t>::max)())
-        return Result<EventExportFile>::failure(
-            inspection_error("EVENT_EXPORT_TOO_LARGE", Severity::error,
-                             "事件导出文件数超过 ZIP 上限", "event.export.file.entries"));
-
     std::error_code file_error;
     if (std::filesystem::exists(destination, file_error) || file_error)
         return Result<EventExportFile>::failure(
@@ -580,7 +610,7 @@ Result<EventExportFile> EventInspector::export_zip_file(
         std::uint64_t offset{};
     };
     std::vector<CentralEntry> central;
-    central.reserve(ordered_paths.size());
+    central.reserve(std::min<std::size_t>(impl_->options.maximum_files, 1024U));
     std::ofstream output{partial, std::ios::binary | std::ios::out};
     std::uint64_t written{};
     const auto fail = [&](std::string message, std::string operation) {
@@ -603,28 +633,14 @@ Result<EventExportFile> EventInspector::export_zip_file(
         written += bytes.size();
         return true;
     };
-    for (const auto& relative : ordered_paths)
-    {
-        std::vector<std::byte> contents;
-        if (relative == "manifest.json")
-            contents = text_bytes(inspected.value().manifest_json);
-        else
-        {
-            auto read = impl_->file_system->read_file_bounded(
-                inspected.value().committed_directory / relative,
-                impl_->options.maximum_file_bytes);
-            if (!read)
-            {
-                output.close();
-                std::filesystem::remove(partial, file_error);
-                return Result<EventExportFile>::failure(std::move(read).error());
-            }
-            contents = std::move(read).value();
-        }
+    const auto write_entry = [&](const std::filesystem::path& relative,
+                                 const std::span<const std::byte> contents) -> Result<void> {
         const auto name = relative.generic_string();
         if (name.empty() || name.size() > (std::numeric_limits<std::uint16_t>::max)() ||
             contents.size() > (std::numeric_limits<std::uint32_t>::max)())
-            return fail("事件导出条目超过 ZIP 单文件上限", "event.export.file.entry");
+            return Result<void>::failure(inspection_error("EVENT_EXPORT_TOO_LARGE", Severity::error,
+                                                          "事件导出条目超过 ZIP 单文件上限",
+                                                          "event.export.file.entry"));
         const auto checksum = crc32(contents);
         const auto size = static_cast<std::uint32_t>(contents.size());
         central.push_back({.name = name, .checksum = checksum, .size = size, .offset = written});
@@ -643,8 +659,29 @@ Result<EventExportFile> EventInspector::export_zip_file(
         append_u16(header, 0U);
         append_bytes(header, name);
         if (!write_bytes(header) || !write_bytes(contents))
-            return fail("事件导出写入失败或超过固定上限", "event.export.file.write");
+            return Result<void>::failure(inspection_error("EVENT_EXPORT_FAILED", Severity::error,
+                                                          "事件导出写入失败或超过固定上限",
+                                                          "event.export.file.write"));
+        return Result<void>::success();
+    };
+    auto inspected = impl_->load_event(committed_relative_directory, write_entry);
+    if (!inspected)
+    {
+        output.close();
+        std::filesystem::remove(partial, file_error);
+        return Result<EventExportFile>::failure(std::move(inspected).error());
     }
+    const auto manifest_bytes = text_bytes(inspected.value().manifest_json);
+    auto manifest_written = write_entry("manifest.json", manifest_bytes);
+    if (!manifest_written)
+    {
+        output.close();
+        std::filesystem::remove(partial, file_error);
+        return Result<EventExportFile>::failure(std::move(manifest_written).error());
+    }
+    if (central.size() > impl_->options.maximum_files ||
+        central.size() > (std::numeric_limits<std::uint16_t>::max)())
+        return fail("事件导出文件数超过 ZIP 上限", "event.export.file.entries");
 
     const auto central_offset = written;
     for (const auto& item : central)
@@ -723,7 +760,7 @@ Result<EventExportFile> EventInspector::export_zip_file(
         return fail("事件导出暂存提交失败", "event.export.file.commit");
     return Result<EventExportFile>::success({.event_id = inspected.value().event_id,
                                              .file_name = inspected.value().event_id + ".zip",
-                                             .source_file_count = ordered_paths.size(),
+                                             .source_file_count = central.size(),
                                              .size_bytes = written,
                                              .path = destination});
 }

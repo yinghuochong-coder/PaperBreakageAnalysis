@@ -1243,22 +1243,6 @@ class EventMetricSource final : public paperbreak::monitoring::IMetricSource
               .value = cache.rejected_blocks,
               .unit = "count",
               .available = nvme != nullptr},
-             {.name = "storage.nvme.recovery.scanned_files",
-              .value = static_cast<std::uint64_t>(cache.recovery_scanned_files),
-              .unit = "count",
-              .available = nvme != nullptr},
-             {.name = "storage.nvme.recovery.accepted_blocks",
-              .value = static_cast<std::uint64_t>(cache.recovery_accepted_blocks),
-              .unit = "count",
-              .available = nvme != nullptr},
-             {.name = "storage.nvme.recovery.repaired_blocks",
-              .value = static_cast<std::uint64_t>(cache.recovery_repaired_blocks),
-              .unit = "count",
-              .available = nvme != nullptr},
-             {.name = "storage.nvme.recovery.quarantined_blocks",
-              .value = static_cast<std::uint64_t>(cache.recovery_quarantined_blocks),
-              .unit = "count",
-              .available = nvme != nullptr},
              {.name = "storage.nvme.indexed_blocks",
               .value = static_cast<std::uint64_t>(cache.indexed_blocks),
               .unit = "count",
@@ -1919,7 +1903,16 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
         auto scheduler_result = paperbreak::uplink::PersistentUploadScheduler::create(
             event_database,
             {.register_thread = service_thread_registrar,
-             .diagnostics = debug_diagnostics(paperbreak::logging::Category::uplink)},
+             .diagnostics = debug_diagnostics(paperbreak::logging::Category::uplink),
+             .integrity_failure_observer =
+                 [alarms](const std::string_view event_id, const std::string_view error_code) {
+                     static_cast<void>(alarms->raise_alarm(
+                         {.code = "EVENT_INTEGRITY_FAILED",
+                          .severity = paperbreak::Severity::critical,
+                          .source = std::string{event_id},
+                          .message = "上传源文件完整性校验失败，事件已转人工处理",
+                          .details = {{"errorCode", std::string{error_code}}}}));
+                 }},
             std::move(executor).value());
         if (!scheduler_result)
         {

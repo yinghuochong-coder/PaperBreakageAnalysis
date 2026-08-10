@@ -99,6 +99,10 @@ class EventInspector final
 
     [[nodiscard]] Result<EventInspectionReport> inspect(
         const std::filesystem::path& committed_relative_directory) const;
+    /// Parses the manifest and checks path constraints, file existence, and declared lengths.
+    /// This structural check never reads an event payload.
+    [[nodiscard]] Result<std::string> get_manifest(
+        const std::filesystem::path& committed_relative_directory) const;
     [[nodiscard]] Result<EventExportArchive> export_zip(
         const std::filesystem::path& committed_relative_directory) const;
     [[nodiscard]] Result<EventExportFile> export_zip_file(

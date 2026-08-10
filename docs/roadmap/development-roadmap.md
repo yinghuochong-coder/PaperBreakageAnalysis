@@ -930,6 +930,10 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 完成证据（2026-08-04）：`paperbreak_storage` 新增 schema v1 事务式事件文件事实源，将 M5-04 冻结原始帧、M5-05 JPEG 关键帧和完整事件元数据写入事件根内唯一 `.transactions` 目录；逐文件执行长度和 SHA-256 写后读回校验，`manifest.json` 最后生成，Windows 实现使用 `CREATE_NEW`、`FlushFileBuffers` 和同卷 `MoveFileExW` 原子公开到 `YYYY/MM/DD/EventId`，不覆盖正式目录。公开校验入口拒绝事务/隔离/越界路径，严格检查 manifest 必需字段、目标日期、文件索引、长度和摘要。启动恢复对完整残留复验后提交，对缺清单、高版本 schema、摘要不匹配或目标冲突写 `recovery.json` 并移动到 `.quarantine`，不删除证据。`EventPersistenceRuntime` 使用单工作线程和预分配固定事件槽（默认 8、硬上限 64），提交不等待磁盘；满载/停止返回 Critical `EVENT_WRITE_FAILED`，写入与回调异常隔离，停止时排空已接受任务并支持截止时间。10 项定向测试覆盖标准 SHA-256、中文/空格路径、非法标识/预算/关键帧追溯拒绝、四类文件写入和最终 rename 故障、磁盘满、权限拒绝、写后与恢复校验不匹配、完整残留恢复、缺失/高版本 manifest 隔离、正式目录提交前不可读、容量精确边界及确定性停止。Debug/Release `/W4 /WX` 全量构建及两套非硬件 CTest 均为 23/23，Debug 通用 unit 217/217；任务文件格式检查和 `git diff --check` 通过。全仓 `format-check` 仍被未修改的 `src/console/src/preview_client.cpp` 既有格式问题阻断，静态分析在进入 storage 前被未修改的 `src/event/src/key_frame.cpp` 两条既有 C6011 阻断。未接入 M5-07 SQLite/M5-09 服务配置、IPC 和报警，也未执行实体相机、真实进程强杀、物理断电或生产磁盘性能测试。
 
+策略替代（2026-08-09）：上述写后读回、强制刷新和“摘要不匹配事务在启动时隔离”的持久化
+策略已由 ADR-017 取代；临时目录、manifest 最后写和同卷不覆盖原子发布的可见性保证保留。
+新事件使用 manifest v3 / `PBNVME2` 缓冲写并按需完整校验。
+
 ### M5-07 SQLite 元数据和迁移
 
 状态：`completed`
@@ -1184,6 +1188,8 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 状态：`completed`
 
+当前策略：`superseded-by-adr-017`（历史实现证据保留，生产接线已移除）
+
 负责人：Codex
 
 开始日期：2026-08-05
@@ -1205,6 +1211,11 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 25/25、两种配置通用单元入口各 291 项，MSVC 静态分析及任务文件格式检查通过。未执行实体四
 相机、目标 NVMe、物理拔盘/断电或持续热稳定测试，因此 M7 退出门禁中的目标硬件性能项仍未
 满足，未进入 M8。
+
+替代说明（2026-08-09）：滚动缓存改为每次启动创建唯一 session，不扫描、修复、隔离、索引
+或恢复旧块/旧租约；`INvmeBlockRecovery` 及启动恢复接线已删除。旧 session 永久保留并忽略，
+只允许服务停止后人工清理。当前行为与验收以 ADR-017 和合并执行计划
+`.agent/plans/m5-m7-buffered-persistence-nonrecoverable-cache.md` 为准。
 
 退出门禁 M7：
 

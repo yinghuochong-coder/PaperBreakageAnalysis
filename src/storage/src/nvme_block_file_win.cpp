@@ -195,8 +195,15 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
         if (std::chrono::steady_clock::now() >= request.deadline)
             return Result<NvmeCommittedBlock>::failure(timeout_error(temporary));
 
-        std::fstream stream{temporary,
-                            std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc};
+        const HANDLE exclusive =
+            CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (exclusive == INVALID_HANDLE_VALUE)
+            return Result<NvmeCommittedBlock>::failure(
+                file_error("NVME_WRITE_FAILED", Severity::error, "无法唯一创建 NVMe 临时块",
+                           "storage.nvme.create", temporary, "create-new-failed", GetLastError()));
+        static_cast<void>(CloseHandle(exclusive));
+        std::fstream stream{temporary, std::ios::binary | std::ios::in | std::ios::out};
         if (!stream)
             return Result<NvmeCommittedBlock>::failure(
                 file_error("NVME_WRITE_FAILED", Severity::error, "无法创建 NVMe 临时块",
@@ -212,7 +219,7 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
         std::array<std::byte, nvme_page_bytes> header{};
         constexpr std::array<std::byte, 8U> header_magic{
             std::byte{'P'}, std::byte{'B'}, std::byte{'N'}, std::byte{'V'},
-            std::byte{'M'}, std::byte{'E'}, std::byte{'1'}, std::byte{0U}};
+            std::byte{'M'}, std::byte{'E'}, std::byte{'2'}, std::byte{0U}};
         std::ranges::copy(header_magic, header.begin());
         put_little<std::uint16_t>(header, 8U, nvme_format_version);
         put_little<std::uint16_t>(header, 10U, nvme_page_bytes);
@@ -259,7 +266,6 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
         const auto data_start = static_cast<std::uint64_t>(nvme_page_bytes) + index_reserved;
         std::vector<std::byte> index_bytes(block.frames.size() * nvme_index_entry_bytes);
         std::uint64_t valid_data_bytes{};
-        std::uint32_t data_crc{};
         for (std::size_t frame_index = 0U; frame_index < block.frames.size(); ++frame_index)
         {
             const auto& frame = block.frames[frame_index];
@@ -301,9 +307,8 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
             put_little<std::uint32_t>(entry, 68U, geometry.stride);
             put_little<std::uint16_t>(entry, 72U, pixel_format_id(frame.pixel_format()));
             put_little<std::uint16_t>(entry, 74U, flags);
-            put_little<std::uint32_t>(entry, 76U, crc32c(frame.bytes()));
+            put_little<std::uint32_t>(entry, 76U, 0U);
             put_little<std::uint32_t>(entry, 80U, crc32c(entry));
-            data_crc = crc32c(frame.bytes(), data_crc);
             valid_data_bytes += frame.bytes().size();
         }
 
@@ -329,7 +334,7 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
             std::byte{'M'}, std::byte{'M'}, std::byte{'I'}, std::byte{'T'}};
         constexpr std::array<std::byte, 8U> marker{std::byte{'C'}, std::byte{'O'}, std::byte{'M'},
                                                    std::byte{'M'}, std::byte{'I'}, std::byte{'T'},
-                                                   std::byte{'1'}, std::byte{0U}};
+                                                   std::byte{'2'}, std::byte{0U}};
         std::ranges::copy(footer_magic, footer.begin());
         put_little<std::uint16_t>(footer, 8U, nvme_format_version);
         put_little<std::uint16_t>(footer, 10U, nvme_page_bytes);
@@ -342,14 +347,14 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
         put_little<std::uint64_t>(footer, 48U, block.frames.back().sequence_number());
         const auto index_crc = crc32c(index_bytes);
         put_little<std::uint32_t>(footer, 56U, index_crc);
-        put_little<std::uint32_t>(footer, 60U, data_crc);
+        put_little<std::uint32_t>(footer, 60U, 0U);
         put_little<std::uint32_t>(footer, 64U, header_crc);
         std::ranges::copy(marker, footer.begin() + 4088U);
         const auto footer_crc = crc32c(footer);
         put_little<std::uint32_t>(footer, 4084U, footer_crc);
         const auto footer_offset = maximum.value() - nvme_page_bytes;
-        if (auto result = write_at(stream, temporary, footer_offset, std::span{footer}.first(4088U),
-                                   gate, request.deadline);
+        if (auto result =
+                write_at(stream, temporary, footer_offset, footer, gate, request.deadline);
             !result)
             return Result<NvmeCommittedBlock>::failure(result.error());
         stream.flush();
@@ -361,29 +366,7 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
                     ? timeout_error(temporary)
                     : file_error("NVME_WRITE_FAILED", Severity::error, "无法刷新 NVMe 提交尾页",
                                  "storage.nvme.flush", temporary, "flush-footer-failed"));
-        if (auto result = flush_file(temporary, request.deadline); !result)
-            return Result<NvmeCommittedBlock>::failure(result.error());
-        std::fstream marker_stream{temporary, std::ios::binary | std::ios::in | std::ios::out};
-        if (!marker_stream)
-            return Result<NvmeCommittedBlock>::failure(
-                file_error("NVME_WRITE_FAILED", Severity::error, "无法重新打开 NVMe 提交标记",
-                           "storage.nvme.commit", temporary, "marker-open-failed"));
-        if (auto result = write_at(marker_stream, temporary, footer_offset + 4088U,
-                                   std::span{footer}.subspan(4088U), gate, request.deadline);
-            !result)
-            return Result<NvmeCommittedBlock>::failure(result.error());
-        marker_stream.flush();
-        const bool marker_stream_ok = static_cast<bool>(marker_stream);
-        marker_stream.close();
-        if (!marker_stream_ok || std::chrono::steady_clock::now() >= request.deadline)
-            return Result<NvmeCommittedBlock>::failure(
-                std::chrono::steady_clock::now() >= request.deadline
-                    ? timeout_error(temporary)
-                    : file_error("NVME_WRITE_FAILED", Severity::error, "无法刷新 NVMe 提交标记",
-                                 "storage.nvme.flush", temporary, "flush-marker-failed"));
-        if (auto result = flush_file(temporary, request.deadline); !result)
-            return Result<NvmeCommittedBlock>::failure(result.error());
-        if (MoveFileExW(temporary.c_str(), committed.c_str(), MOVEFILE_WRITE_THROUGH) == FALSE)
+        if (MoveFileExW(temporary.c_str(), committed.c_str(), 0U) == FALSE)
         {
             return Result<NvmeCommittedBlock>::failure(
                 file_error("NVME_WRITE_FAILED", Severity::error, "无法原子发布 NVMe 块",
@@ -393,7 +376,7 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
                                                     .physical_bytes = maximum.value(),
                                                     .header_crc32c = header_crc,
                                                     .index_crc32c = index_crc,
-                                                    .data_crc32c = data_crc,
+                                                    .data_crc32c = 0U,
                                                     .footer_crc32c = footer_crc,
                                                     .commit_verified = true});
     }
@@ -461,28 +444,6 @@ class WindowsNvmeBlockStore final : public INvmeBlockStore
     {
         return file_error("NVME_WRITE_TIMEOUT", Severity::error, "NVMe 块写入超过截止时间",
                           "storage.nvme.write", path, "deadline-exceeded");
-    }
-
-    static Result<void> flush_file(const std::filesystem::path& path,
-                                   const std::chrono::steady_clock::time_point deadline)
-    {
-        const HANDLE handle =
-            CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
-        if (handle == INVALID_HANDLE_VALUE)
-            return Result<void>::failure(
-                file_error("NVME_WRITE_FAILED", Severity::error, "无法打开 NVMe 块执行持久刷新",
-                           "storage.nvme.flush", path, "flush-open-failed", GetLastError()));
-        const BOOL flushed = FlushFileBuffers(handle);
-        const DWORD native = flushed == FALSE ? GetLastError() : ERROR_SUCCESS;
-        CloseHandle(handle);
-        if (flushed == FALSE)
-            return Result<void>::failure(file_error("NVME_WRITE_FAILED", Severity::error,
-                                                    "NVMe 块持久刷新失败", "storage.nvme.flush",
-                                                    path, "flush-file-buffers-failed", native));
-        if (std::chrono::steady_clock::now() >= deadline)
-            return Result<void>::failure(timeout_error(path));
-        return Result<void>::success();
     }
 
     static Result<void> write_at(std::fstream& stream, const std::filesystem::path& path,

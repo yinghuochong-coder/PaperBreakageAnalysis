@@ -176,8 +176,9 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `EVENT_KEYFRAME_ENCODE_FAILED` | Error | 是 | 关键帧像素布局、输入/输出上限或 OpenCV JPEG 编码失败；当前关键帧标损，工作线程继续处理后续已接受任务 |
 | `EVENT_WRITE_FAILED` | Critical | 是 | 事件文件、清单或最终提交写入失败；保留临时目录供恢复 |
 | `EVENT_WRITE_CANCELLED` | Warning | 是 | 持久化收到停止令牌；保留事务目录且不发布正式事件目录 |
-| `EVENT_CHECKSUM_FAILED` | Critical | 视来源 | 本地写后校验不一致；隔离文件，不提交完整事件 |
-| `EVENT_RECOVERY_FAILED` | Critical | 视原因 | 启动时无法恢复/隔离未完成事件；不得伪报已提交 |
+| `EVENT_CHECKSUM_FAILED` | Critical | 否 | 写入器返回的实际长度或 CNG SHA-256 结果无效；保留事务目录，不提交事件 |
+| `EVENT_INTEGRITY_FAILED` | Critical | 否 | 按需详情、导出或上传完整校验失败；文件保留，事件标损并禁止制品继续流出，上传转人工处理 |
+| `EVENT_RECOVERY_FAILED` | Critical | 视原因 | 启动事务的 manifest、路径、存在性或长度结构检查失败；隔离事务且不读取原始负载 |
 | `EVENT_SCHEMA_UNSUPPORTED` | Critical | 否 | 检测到非空旧事件库、schema v1/未知 manifest 或超出读取范围；拒绝启动且不移动、删除或部分解析旧数据 |
 | `EVENT_NOT_COMMITTED` | Warning | 是 | 事件证据尚未提交；manifest、缩略图、目录、导出、上传或人工复核暂不可用 |
 | `EVENT_QUEUE_FULL` | Critical | 是 | 待编码/持久化事件达到固定上限；拒绝新事件，不扩容或反压采集 |
@@ -189,17 +190,14 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `STORAGE_IO_FAILED` | Error | 视 I/O | 非事件特定的文件系统读写/刷新/重命名失败 |
 | `STORAGE_CHECKSUM_MISMATCH` | Error | 视来源 | 通用存储对象读回校验失败；隔离对象并触发恢复 |
 | `NVME_QUEUE_FULL` | Warning | 是 | 每相机两个待写块已满；拒绝当前完整普通块、记录缺口，不阻塞采集 |
-| `NVME_BLOCK_INVALID` | Error | 否 | 帧序号、相机、布局、负载或块边界违反 NVMe v1 声明；当前普通块不提交 |
-| `NVME_CACHE_UNAVAILABLE` | Error | 是 | 缓存根、容量准入或既有块恢复状态不可安全使用；降级为内存缓存 |
+| `NVME_BLOCK_INVALID` | Error | 否 | 帧序号、相机、布局、负载或块边界违反 NVMe v2 声明；当前普通块不提交 |
+| `NVME_CACHE_UNAVAILABLE` | Error | 是 | 当前 session 缓存根或容量准入不可安全使用；降级为内存缓存 |
 | `NVME_CACHE_PROTECTED` | Error | 是 | 固定容量内没有零租约已提交块可回收；不得覆盖事件证据，普通滚动缓存降级并记录缺口 |
 | `NVME_WRITE_TIMEOUT` | Error | 是 | 单块写入未在配置总截止时间内完成；保留临时尾块并降级内存 |
-| `NVME_WRITE_FAILED` | Error | 视 I/O | 预分配、写入、flush、原子发布或正常回绕删除失败；保留原生诊断并降级内存 |
+| `NVME_WRITE_FAILED` | Error | 视 I/O | 创建、普通缓冲写、原子发布或当前 session 回绕删除失败；保留原生诊断并降级内存 |
 | `NVME_INDEX_FAILED` | Error | 视 SQLite/I/O | 可重建派生块/租约索引无法打开、校验、登记、查询或事务提交；保留块文件事实并降级，不把未登记块视为可回收 |
 | `NVME_INDEX_QUERY_LIMIT` | Warning | 是 | 时间窗命中块数超过调用方或 4096 块固定上限；拒绝返回截断结果，不伪称序列完整 |
 | `NVME_LEASE_CAPACITY` | Error | 是 | 活动事件租约达到 64 条固定上限；拒绝新 NVMe 租约但继续内存事件链并报警 |
-| `NVME_RECOVERY_LIMIT` | Error | 是 | 启动恢复达到文件数、摘要内存、总截止时间或代次上限；不提交未完整扫描的索引集合，普通缓存降级 |
-| `NVME_RECOVERY_FAILED` | Error | 视 I/O | 启动扫描、读取、修复、持久刷新、原子发布或隔离失败；保留块文件和原生诊断并降级内存 |
-| `NVME_BLOCK_QUARANTINED` | Warning | 否 | 块格式、边界、版本或 CRC 不可信，已非覆盖地移动到 `.quarantine`；不进入正常索引或回绕 |
 
 ### 4.6 数据库
 
@@ -245,7 +243,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `UPLOAD_JOB_CONFLICT` | Error | 否 | 相同上传幂等键携带不同事件、资源、路径、摘要或负载；保留原任务并拒绝覆盖 |
 | `UPLOAD_JOB_INVALID` | Error | 否 | 持久任务缺少事件、逻辑文件、受限相对路径或 manifest 字段；拒绝执行并保留诊断 |
 | `UPLOAD_SOURCE_MISSING` | Error | 否 | 声明的本地普通文件或 manifest 不存在；不创建空上传，等待人工处理 |
-| `UPLOAD_SOURCE_CHANGED` | Error | 否 | 本地文件长度或整文件 SHA-256 与持久任务不一致；拒绝上传已变化内容 |
+| `UPLOAD_SOURCE_CHANGED` | Critical | 否 | 在线单遍读取发现本地文件长度或整文件 SHA-256 与 manifest 不一致；不调用完成接口，保留文件/checkpoint，事件标损并转人工处理 |
 | `UPLOAD_TRANSFER_INTERRUPTED` | Warning | 是 | 服务或执行器停止时任务仍在途；保留 checkpoint 并在重启后恢复领取 |
 | `UPLOAD_TRANSFER_FAILED` | Error | 是 | 受限传输尝试失败；保持 checkpoint 并按策略退避 |
 | `UPLOAD_CHECKSUM_MISMATCH` | Error | 是 | 服务端或本地分块校验不一致；重传受影响内容且有上限 |

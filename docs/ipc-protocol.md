@@ -399,25 +399,32 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
   固定结束时间过滤。响应返回稳定排序的 `events`、`total`、`offset`、`limit` 及不受当前
   筛选影响的全局生命周期 `summary`。兼容筛选 `eventState` 暂时等同于
   `decisionState`。
+- 每条事件记录向后兼容新增 `integrityState`、可空 `integrityCheckedAtUtcMs` 和
+  `integrityErrorCode`。列表不读取或散列事件原始负载。
 - `event.get`：payload 为 `{"eventId":"..."}`。所有生命周期均返回数据库状态；仅当
-  `persistenceState=Committed` 时才复验 manifest、长度和 SHA-256，并返回正式绝对目录、
+  `persistenceState=Committed` 且制品未标损时，以每文件一次顺序读取复验格式、长度和
+  SHA-256，并返回正式绝对目录、
   manifest 字节数、原始/关键帧数、序列缺口和追溯状态及首张关键帧 JPEG。列表和详情都
   包含 `decisionState`、`persistenceState`、`reviewState`、可空 `reviewDecision`、
   `artifactsAvailable`、`triggerCount`，以及兼容别名 `eventState`。
-- `event.getManifest`：payload 为 `{"eventId":"..."}`。再次校验正式事件后，以不超过
-  8 MiB 的二进制 UTF-8 JSON 返回完整不可变 manifest，响应包含 `verified=true`；借此避免
-  大事件索引突破 1 MiB JSON 头上限。
+- `event.getManifest`：payload 为 `{"eventId":"..."}`。只解析 manifest 并检查路径、普通文件
+  存在性和声明长度，不读取负载或计算 SHA；以不超过 8 MiB 的二进制 UTF-8 JSON 返回完整
+  不可变 manifest。`verified` 反映数据库既有完整性状态，响应同时返回 `integrityState`。
 - `event.manualTrigger`：payload 为 `{"cameraId":"CAM01"}`。只在下一张新有效帧触发；
   返回 `accepted` 和 `alreadyPending`，不会停止相机采集或在相机回调中编码/写盘。
 - `event.confirm` / `event.reject`：只允许 `Committed` 事件。payload 必须包含 `eventId` 和正整数
   `expectedReviewRevision`。SQLite 使用乐观版本并发；相同终态重复请求幂等，过期或相反
   终态返回 `EVENT_VERSION_CONFLICT`；只更新复核字段，不覆盖算法判定，不可变 manifest 不修改。
 - `event.export`：payload 为 `{"eventId":"..."}`。服务再次完整校验，只将正式事件按
-  manifest 顺序流式打包到配置缓存根内的受控暂存目录；响应包含 `verified=true`、大小、
+  manifest 顺序以每源文件一次读取完成 SHA、块结构检查和 ZIP 流写入；响应包含
+  `verified=true`、大小、
   文件数和 `exportSourcePath`，不通过 IPC 传完整原始序列。Qt 客户端只从该服务返回路径
   分块读取，并通过 `QSaveFile` 原子保存到用户选择的目标；服务不接受任意目标路径。导出器
   支持 ZIP64，并在显式 64 GiB 总上限或单文件/文件数上限之外返回
   `EVENT_EXPORT_TOO_LARGE`。
+- 详情或导出完整性失败会将事件设为 `integrityState=Failed`、`storageState=Damaged`、
+  `artifactsAvailable=false`，登记 Critical 报警并拒绝发布部分导出；不改变判定、复核和
+  `persistenceState=Committed`。
 - `event.retryUpload`：payload 必须且只能包含 `eventId`。M8-03 起，已装配事件数据库时将该事件处于 `RetryWait`、`PermanentFailed` 或 `ManualIntervention` 的持久任务重置为 `Pending` 并返回 `requeuedJobs`；重复请求不创建任务或事件，没有匹配失败任务时返回 0。未装配持久仓库时返回 `SYS_NOT_SUPPORTED`。
 
 ### `preview.subscribe`

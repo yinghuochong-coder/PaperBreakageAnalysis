@@ -65,46 +65,6 @@ QString qstring_path(const std::string_view path)
     return QString::fromUtf8(path.data(), static_cast<qsizetype>(path.size()));
 }
 
-Result<std::string> sha256_file(QFile& file, const std::stop_token stop_token,
-                                const std::uint64_t expected_bytes,
-                                const std::uint64_t limit_bytes_per_second)
-{
-    if (!file.seek(0))
-        return Result<std::string>::failure(transport_error(
-            "UPLOAD_TRANSFER_FAILED", "无法定位上传源文件", "uplink.upload.hash.seek", true));
-    QCryptographicHash hash{QCryptographicHash::Sha256};
-    std::uint64_t read_bytes = 0U;
-    const auto started_at = std::chrono::steady_clock::now();
-    while (!file.atEnd())
-    {
-        if (stop_token.stop_requested())
-            return Result<std::string>::failure(transport_error(
-                "UPLOAD_TRANSFER_INTERRUPTED", "上传校验已取消", "uplink.upload.hash", true));
-        const QByteArray block = file.read(1024 * 1024);
-        if (block.isEmpty() && file.error() != QFileDevice::NoError)
-            return Result<std::string>::failure(transport_error(
-                "UPLOAD_TRANSFER_FAILED", "读取上传源文件失败", "uplink.upload.hash.read", true));
-        read_bytes += static_cast<std::uint64_t>(block.size());
-        hash.addData(block);
-        const auto expected_elapsed =
-            std::chrono::duration<long double>{static_cast<long double>(read_bytes) /
-                                               static_cast<long double>(limit_bytes_per_second)};
-        while (std::chrono::steady_clock::now() - started_at < expected_elapsed)
-        {
-            if (stop_token.stop_requested())
-                return Result<std::string>::failure(
-                    transport_error("UPLOAD_TRANSFER_INTERRUPTED", "上传校验限速等待已取消",
-                                    "uplink.upload.hash.throttle", true));
-            QThread::msleep(1U);
-        }
-    }
-    if (read_bytes != expected_bytes)
-        return Result<std::string>::failure(transport_error("UPLOAD_SOURCE_CHANGED",
-                                                            "上传源文件长度在任务创建后发生变化",
-                                                            "uplink.upload.hash.length"));
-    return Result<std::string>::success(hash.result().toHex().toStdString());
-}
-
 std::optional<Json> parse_object(const QByteArray& body)
 {
     if (body.size() <= 0 || body.size() > static_cast<qsizetype>(maximum_json_message_bytes))
@@ -679,6 +639,9 @@ Result<TransportAcknowledgement> QtUplinkTransport::send_event_metadata(
 
 Result<TransportAcknowledgement> QtUplinkTransport::upload_file(const UploadFileRequest& request)
 {
+    if (impl_->state.load(std::memory_order_acquire) != UplinkConnectionState::connected)
+        return Result<TransportAcknowledgement>::failure(
+            transport_error("UPLINK_DISCONNECTED", "上位机会话未连接", "uplink.upload", true));
     if (auto valid = validate_identifier(request.machine_id, "machineId", 64U); !valid)
         return Result<TransportAcknowledgement>::failure(valid.error());
     if (auto valid = validate_identifier(request.description.request_id, "requestId", 128U); !valid)
@@ -693,7 +656,7 @@ Result<TransportAcknowledgement> QtUplinkTransport::upload_file(const UploadFile
         request.description.total_bytes > maximum_file_bytes ||
         request.description.chunk_bytes < 64U * 1024U ||
         request.description.chunk_bytes > maximum_chunk_bytes ||
-        (!request.description.sha256.empty() && !is_sha256_hex(request.description.sha256)))
+        !is_sha256_hex(request.description.sha256))
         return Result<TransportAcknowledgement>::failure(
             protocol_error("文件上传描述无效", "uplink.upload.validate"));
 
@@ -705,18 +668,7 @@ Result<TransportAcknowledgement> QtUplinkTransport::upload_file(const UploadFile
     if (static_cast<std::uint64_t>(file.size()) != request.description.total_bytes)
         return Result<TransportAcknowledgement>::failure(transport_error(
             "UPLOAD_SOURCE_CHANGED", "上传源文件长度与持久任务声明不一致", "uplink.upload.size"));
-    auto digest = sha256_file(file, request.stop_token, request.description.total_bytes,
-                              impl_->config.upload_limit_bytes_per_second);
-    if (!digest)
-        return Result<TransportAcknowledgement>::failure(digest.error());
-    if (!request.description.sha256.empty() && digest.value() != request.description.sha256)
-        return Result<TransportAcknowledgement>::failure(
-            transport_error("UPLOAD_SOURCE_CHANGED", "上传源文件 SHA-256 与持久任务声明不一致",
-                            "uplink.upload.sha256"));
-    const std::string source_sha256 = std::move(digest).value();
-    if (impl_->state.load(std::memory_order_acquire) != UplinkConnectionState::connected)
-        return Result<TransportAcknowledgement>::failure(
-            transport_error("UPLINK_DISCONNECTED", "上位机会话未连接", "uplink.upload", true));
+    const std::string source_sha256 = request.description.sha256;
     if (request.event_metadata)
     {
         if (request.event_metadata->machine_id != request.machine_id ||
@@ -796,18 +748,13 @@ Result<TransportAcknowledgement> QtUplinkTransport::upload_file(const UploadFile
                 protocol_error("服务端断点分块索引重复或越界", "uplink.upload.status"));
     }
     std::string checkpoint = upload_checkpoint(upload_id, received, source_sha256);
-    if (status_json->at("state").get<std::string>() == "Completed")
-        return Result<TransportAcknowledgement>::success(
-            {.correlation_id = request.description.request_id,
-             .acknowledged_at = current_utc_timestamp(),
-             .checkpoint_json = std::move(checkpoint)});
+    const bool already_completed = status_json->at("state").get<std::string>() == "Completed";
 
     const auto transfer_start = std::chrono::steady_clock::now();
     std::uint64_t sent_bytes = 0U;
+    QCryptographicHash whole_file_hash{QCryptographicHash::Sha256};
     for (std::uint32_t index = 0U; index < total_chunks; ++index)
     {
-        if (received.contains(index))
-            continue;
         if (request.stop_token.stop_requested())
             return Result<TransportAcknowledgement>::failure(
                 with_checkpoint(transport_error("UPLOAD_TRANSFER_INTERRUPTED", "分块上传已取消",
@@ -817,19 +764,17 @@ Result<TransportAcknowledgement> QtUplinkTransport::upload_file(const UploadFile
             static_cast<std::uint64_t>(index) * request.description.chunk_bytes;
         const std::uint64_t length = std::min<std::uint64_t>(
             request.description.chunk_bytes, request.description.total_bytes - offset);
-        if (!file.seek(static_cast<qint64>(offset)))
-            return Result<TransportAcknowledgement>::failure(
-                with_checkpoint(transport_error("UPLOAD_TRANSFER_FAILED", "无法定位上传分块",
-                                                "uplink.upload.chunk.seek", true),
-                                checkpoint));
         const QByteArray bytes = file.read(static_cast<qint64>(length));
         if (static_cast<std::uint64_t>(bytes.size()) != length)
             return Result<TransportAcknowledgement>::failure(
                 with_checkpoint(transport_error("UPLOAD_SOURCE_CHANGED", "上传源文件发生短读",
                                                 "uplink.upload.chunk.read"),
                                 checkpoint));
+        whole_file_hash.addData(bytes);
         const QByteArray chunk_digest =
             QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
+        if (received.contains(index))
+            continue;
         const QByteArray range = QByteArray("bytes ") + QByteArray::number(offset) + "-" +
                                  QByteArray::number(offset + length - 1U) + "/" +
                                  QByteArray::number(request.description.total_bytes);
@@ -861,6 +806,18 @@ Result<TransportAcknowledgement> QtUplinkTransport::upload_file(const UploadFile
             QThread::msleep(1U);
         }
     }
+    if (static_cast<std::uint64_t>(file.size()) != request.description.total_bytes ||
+        whole_file_hash.result().toHex().toStdString() != source_sha256)
+        return Result<TransportAcknowledgement>::failure(
+            with_checkpoint(transport_error("UPLOAD_SOURCE_CHANGED",
+                                            "上传源文件长度或 SHA-256 与 manifest 声明不一致",
+                                            "uplink.upload.sha256"),
+                            checkpoint));
+    if (already_completed)
+        return Result<TransportAcknowledgement>::success(
+            {.correlation_id = request.description.request_id,
+             .acknowledged_at = current_utc_timestamp(),
+             .checkpoint_json = std::move(checkpoint)});
     auto completed =
         impl_->http("POST", impl_->endpoint(upload_path + "/complete"), {}, {}, request.stop_token);
     if (!completed)
@@ -893,6 +850,10 @@ Result<UploadJobExecutor> make_chunked_upload_executor(std::shared_ptr<IUplinkTr
         [transport = std::move(transport),
          config = std::move(config)](const storage::UploadJobRecord& job,
                                      const std::stop_token stop_token) -> UploadAttemptOutcome {
+            if (transport->connection_state() != UplinkConnectionState::connected)
+                return {.disposition = UploadAttemptDisposition::retryable_failure,
+                        .checkpoint_json = job.checkpoint_json,
+                        .error_code = "UPLINK_DISCONNECTED"};
             if (job.kind == storage::UploadJobKind::alarm_metadata)
             {
                 MessageEnvelope alarm{.protocol_version = protocol_version,
@@ -917,6 +878,13 @@ Result<UploadJobExecutor> make_chunked_upload_executor(std::shared_ptr<IUplinkTr
                 return {.disposition = UploadAttemptDisposition::manual_intervention,
                         .checkpoint_json = job.checkpoint_json,
                         .error_code = "UPLOAD_JOB_INVALID"};
+            std::string declared = job.checksum;
+            if (declared.starts_with("sha256:"))
+                declared.erase(0U, 7U);
+            if (!is_sha256_hex(declared))
+                return {.disposition = UploadAttemptDisposition::manual_intervention,
+                        .checkpoint_json = job.checkpoint_json,
+                        .error_code = "UPLOAD_JOB_INVALID"};
             const auto source = (config.event_root / job.relative_path).lexically_normal();
             std::error_code file_error;
             if (!std::filesystem::is_regular_file(source, file_error) || file_error)
@@ -928,11 +896,6 @@ Result<UploadJobExecutor> make_chunked_upload_executor(std::shared_ptr<IUplinkTr
                 return {.disposition = UploadAttemptDisposition::manual_intervention,
                         .checkpoint_json = job.checkpoint_json,
                         .error_code = "UPLOAD_SOURCE_CHANGED"};
-            std::string declared = job.checksum;
-            if (declared.starts_with("sha256:"))
-                declared.erase(0U, 7U);
-            if (!is_sha256_hex(declared))
-                declared.clear();
             const auto file_name = utf8_path(source.filename());
             const std::string event_request_id =
                 "event-" + QCryptographicHash::hash(QByteArray::fromStdString(*job.event_id),

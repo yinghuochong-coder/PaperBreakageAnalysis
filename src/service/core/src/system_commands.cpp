@@ -526,6 +526,11 @@ Json event_record_json(const storage::EventMetadataRecord& event)
         {"confidence", event.confidence},
         {"uploadState", event.upload_state},
         {"storageState", event.storage_state},
+        {"integrityState", event.integrity_state},
+        {"integrityCheckedAtUtcMs", event.integrity_checked_at_utc_ms
+                                        ? Json(*event.integrity_checked_at_utc_ms)
+                                        : Json(nullptr)},
+        {"integrityErrorCode", event.integrity_error_code},
         {"retentionLocked", event.retention_locked},
         {"deletionAllowed", event.deletion_allowed},
         {"deletionState", event.deletion_state},
@@ -1884,9 +1889,15 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             if (!event)
                 return Result<ipc::CommandResponse>::failure(event.error());
             if (!event.value().artifacts_available)
+            {
+                if (event.value().integrity_state == "Failed")
+                    return Result<ipc::CommandResponse>::failure(command_error(
+                        "EVENT_INTEGRITY_FAILED", Severity::critical,
+                        "事件证据完整性校验已失败，禁止重试上传", "ipc.event.retryUpload"));
                 return Result<ipc::CommandResponse>::failure(
                     command_error("EVENT_NOT_COMMITTED", Severity::warning,
                                   "事件证据尚未提交，不能重试上传", "ipc.event.retryUpload"));
+            }
             auto retried = event_database_->retry_event_upload_jobs(
                 event_id, std::chrono::duration_cast<std::chrono::milliseconds>(
                               std::chrono::system_clock::now().time_since_epoch())
@@ -1975,6 +1986,10 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                 return Result<ipc::CommandResponse>::failure(record.error());
             if (!record.value().artifacts_available)
             {
+                if (record.value().integrity_state == "Failed")
+                    return Result<ipc::CommandResponse>::failure(
+                        command_error("EVENT_INTEGRITY_FAILED", Severity::critical,
+                                      "事件证据完整性校验已失败，详情内容不可用", "ipc.event.get"));
                 Json response{{"event", event_record_json(record.value())},
                               {"committedDirectory", nullptr},
                               {"rawFrameCount", 0U},
@@ -1991,7 +2006,26 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                     "SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配", "ipc.event.get"));
             auto inspected = event_inspector_->inspect(record.value().relative_directory);
             if (!inspected)
-                return Result<ipc::CommandResponse>::failure(inspected.error());
+            {
+                const auto failure = inspected.error();
+                static_cast<void>(event_database_->mark_event_integrity_failed(
+                    event_id.value(), failure.business_code, current_utc_milliseconds()));
+                if (alarms_)
+                    static_cast<void>(
+                        alarms_->raise_alarm({.code = "EVENT_INTEGRITY_FAILED",
+                                              .severity = Severity::critical,
+                                              .source = event_id.value(),
+                                              .message = "事件证据完整性校验失败",
+                                              .details = {{"errorCode", failure.business_code}}}));
+                return Result<ipc::CommandResponse>::failure(failure);
+            }
+            auto marked = event_database_->mark_event_integrity_verified(
+                event_id.value(), current_utc_milliseconds());
+            if (!marked)
+                return Result<ipc::CommandResponse>::failure(marked.error());
+            record = event_database_->get_event(event_id.value());
+            if (!record)
+                return Result<ipc::CommandResponse>::failure(record.error());
             Json response{
                 {"event", event_record_json(record.value())},
                 {"committedDirectory", path_to_utf8(inspected.value().committed_directory)},
@@ -2014,25 +2048,33 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             if (!record)
                 return Result<ipc::CommandResponse>::failure(record.error());
             if (!record.value().artifacts_available)
+            {
+                if (record.value().integrity_state == "Failed")
+                    return Result<ipc::CommandResponse>::failure(
+                        command_error("EVENT_INTEGRITY_FAILED", Severity::critical,
+                                      "事件证据完整性校验已失败，manifest 不可用于内容访问",
+                                      "ipc.event.getManifest"));
                 return Result<ipc::CommandResponse>::failure(command_error(
                     "EVENT_NOT_COMMITTED", Severity::warning,
                     "事件证据尚未提交，manifest 当前不可用", "ipc.event.getManifest"));
+            }
             if (!event_inspector_)
                 return Result<ipc::CommandResponse>::failure(
                     command_error("SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配",
                                   "ipc.event.getManifest"));
-            auto inspected = event_inspector_->inspect(record.value().relative_directory);
-            if (!inspected)
-                return Result<ipc::CommandResponse>::failure(inspected.error());
+            auto manifest_text = event_inspector_->get_manifest(record.value().relative_directory);
+            if (!manifest_text)
+                return Result<ipc::CommandResponse>::failure(manifest_text.error());
             std::vector<std::byte> manifest;
-            manifest.reserve(inspected.value().manifest_json.size());
-            for (const unsigned char byte : inspected.value().manifest_json)
+            manifest.reserve(manifest_text.value().size());
+            for (const unsigned char byte : manifest_text.value())
                 manifest.push_back(static_cast<std::byte>(byte));
             return Result<ipc::CommandResponse>::success(
                 {.payload_json = Json{{"eventId", event_id.value()},
                                       {"contentType", "application/json; charset=utf-8"},
                                       {"size", manifest.size()},
-                                      {"verified", true}}
+                                      {"verified", record.value().integrity_state == "Verified"},
+                                      {"integrityState", record.value().integrity_state}}
                                      .dump(),
                  .binary = std::move(manifest)});
         }
@@ -2071,9 +2113,15 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             if (!record)
                 return Result<ipc::CommandResponse>::failure(record.error());
             if (!record.value().artifacts_available)
+            {
+                if (record.value().integrity_state == "Failed")
+                    return Result<ipc::CommandResponse>::failure(
+                        command_error("EVENT_INTEGRITY_FAILED", Severity::critical,
+                                      "事件证据完整性校验已失败，禁止导出", "ipc.event.export"));
                 return Result<ipc::CommandResponse>::failure(
                     command_error("EVENT_NOT_COMMITTED", Severity::warning,
                                   "事件证据尚未提交，不能导出", "ipc.event.export"));
+            }
             if (!event_inspector_)
                 return Result<ipc::CommandResponse>::failure(
                     command_error("SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配",
@@ -2097,7 +2145,23 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             auto archive =
                 event_inspector_->export_zip_file(record.value().relative_directory, destination);
             if (!archive)
-                return Result<ipc::CommandResponse>::failure(archive.error());
+            {
+                const auto failure = archive.error();
+                static_cast<void>(event_database_->mark_event_integrity_failed(
+                    event_id.value(), failure.business_code, current_utc_milliseconds()));
+                if (alarms_)
+                    static_cast<void>(
+                        alarms_->raise_alarm({.code = "EVENT_INTEGRITY_FAILED",
+                                              .severity = Severity::critical,
+                                              .source = event_id.value(),
+                                              .message = "事件证据完整性校验失败，导出已取消",
+                                              .details = {{"errorCode", failure.business_code}}}));
+                return Result<ipc::CommandResponse>::failure(failure);
+            }
+            auto marked = event_database_->mark_event_integrity_verified(
+                event_id.value(), current_utc_milliseconds());
+            if (!marked)
+                return Result<ipc::CommandResponse>::failure(marked.error());
             return Result<ipc::CommandResponse>::success(
                 {.payload_json = Json{{"eventId", archive.value().event_id},
                                       {"fileName", archive.value().file_name},

@@ -2,6 +2,8 @@
 #include "paperbreak/uplink/simulator.hpp"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QFile>
 #include <QUuid>
 
 #include <gtest/gtest.h>
@@ -32,6 +34,15 @@ std::filesystem::path unique_path(const std::string_view prefix)
 std::string server_url(const Runtime& runtime)
 {
     return "http://127.0.0.1:" + std::to_string(runtime.snapshot().port);
+}
+
+std::string sha256_file(const std::filesystem::path& path)
+{
+    QFile file{QString::fromStdWString(path.wstring())};
+    EXPECT_TRUE(file.open(QIODevice::ReadOnly));
+    return QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256)
+        .toHex()
+        .toStdString();
 }
 
 paperbreak::uplink::SessionHello hello(const std::string& request_id = "session-transport-1")
@@ -162,6 +173,7 @@ TEST(UplinkTransport, UploadsMultipleChunksAndResumesServerCheckpointIdempotentl
         .logical_id = "raw-1",
         .relative_path = "event-1/raw.bin",
         .payload_json = "{}",
+        .checksum = "sha256:" + sha256_file(source),
         .upload_bytes = std::filesystem::file_size(source),
         .state = paperbreak::storage::UploadJobState::in_progress};
     const auto transfer_started = std::chrono::steady_clock::now();
@@ -180,7 +192,7 @@ TEST(UplinkTransport, UploadsMultipleChunksAndResumesServerCheckpointIdempotentl
     std::filesystem::remove_all(source_root, ignored);
 }
 
-TEST(UplinkTransport, RejectsChangedSourceBeforeStartingNetworkIo)
+TEST(UplinkTransport, OfflineUploadReturnsBeforeAccessingSource)
 {
     const auto source_root = unique_path("PaperBreakTransportChangedSource");
     std::filesystem::create_directories(source_root / "event-local");
@@ -207,10 +219,60 @@ TEST(UplinkTransport, RejectsChangedSourceBeforeStartingNetworkIo)
         .checksum = std::string(64U, '0'),
         .upload_bytes = std::filesystem::file_size(source),
         .state = paperbreak::storage::UploadJobState::in_progress};
+    ASSERT_TRUE(std::filesystem::remove(source));
     const auto result = executor.value()(job, {});
+    EXPECT_EQ(result.disposition, paperbreak::uplink::UploadAttemptDisposition::retryable_failure);
+    EXPECT_EQ(result.error_code, "UPLINK_DISCONNECTED");
+    std::error_code ignored;
+    std::filesystem::remove_all(source_root, ignored);
+}
+
+TEST(UplinkTransport, OnlineSourceHashChangeNeverCallsComplete)
+{
+    const auto workspace = unique_path("PaperBreakTransportChangedOnlineServer");
+    const auto source_root = unique_path("PaperBreakTransportChangedOnlineSource");
+    std::filesystem::create_directories(source_root / "event-changed");
+    const auto source = source_root / "event-changed" / "raw.bin";
+    {
+        std::ofstream stream{source, std::ios::binary};
+        stream << std::string(70U * 1024U, 'X');
+    }
+    Runtime runtime;
+    ASSERT_TRUE(runtime.start({.listen_address = "127.0.0.1",
+                               .port = 0U,
+                               .workspace = workspace,
+                               .maximum_device_count = 16U,
+                               .workspace_limit_bytes = 64ULL * 1024ULL * 1024ULL}));
+    auto created = QtUplinkTransport::create({.server_url = server_url(runtime), .io_timeout = 3s});
+    ASSERT_TRUE(created);
+    std::shared_ptr<paperbreak::uplink::IUplinkTransport> transport{std::move(created).value()};
+    ASSERT_TRUE(transport->connect(hello("session-transport-changed-online")));
+    auto executor = paperbreak::uplink::make_chunked_upload_executor(
+        transport,
+        {.event_root = source_root, .machine_id = "EDGE-TRANSPORT", .chunk_bytes = 64U * 1024U});
+    ASSERT_TRUE(executor);
+    const paperbreak::storage::UploadJobRecord job{
+        .job_id = 46,
+        .idempotency_key = "EDGE-TRANSPORT-event-changed-raw",
+        .event_id = "event-changed",
+        .kind = paperbreak::storage::UploadJobKind::raw_file,
+        .logical_id = "raw-changed",
+        .relative_path = "event-changed/raw.bin",
+        .payload_json = "{}",
+        .checksum = "sha256:" + std::string(64U, '0'),
+        .upload_bytes = std::filesystem::file_size(source),
+        .state = paperbreak::storage::UploadJobState::in_progress};
+
+    const auto result = executor.value()(job, {});
+
     EXPECT_EQ(result.disposition,
               paperbreak::uplink::UploadAttemptDisposition::manual_intervention);
     EXPECT_EQ(result.error_code, "UPLOAD_SOURCE_CHANGED");
+    EXPECT_NE(result.checkpoint_json.find("uploadId"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(workspace / "events" / "EDGE-TRANSPORT" / "event-changed" /
+                                         "raw-changed"));
+    transport->disconnect();
+    runtime.stop();
     std::error_code ignored;
     std::filesystem::remove_all(source_root, ignored);
 }
@@ -252,6 +314,7 @@ TEST(UplinkTransport, RetriesServerChecksumFailureWithoutLosingLogicalUpload)
         .logical_id = "keyframe-checksum",
         .relative_path = "event-checksum/keyframe.bin",
         .payload_json = "{}",
+        .checksum = "sha256:" + sha256_file(source),
         .upload_bytes = std::filesystem::file_size(source),
         .state = paperbreak::storage::UploadJobState::in_progress};
     auto failed = executor.value()(job, {});
@@ -308,6 +371,7 @@ TEST(UplinkTransport, PreservesCheckpointAcrossInjectedChunkFailureAndResumes)
                                              .logical_id = "manifest-2",
                                              .relative_path = "event-2/manifest.json",
                                              .payload_json = "{}",
+                                             .checksum = "sha256:" + sha256_file(source),
                                              .upload_bytes = std::filesystem::file_size(source),
                                              .state =
                                                  paperbreak::storage::UploadJobState::in_progress};

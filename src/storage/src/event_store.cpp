@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -14,7 +13,6 @@
 #include <cstdio>
 #include <ctime>
 #include <exception>
-#include <iomanip>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -62,149 +60,6 @@ Error wrap_file_error(const Error& source, std::string message, std::string oper
 std::span<const std::byte> bytes_of(const std::string_view value) noexcept
 {
     return {reinterpret_cast<const std::byte*>(value.data()), value.size()};
-}
-
-class Sha256 final
-{
-  public:
-    void update(const std::span<const std::byte> input) noexcept
-    {
-        for (const auto value : input)
-        {
-            block_[block_size_++] = std::to_integer<std::uint8_t>(value);
-            if (block_size_ == block_.size())
-            {
-                transform();
-                bit_length_ += 512U;
-                block_size_ = 0U;
-            }
-        }
-    }
-
-    [[nodiscard]] std::string finish() noexcept
-    {
-        const auto original_size = block_size_;
-        block_[block_size_++] = 0x80U;
-        if (block_size_ > 56U)
-        {
-            while (block_size_ < 64U)
-                block_[block_size_++] = 0U;
-            transform();
-            block_size_ = 0U;
-        }
-        while (block_size_ < 56U)
-            block_[block_size_++] = 0U;
-        bit_length_ += static_cast<std::uint64_t>(original_size) * 8U;
-        for (std::size_t index = 0U; index < 8U; ++index)
-            block_[63U - index] =
-                static_cast<std::uint8_t>(bit_length_ >> static_cast<unsigned>(index * 8U));
-        transform();
-
-        std::ostringstream output;
-        output << std::hex << std::setfill('0');
-        for (const auto value : state_)
-            output << std::setw(8) << value;
-        return output.str();
-    }
-
-  private:
-    static constexpr std::array<std::uint32_t, 64U> constants_{
-        0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U, 0x923f82a4U,
-        0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U, 0x72be5d74U, 0x80deb1feU,
-        0x9bdc06a7U, 0xc19bf174U, 0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU,
-        0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU, 0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U,
-        0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U, 0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU,
-        0x53380d13U, 0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U, 0xa2bfe8a1U, 0xa81a664bU,
-        0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U, 0x19a4c116U,
-        0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
-        0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U, 0x90befffaU, 0xa4506cebU, 0xbef9a3f7U,
-        0xc67178f2U};
-
-    [[nodiscard]] static std::uint32_t choose(const std::uint32_t x, const std::uint32_t y,
-                                              const std::uint32_t z) noexcept
-    {
-        return (x & y) ^ (~x & z);
-    }
-    [[nodiscard]] static std::uint32_t majority(const std::uint32_t x, const std::uint32_t y,
-                                                const std::uint32_t z) noexcept
-    {
-        return (x & y) ^ (x & z) ^ (y & z);
-    }
-    [[nodiscard]] static std::uint32_t sigma0(const std::uint32_t x) noexcept
-    {
-        return std::rotr(x, 2) ^ std::rotr(x, 13) ^ std::rotr(x, 22);
-    }
-    [[nodiscard]] static std::uint32_t sigma1(const std::uint32_t x) noexcept
-    {
-        return std::rotr(x, 6) ^ std::rotr(x, 11) ^ std::rotr(x, 25);
-    }
-    [[nodiscard]] static std::uint32_t gamma0(const std::uint32_t x) noexcept
-    {
-        return std::rotr(x, 7) ^ std::rotr(x, 18) ^ (x >> 3U);
-    }
-    [[nodiscard]] static std::uint32_t gamma1(const std::uint32_t x) noexcept
-    {
-        return std::rotr(x, 17) ^ std::rotr(x, 19) ^ (x >> 10U);
-    }
-
-    void transform() noexcept
-    {
-        std::array<std::uint32_t, 64U> words{};
-        for (std::size_t index = 0U; index < 16U; ++index)
-        {
-            const auto offset = index * 4U;
-            words[index] = (static_cast<std::uint32_t>(block_[offset]) << 24U) |
-                           (static_cast<std::uint32_t>(block_[offset + 1U]) << 16U) |
-                           (static_cast<std::uint32_t>(block_[offset + 2U]) << 8U) |
-                           static_cast<std::uint32_t>(block_[offset + 3U]);
-        }
-        for (std::size_t index = 16U; index < words.size(); ++index)
-            words[index] = gamma1(words[index - 2U]) + words[index - 7U] +
-                           gamma0(words[index - 15U]) + words[index - 16U];
-
-        auto a = state_[0];
-        auto b = state_[1];
-        auto c = state_[2];
-        auto d = state_[3];
-        auto e = state_[4];
-        auto f = state_[5];
-        auto g = state_[6];
-        auto h = state_[7];
-        for (std::size_t index = 0U; index < words.size(); ++index)
-        {
-            const auto first = h + sigma1(e) + choose(e, f, g) + constants_[index] + words[index];
-            const auto second = sigma0(a) + majority(a, b, c);
-            h = g;
-            g = f;
-            f = e;
-            e = d + first;
-            d = c;
-            c = b;
-            b = a;
-            a = first + second;
-        }
-        state_[0] += a;
-        state_[1] += b;
-        state_[2] += c;
-        state_[3] += d;
-        state_[4] += e;
-        state_[5] += f;
-        state_[6] += g;
-        state_[7] += h;
-    }
-
-    std::array<std::uint8_t, 64U> block_{};
-    std::size_t block_size_{};
-    std::uint64_t bit_length_{};
-    std::array<std::uint32_t, 8U> state_{0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
-                                         0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U};
-};
-
-std::string sha256(const std::span<const std::byte> bytes) noexcept
-{
-    Sha256 hash;
-    hash.update(bytes);
-    return hash.finish();
 }
 
 std::string format_utc(const camera::WallClockTime time)
@@ -297,6 +152,9 @@ Json metadata_json(const EventManifestMetadata& metadata,
                 metadata.paper_speed.has_value() ? Json(*metadata.paper_speed) : Json(nullptr)},
                {"uploadState", metadata.upload_state},
                {"timeQuality", metadata.time_quality},
+               {"writeMode", "buffered"},
+               {"powerLossDurable", false},
+               {"verification", "upload-or-on-demand"},
                {"destinationRelativePath", destination_relative.generic_string()}};
     return value;
 }
@@ -440,6 +298,7 @@ bool has_string(const Json& value, const std::string_view key) noexcept
 
 Result<void> validate_manifest_shape(const Json& manifest, const EventStoreOptions& options)
 {
+    const auto schema = manifest.value("schemaVersion", 0U);
     static constexpr std::array<std::string_view, 13U> required_strings{
         "eventId",         "decisionState",    "candidateTime", "startTime",        "endTime",
         "triggerCameraId", "triggerReason",    "algorithmName", "algorithmVersion", "configVersion",
@@ -466,6 +325,14 @@ Result<void> validate_manifest_shape(const Json& manifest, const EventStoreOptio
         manifest["keyFrames"].size() > options.maximum_key_frames)
         return Result<void>::failure(event_error("EVENT_RECOVERY_FAILED", Severity::critical,
                                                  "事件 manifest 必需字段缺失或类型错误",
+                                                 "event.recovery.verify"));
+    if (schema == event_manifest_schema_version &&
+        (!manifest.contains("writeMode") || manifest["writeMode"] != "buffered" ||
+         !manifest.contains("powerLossDurable") || !manifest["powerLossDurable"].is_boolean() ||
+         manifest["powerLossDurable"].get<bool>() || !manifest.contains("verification") ||
+         manifest["verification"] != "upload-or-on-demand"))
+        return Result<void>::failure(event_error("EVENT_RECOVERY_FAILED", Severity::critical,
+                                                 "事件 manifest v3 缓冲写策略字段无效",
                                                  "event.recovery.verify"));
 
     std::set<std::string> camera_ids;
@@ -558,31 +425,27 @@ Result<FileRecord> write_verified(IEventFileSystem& file_system,
                                   const std::filesystem::path& transaction_directory,
                                   const std::filesystem::path& relative_path,
                                   const std::span<const std::byte> contents,
-                                  const std::size_t maximum_file_bytes)
+                                  const std::stop_token stop_token)
 {
     const auto absolute_path = transaction_directory / relative_path;
-    auto write = file_system.write_new_file_durable(absolute_path, contents);
+    auto write = file_system.write_new_file_buffered(absolute_path, contents, stop_token);
     if (!write)
         return Result<FileRecord>::failure(wrap_file_error(
             write.error(), "事件文件写入失败", "event.persist.write", transaction_directory));
-    auto read = file_system.read_file_bounded(absolute_path, maximum_file_bytes);
-    if (!read)
-        return Result<FileRecord>::failure(wrap_file_error(
-            read.error(), "事件文件写后读取失败", "event.persist.verify", transaction_directory));
-    const auto expected = sha256(contents);
-    const auto actual = sha256(read.value());
-    if (read.value().size() != contents.size() || actual != expected)
+    if (write.value().bytes_written != contents.size() || write.value().sha256.size() != 64U)
     {
         Error error =
             event_error("EVENT_CHECKSUM_FAILED", Severity::critical,
-                        "事件文件写后长度或 SHA-256 校验不匹配", "event.persist.verify", false);
+                        "事件文件写入长度或 CNG SHA-256 结果无效", "event.persist.write", false);
         error.details.push_back({.key = "file", .value = relative_path.generic_string()});
         error.details.push_back(
             {.key = "transactionDirectory", .value = transaction_directory.string()});
         return Result<FileRecord>::failure(std::move(error));
     }
     return Result<FileRecord>::success(
-        {.relative_path = relative_path, .bytes = contents.size(), .checksum = expected});
+        {.relative_path = relative_path,
+         .bytes = static_cast<std::size_t>(write.value().bytes_written),
+         .checksum = std::move(write).value().sha256});
 }
 
 Json frame_json(const camera::FrameView& frame, const std::filesystem::path& relative_path)
@@ -638,7 +501,6 @@ std::uint64_t aligned_nvme_region(const std::uint64_t value) noexcept
 struct EncodedRawBlock final
 {
     std::vector<std::byte> bytes;
-    std::string checksum;
     Json manifest;
 };
 
@@ -686,20 +548,26 @@ Result<EncodedRawBlock> encode_raw_block(const std::string_view event_id,
     auto bytes = std::span<std::byte>{result.bytes};
     constexpr std::array<std::byte, 8U> header_magic{std::byte{'P'}, std::byte{'B'}, std::byte{'N'},
                                                      std::byte{'V'}, std::byte{'M'}, std::byte{'E'},
-                                                     std::byte{'1'}, std::byte{0U}};
+                                                     std::byte{'2'}, std::byte{0U}};
     std::ranges::copy(header_magic, bytes.begin());
     put_little<std::uint16_t>(bytes, 8U, nvme_format_version);
     put_little<std::uint16_t>(bytes, 10U, nvme_page_bytes);
     put_little<std::uint32_t>(bytes, 12U, 0x01020304U);
-    const auto identity =
-        std::string{event_id} + ":" + std::string{camera_id} + ":" + std::to_string(ordinal);
-    const auto identity_digest = sha256(bytes_of(identity));
-    for (std::size_t index = 0U; index < 16U; ++index)
+    std::uint64_t identity_left = 1469598103934665603ULL;
+    std::uint64_t identity_right = ordinal + 0x9E3779B97F4A7C15ULL;
+    const auto mix = [&](const std::string_view value) {
+        for (const unsigned char character : value)
+        {
+            identity_left = (identity_left ^ character) * 1099511628211ULL;
+            identity_right = (identity_right << 7U) ^ (identity_right >> 3U) ^ character;
+        }
+    };
+    mix(event_id);
+    mix(camera_id);
+    for (std::size_t index = 0U; index < 8U; ++index)
     {
-        unsigned parsed{};
-        const auto first = identity_digest.data() + index * 2U;
-        static_cast<void>(std::from_chars(first, first + 2U, parsed, 16));
-        bytes[16U + index] = static_cast<std::byte>(parsed);
+        bytes[16U + index] = static_cast<std::byte>((identity_left >> (index * 8U)) & 0xffU);
+        bytes[24U + index] = static_cast<std::byte>((identity_right >> (index * 8U)) & 0xffU);
     }
     put_little<std::uint64_t>(bytes, 32U, ordinal + 1U);
     std::ranges::copy(std::as_bytes(std::span{camera_id.data(), camera_id.size()}),
@@ -729,7 +597,6 @@ Result<EncodedRawBlock> encode_raw_block(const std::string_view event_id,
         aligned_nvme_region(static_cast<std::uint64_t>(index_capacity) * nvme_index_entry_bytes);
     const auto data_start = static_cast<std::uint64_t>(nvme_page_bytes) + index_reserved;
     std::uint64_t data_offset = data_start;
-    std::uint32_t data_crc{};
     for (std::size_t frame_index = 0U; frame_index < frames.size(); ++frame_index)
     {
         const auto& frame = frames[frame_index];
@@ -753,10 +620,9 @@ Result<EncodedRawBlock> encode_raw_block(const std::string_view event_id,
         put_little<std::uint32_t>(entry, 68U, geometry.stride);
         put_little<std::uint16_t>(entry, 72U, pixel_format_id(format));
         put_little<std::uint16_t>(entry, 74U, frame.flags().incomplete ? 1U : 0U);
-        put_little<std::uint32_t>(entry, 76U, crc32c(frame.bytes()));
+        put_little<std::uint32_t>(entry, 76U, 0U);
         put_little<std::uint32_t>(entry, 80U, crc32c(entry));
         std::ranges::copy(frame.bytes(), bytes.begin() + static_cast<std::ptrdiff_t>(data_offset));
-        data_crc = crc32c(frame.bytes(), data_crc);
         data_offset += frame.bytes().size();
     }
     const auto index_bytes = static_cast<std::uint64_t>(frames.size()) * nvme_index_entry_bytes;
@@ -768,7 +634,7 @@ Result<EncodedRawBlock> encode_raw_block(const std::string_view event_id,
                                                      std::byte{'I'}, std::byte{'T'}};
     constexpr std::array<std::byte, 8U> marker{std::byte{'C'}, std::byte{'O'}, std::byte{'M'},
                                                std::byte{'M'}, std::byte{'I'}, std::byte{'T'},
-                                               std::byte{'1'}, std::byte{0U}};
+                                               std::byte{'2'}, std::byte{0U}};
     std::ranges::copy(footer_magic, footer.begin());
     put_little<std::uint16_t>(footer, 8U, nvme_format_version);
     put_little<std::uint16_t>(footer, 10U, nvme_page_bytes);
@@ -780,13 +646,11 @@ Result<EncodedRawBlock> encode_raw_block(const std::string_view event_id,
                              wall_nanoseconds(frames.back().received_wall_clock_time()));
     put_little<std::uint64_t>(footer, 48U, frames.back().sequence_number());
     put_little<std::uint32_t>(footer, 56U, index_crc);
-    put_little<std::uint32_t>(footer, 60U, data_crc);
+    put_little<std::uint32_t>(footer, 60U, 0U);
     put_little<std::uint32_t>(footer, 64U, header_crc);
     std::ranges::copy(marker, footer.begin() + 4088U);
     const auto footer_crc = crc32c(footer);
     put_little<std::uint32_t>(footer, 4084U, footer_crc);
-    const auto digest = sha256(result.bytes);
-    result.checksum = digest;
     result.manifest = {
         {"path", relative_path.generic_string()},
         {"cameraId", camera_id},
@@ -807,9 +671,8 @@ Result<EncodedRawBlock> encode_raw_block(const std::string_view event_id,
         {"sizeBytes", result.bytes.size()},
         {"headerCrc32c", header_crc},
         {"indexCrc32c", index_crc},
-        {"dataCrc32c", data_crc},
-        {"footerCrc32c", footer_crc},
-        {"sha256", "sha256:" + digest}};
+        {"dataCrc32c", 0U},
+        {"footerCrc32c", footer_crc}};
     return Result<EncodedRawBlock>::success(std::move(result));
 }
 
@@ -867,17 +730,16 @@ Result<void> verify_manifest_files(IEventFileSystem& file_system,
             return Result<void>::failure(event_error("EVENT_RECOVERY_FAILED", Severity::critical,
                                                      "事件 manifest 文件大小无效",
                                                      "event.recovery.verify"));
-        auto contents =
-            file_system.read_file_bounded(directory / relative, options.maximum_file_bytes);
-        if (!contents)
+        auto actual_size = file_system.file_size(directory / relative);
+        if (!actual_size)
             return Result<void>::failure(event_error("EVENT_RECOVERY_FAILED", Severity::critical,
-                                                     "无法读取 manifest 引用文件",
+                                                     "manifest 引用文件不存在或类型错误",
                                                      "event.recovery.verify", true));
         const std::string expected = checksum_value.get<std::string>();
-        if (contents.value().size() != expected_size ||
-            expected != "sha256:" + sha256(contents.value()))
+        if (actual_size.value() != expected_size || !expected.starts_with("sha256:") ||
+            expected.size() != 71U)
             return Result<void>::failure(event_error("EVENT_CHECKSUM_FAILED", Severity::critical,
-                                                     "恢复时事件文件校验不匹配",
+                                                     "事件文件长度或摘要声明无效",
                                                      "event.recovery.verify"));
     }
     return Result<void>::success();
@@ -895,7 +757,8 @@ Result<Json> parse_manifest(const std::span<const std::byte> bytes)
                                                      "事件 manifest 结构无效",
                                                      "event.recovery.parse"));
         const auto schema = value["schemaVersion"].get<std::uint32_t>();
-        if (schema != event_manifest_schema_version)
+        if (schema != event_manifest_schema_version &&
+            schema != event_manifest_legacy_schema_version)
             return Result<Json>::failure(event_error("EVENT_SCHEMA_UNSUPPORTED", Severity::error,
                                                      "事件 manifest schema 不受支持",
                                                      "event.recovery.parse"));
@@ -970,7 +833,7 @@ struct EventTransactionWriter::Impl final
                                                {"reason", reason},
                                                {"recoveredAt", current_utc_timestamp()}});
             static_cast<void>(
-                file_system->write_new_file_durable(source / "recovery.json", bytes_of(marker)));
+                file_system->write_new_file_buffered(source / "recovery.json", bytes_of(marker)));
         }
 
         for (std::size_t attempt = 0U; attempt < 1024U; ++attempt)
@@ -1101,9 +964,8 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
 
     const auto event_metadata_text =
         json_text(metadata_json(request.metadata, relative_destination));
-    auto event_metadata_record =
-        write_verified(*impl_->file_system, transaction, "event.json",
-                       bytes_of(event_metadata_text), impl_->options.maximum_file_bytes);
+    auto event_metadata_record = write_verified(*impl_->file_system, transaction, "event.json",
+                                                bytes_of(event_metadata_text), stop_token);
     if (!event_metadata_record)
         return Result<EventPersistenceOutcome>::failure(std::move(event_metadata_record).error());
     records.push_back(std::move(event_metadata_record).value());
@@ -1152,15 +1014,22 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
                                             raw_block_count, impl_->options.maximum_file_bytes);
             if (!encoded)
                 return Result<EventPersistenceOutcome>::failure(std::move(encoded).error());
-            auto write = impl_->file_system->write_new_raw_block_durable(transaction / relative,
-                                                                         encoded.value().bytes);
+            auto write = impl_->file_system->write_new_raw_block_buffered(
+                transaction / relative, encoded.value().bytes, stop_token);
             if (!write)
                 return Result<EventPersistenceOutcome>::failure(wrap_file_error(
-                    write.error(), "原始块两阶段写入失败", "event.persist.rawBlock", transaction));
+                    write.error(), "原始块缓冲写入失败", "event.persist.rawBlock", transaction));
+            if (write.value().bytes_written != encoded.value().bytes.size() ||
+                write.value().sha256.size() != 64U)
+                return Result<EventPersistenceOutcome>::failure(
+                    event_error("EVENT_CHECKSUM_FAILED", Severity::critical,
+                                "原始块写入长度或 CNG SHA-256 结果无效", "event.persist.rawBlock"));
             records.push_back({.relative_path = relative,
-                               .bytes = encoded.value().bytes.size(),
-                               .checksum = encoded.value().checksum});
-            manifest["rawBlocks"].push_back(std::move(encoded).value().manifest);
+                               .bytes = static_cast<std::size_t>(write.value().bytes_written),
+                               .checksum = write.value().sha256});
+            auto raw_manifest = std::move(encoded).value().manifest;
+            raw_manifest["sha256"] = "sha256:" + write.value().sha256;
+            manifest["rawBlocks"].push_back(std::move(raw_manifest));
             raw_count += block_end - block_begin;
             ++raw_block_count;
             block_begin = block_end;
@@ -1181,9 +1050,8 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
             return std::move(*stopped);
         const auto relative =
             std::filesystem::path{"keyframes"} / ("keyframe-" + std::to_string(index) + ".jpg");
-        auto record =
-            write_verified(*impl_->file_system, transaction, relative,
-                           request.key_frames[index].jpeg, impl_->options.maximum_file_bytes);
+        auto record = write_verified(*impl_->file_system, transaction, relative,
+                                     request.key_frames[index].jpeg, stop_token);
         if (!record)
             return Result<EventPersistenceOutcome>::failure(std::move(record).error());
         manifest["keyFrames"].push_back(key_frame_json(request.key_frames[index], relative));
@@ -1207,18 +1075,16 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
         return Result<EventPersistenceOutcome>::failure(
             event_error("EVENT_WRITE_FAILED", Severity::critical, "事件 manifest 超过固定大小上限",
                         "event.persist.manifest"));
-    auto manifest_write = impl_->file_system->write_new_file_durable(transaction / "manifest.json",
-                                                                     bytes_of(manifest_text));
+    auto manifest_write = impl_->file_system->write_new_file_buffered(
+        transaction / "manifest.json", bytes_of(manifest_text), stop_token);
     if (!manifest_write)
         return Result<EventPersistenceOutcome>::failure(
             wrap_file_error(manifest_write.error(), "事件 manifest 写入失败",
                             "event.persist.manifest", transaction));
-    auto manifest_read = impl_->file_system->read_file_bounded(
-        transaction / "manifest.json", impl_->options.maximum_manifest_bytes);
-    if (!manifest_read || manifest_read.value().size() != manifest_text.size() ||
-        !std::ranges::equal(manifest_read.value(), bytes_of(manifest_text)))
+    if (manifest_write.value().bytes_written != manifest_text.size() ||
+        manifest_write.value().sha256.size() != 64U)
         return Result<EventPersistenceOutcome>::failure(
-            event_error("EVENT_CHECKSUM_FAILED", Severity::critical, "事件 manifest 写后校验失败",
+            event_error("EVENT_CHECKSUM_FAILED", Severity::critical, "事件 manifest 写入结果无效",
                         "event.persist.manifest"));
 
     const auto destination = impl_->options.event_root / relative_destination;

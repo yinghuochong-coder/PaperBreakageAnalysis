@@ -148,6 +148,13 @@ struct PersistentUploadScheduler::Impl final
             }
             persisted = database->fail_upload_job(job.job_id, failure_class, outcome.error_code,
                                                   outcome.checkpoint_json, next_attempt, now);
+            if (persisted && outcome.error_code == "UPLOAD_SOURCE_CHANGED" && job.event_id)
+            {
+                persisted =
+                    database->mark_event_integrity_failed(*job.event_id, outcome.error_code, now);
+                if (persisted && config.integrity_failure_observer)
+                    config.integrity_failure_observer(*job.event_id, outcome.error_code);
+            }
         }
         if (!persisted)
         {

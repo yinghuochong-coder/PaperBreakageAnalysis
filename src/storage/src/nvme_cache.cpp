@@ -1,8 +1,10 @@
 #include "paperbreak/storage/nvme_cache.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <mutex>
@@ -10,6 +12,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+
+#include <intrin.h>
 
 namespace paperbreak::storage
 {
@@ -58,17 +62,57 @@ std::uint64_t saturating_add(const std::uint64_t left, const std::uint64_t right
     return left + right;
 }
 
+constexpr std::array<std::uint32_t, 256U> make_crc32c_table() noexcept
+{
+    std::array<std::uint32_t, 256U> table{};
+    for (std::uint32_t index = 0U; index < table.size(); ++index)
+    {
+        auto value = index;
+        for (unsigned bit = 0U; bit < 8U; ++bit)
+            value = (value >> 1U) ^ (0x82F63B78U & (0U - (value & 1U)));
+        table[index] = value;
+    }
+    return table;
+}
+
+bool sse42_available() noexcept
+{
+    std::array<int, 4U> registers{};
+    __cpuid(registers.data(), 1);
+    return (registers[2] & (1 << 20)) != 0;
+}
+
 } // namespace
 
 std::uint32_t crc32c(const std::span<const std::byte> bytes, const std::uint32_t seed) noexcept
 {
     std::uint32_t crc = ~seed;
-    for (const auto byte : bytes)
+    static const bool use_sse42 = sse42_available();
+    if (use_sse42)
     {
-        crc ^= std::to_integer<std::uint8_t>(byte);
-        for (unsigned bit = 0U; bit < 8U; ++bit)
-            crc = (crc >> 1U) ^ (0x82F63B78U & (0U - (crc & 1U)));
+        auto remaining = bytes.size();
+        const auto* current = bytes.data();
+#if defined(_M_X64)
+        while (remaining >= sizeof(std::uint64_t))
+        {
+            std::uint64_t value{};
+            std::memcpy(&value, current, sizeof(value));
+            crc = static_cast<std::uint32_t>(_mm_crc32_u64(crc, value));
+            current += sizeof(value);
+            remaining -= sizeof(value);
+        }
+#endif
+        while (remaining > 0U)
+        {
+            crc = _mm_crc32_u8(crc, std::to_integer<std::uint8_t>(*current));
+            ++current;
+            --remaining;
+        }
+        return ~crc;
     }
+    static constexpr auto table = make_crc32c_table();
+    for (const auto byte : bytes)
+        crc = table[(crc ^ std::to_integer<std::uint8_t>(byte)) & 0xffU] ^ (crc >> 8U);
     return ~crc;
 }
 
@@ -136,7 +180,6 @@ struct NvmeRollingCacheImpl final
     NvmeRollingCacheOptions options;
     std::shared_ptr<INvmeBlockStore> store;
     std::shared_ptr<INvmeBlockIndex> index;
-    std::shared_ptr<INvmeBlockRecovery> recovery;
     mutable std::mutex mutex;
     mutable std::mutex index_operation_mutex;
     std::condition_variable condition;
@@ -429,13 +472,11 @@ struct NvmeRollingCacheImpl final
 
 Result<std::shared_ptr<NvmeRollingCache>> NvmeRollingCache::create(
     NvmeRollingCacheOptions options, std::shared_ptr<INvmeBlockStore> store,
-    std::shared_ptr<INvmeBlockIndex> index, std::shared_ptr<INvmeBlockRecovery> recovery)
+    std::shared_ptr<INvmeBlockIndex> index)
 {
-    if (!store || !index || !recovery || options.root.empty() ||
-        options.maximum_cache_bytes == 0U || options.write_limit_bytes_per_second == 0U ||
+    if (!store || !index || options.root.empty() || options.maximum_cache_bytes == 0U ||
+        options.write_limit_bytes_per_second == 0U ||
         options.io_timeout <= std::chrono::milliseconds::zero() ||
-        options.recovery_timeout <= std::chrono::milliseconds::zero() ||
-        options.recovery_maximum_files == 0U || options.recovery_summary_bytes == 0U ||
         options.queue_capacity_per_camera != nvme_default_queue_capacity_per_camera ||
         options.cameras.empty() || options.cameras.size() > 4U)
     {
@@ -449,7 +490,6 @@ Result<std::shared_ptr<NvmeRollingCache>> NvmeRollingCache::create(
     impl->options = std::move(options);
     impl->store = std::move(store);
     impl->index = std::move(index);
-    impl->recovery = std::move(recovery);
     std::uint64_t smallest_block = (std::numeric_limits<std::uint64_t>::max)();
     for (const auto& layout : impl->options.cameras)
     {
@@ -509,7 +549,42 @@ Result<void> NvmeRollingCache::start()
         impl_->started = true;
         impl_->completed = false;
     }
-    auto prepared = impl_->store->prepare(impl_->options.root);
+    const auto sessions_root = impl_->options.root / "sessions";
+    std::error_code directory_error;
+    std::filesystem::create_directories(sessions_root, directory_error);
+    std::filesystem::path session_root;
+    static std::atomic_uint64_t session_sequence{1U};
+    for (std::size_t attempt = 0U; !directory_error && attempt < 64U; ++attempt)
+    {
+        const auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+        const auto sequence = session_sequence.fetch_add(1U, std::memory_order_relaxed);
+        const auto candidate =
+            sessions_root / ("session-" + std::to_string(ticks) + "-" + std::to_string(sequence));
+        if (std::filesystem::create_directory(candidate, directory_error))
+        {
+            session_root = candidate;
+            break;
+        }
+        if (directory_error == std::errc::file_exists)
+            directory_error.clear();
+    }
+    if (directory_error || session_root.empty())
+    {
+        impl_->degrade(nvme_error("NVME_CACHE_UNAVAILABLE", Severity::error,
+                                  "无法唯一创建 NVMe 当前会话目录", "storage.nvme.session",
+                                  "create-session-failed", true));
+        std::scoped_lock lock{impl_->mutex};
+        impl_->completed = true;
+        return Result<void>::success();
+    }
+    impl_->options.root = session_root;
+    {
+        std::scoped_lock lock{impl_->mutex};
+        impl_->metrics.active_session_root = session_root;
+    }
+    auto prepared = impl_->store->prepare(session_root);
     if (!prepared)
     {
         impl_->degrade(prepared.error());
@@ -517,7 +592,7 @@ Result<void> NvmeRollingCache::start()
         impl_->completed = true;
         return Result<void>::success();
     }
-    auto indexed = impl_->index->prepare(impl_->options.root, impl_->maximum_index_blocks,
+    auto indexed = impl_->index->prepare(session_root, impl_->maximum_index_blocks,
                                          nvme_default_maximum_event_leases);
     if (!indexed)
     {
@@ -526,64 +601,11 @@ Result<void> NvmeRollingCache::start()
         impl_->completed = true;
         return Result<void>::success();
     }
-    auto recovered = impl_->recovery->recover(
-        impl_->options.root,
-        {.maximum_files = impl_->options.recovery_maximum_files,
-         .maximum_summary_bytes = impl_->options.recovery_summary_bytes,
-         .deadline = std::chrono::steady_clock::now() + impl_->options.recovery_timeout});
-    if (!recovered)
-    {
-        impl_->degrade(recovered.error());
-        std::scoped_lock lock{impl_->mutex};
-        impl_->completed = true;
-        return Result<void>::success();
-    }
-    for (const auto& block : recovered.value().blocks)
-    {
-        const auto lane = impl_->lanes.find(block.camera_id);
-        if (lane == impl_->lanes.end())
-            continue;
-        if (block.generation == (std::numeric_limits<std::uint64_t>::max)())
-        {
-            auto error = nvme_error("NVME_RECOVERY_LIMIT", Severity::error, "NVMe 恢复块代次已耗尽",
-                                    "storage.nvme.recovery", "generation-exhausted");
-            impl_->degrade(std::move(error));
-            std::scoped_lock lock{impl_->mutex};
-            impl_->completed = true;
-            return Result<void>::success();
-        }
-        lane->second.next_generation =
-            std::max(lane->second.next_generation, block.generation + 1U);
-    }
-    auto rebuilt = impl_->index->rebuild(recovered.value().blocks);
-    if (!rebuilt)
-    {
-        impl_->degrade(rebuilt.error());
-        std::scoped_lock lock{impl_->mutex};
-        impl_->completed = true;
-        return Result<void>::success();
-    }
     auto index_snapshot = impl_->index->snapshot();
     {
         std::scoped_lock lock{impl_->mutex};
-        impl_->metrics.current_cache_bytes = recovered.value().recovered_bytes;
-        impl_->metrics.recovery_scanned_files = recovered.value().scanned_files;
-        impl_->metrics.recovery_accepted_blocks = recovered.value().accepted_blocks;
-        impl_->metrics.recovery_repaired_blocks = recovered.value().repaired_blocks;
-        impl_->metrics.recovery_quarantined_blocks = recovered.value().quarantined_blocks;
+        impl_->metrics.current_cache_bytes = 0U;
         impl_->apply_index_snapshot_locked(index_snapshot);
-    }
-    if (recovered.value().quarantined_blocks > 0U)
-    {
-        auto warning = nvme_error("NVME_BLOCK_QUARANTINED", Severity::warning,
-                                  "不可信 NVMe 块已保留到隔离目录",
-                                  "storage.nvme.recovery.quarantine", "validation-failed");
-        warning.details.push_back({"count", std::to_string(recovered.value().quarantined_blocks)});
-        {
-            std::scoped_lock lock{impl_->mutex};
-            impl_->metrics.last_error = warning;
-        }
-        impl_->notify_error(warning);
     }
     if (auto reclaimed = impl_->reclaim_for(0U); !reclaimed)
     {

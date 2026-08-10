@@ -52,12 +52,13 @@
 M7-02 将配置升级为 schema v2，并加入实际运行时消费者：
 
 - `storage.rollingCacheEnabled`：普通 NVMe 滚动缓存开关；
-- `storage.maximumCacheStorageGiB`：已提交块和单个在写临时块的总物理容量上限；
+- `storage.maximumCacheStorageGiB`：当前服务 session 内已提交块和单个在写临时块的总物理容量
+  上限；旧 session 不计入该值但仍占用卷空间；
 - `storage.rollingCacheWriteLimitMiBps`：普通滚动写限速，既不能低于完整原始输入需求，也不能
   高于目标卷实测持续写带宽的 80%。
 - `storage.rollingCacheIoTimeoutMs`：单个块从开始写入到完成提交的总截止时间，范围 100～600000 ms。
 
-NVMe v1 块时长固定为 1000 ms，不作为可任意修改的配置字段。块上限必须从服务已校验并回读
+NVMe v2 块时长固定为 1000 ms，不作为可任意修改的配置字段。块上限必须从服务已校验并回读
 的相机数、最大帧率、stride、height 和像素格式计算；`warningFreeSpaceGiB`、
 `criticalFreeSpaceGiB`、`stopFreeSpaceGiB` 与最大缓存容量同时生效，取更严格的准入结果。
 完整格式和计算公式见 `docs/architecture/decisions/adr-011-nvme-rolling-cache-format-capacity.md`。
@@ -66,10 +67,10 @@ ROI、stride 和目标 NVMe 持续写能力未验收前，不应直接作为生�
 块、两个排队块和写线程当前块共最多四块的共享帧引用会计入
 `acquisition.framePoolCapacity` 启动门禁。
 
-M7-04 启动恢复不新增 schema v2 配置字段，采用固定安全上限：最多扫描 100000 个
-`.pbnvme`/`.partial` 候选、恢复摘要最多 64 MiB、总截止时间 5 分钟，并用固定 1 MiB 缓冲流式
-校验负载。达到任一上限时普通滚动缓存显式降级，事件内存缓存继续运行；不得通过放宽为无界
-扫描来绕过门禁。隔离文件保存在 `<cacheRoot>/.quarantine/`，不计入可回绕正常块，需运维审查。
+ADR-017 取消滚动缓存启动恢复配置与固定扫描上限。每次启动创建
+`<cacheRoot>/sessions/<session-id>`，不枚举、不读取、不删除旧 session 或旧版根目录块。系统不
+自动清理这些数据；运维只能在服务停止后人工清理。卷级 warning/critical/stop 水位包含所有
+真实占用，继续防止旧 session 耗尽磁盘。
 
 ## M8 Uplink v1 配置
 

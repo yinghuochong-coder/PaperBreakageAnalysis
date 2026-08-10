@@ -1,6 +1,7 @@
 #include "paperbreak/storage/event_store.hpp"
 
 #include <Windows.h>
+#include <bcrypt.h>
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <limits>
 #include <system_error>
+#include <utility>
 
 namespace paperbreak::storage
 {
@@ -52,6 +54,133 @@ class UniqueHandle final
   private:
     HANDLE value_;
 };
+
+class CngSha256 final
+{
+  public:
+    CngSha256() = default;
+    ~CngSha256()
+    {
+        if (hash_ != nullptr)
+            static_cast<void>(BCryptDestroyHash(hash_));
+        if (algorithm_ != nullptr)
+            static_cast<void>(BCryptCloseAlgorithmProvider(algorithm_, 0U));
+    }
+    CngSha256(const CngSha256&) = delete;
+    CngSha256& operator=(const CngSha256&) = delete;
+
+    [[nodiscard]] Result<void> initialize()
+    {
+        auto status =
+            BCryptOpenAlgorithmProvider(&algorithm_, BCRYPT_SHA256_ALGORITHM, nullptr, 0U);
+        if (!BCRYPT_SUCCESS(status))
+            return failure("无法打开 Windows CNG SHA-256", "event.file.hash.open", status);
+        status = BCryptCreateHash(algorithm_, &hash_, nullptr, 0U, nullptr, 0U, 0U);
+        if (!BCRYPT_SUCCESS(status))
+            return failure("无法创建 Windows CNG SHA-256", "event.file.hash.create", status);
+        return Result<void>::success();
+    }
+
+    [[nodiscard]] Result<void> update(const std::span<const std::byte> bytes)
+    {
+        std::size_t consumed{};
+        while (consumed < bytes.size())
+        {
+            const auto count = static_cast<ULONG>(
+                (std::min)(bytes.size() - consumed,
+                           static_cast<std::size_t>((std::numeric_limits<ULONG>::max)())));
+            const auto status = BCryptHashData(
+                hash_, reinterpret_cast<PUCHAR>(const_cast<std::byte*>(bytes.data() + consumed)),
+                count, 0U);
+            if (!BCRYPT_SUCCESS(status))
+                return failure("Windows CNG SHA-256 更新失败", "event.file.hash.update", status);
+            consumed += count;
+        }
+        return Result<void>::success();
+    }
+
+    [[nodiscard]] Result<std::string> finish()
+    {
+        std::array<UCHAR, 32U> digest{};
+        const auto status =
+            BCryptFinishHash(hash_, digest.data(), static_cast<ULONG>(digest.size()), 0U);
+        if (!BCRYPT_SUCCESS(status))
+            return Result<std::string>::failure(
+                failure_error("Windows CNG SHA-256 完成失败", "event.file.hash.finish", status));
+        constexpr char digits[] = "0123456789abcdef";
+        std::string text(digest.size() * 2U, '0');
+        for (std::size_t index = 0U; index < digest.size(); ++index)
+        {
+            text[index * 2U] = digits[(digest[index] >> 4U) & 0x0FU];
+            text[index * 2U + 1U] = digits[digest[index] & 0x0FU];
+        }
+        return Result<std::string>::success(std::move(text));
+    }
+
+  private:
+    static Error failure_error(std::string message, std::string operation, const NTSTATUS status)
+    {
+        auto error = file_error(std::move(message), std::move(operation));
+        error.native_domain = "cng";
+        error.native_code = std::to_string(static_cast<std::int64_t>(status));
+        return error;
+    }
+
+    static Result<void> failure(std::string message, std::string operation, const NTSTATUS status)
+    {
+        return Result<void>::failure(
+            failure_error(std::move(message), std::move(operation), status));
+    }
+
+    BCRYPT_ALG_HANDLE algorithm_{};
+    BCRYPT_HASH_HANDLE hash_{};
+};
+
+Result<BufferedFileWriteResult> write_buffered_file(const std::filesystem::path& path,
+                                                    const std::span<const std::byte> contents,
+                                                    const std::stop_token stop_token)
+{
+    if (path.empty())
+        return Result<BufferedFileWriteResult>::failure(
+            file_error("事件文件路径为空", "event.file.write"));
+    CngSha256 hash;
+    if (auto initialized = hash.initialize(); !initialized)
+        return Result<BufferedFileWriteResult>::failure(std::move(initialized).error());
+    std::uint64_t written_total{};
+    {
+        UniqueHandle file{CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
+        if (!file.valid())
+            return Result<BufferedFileWriteResult>::failure(
+                file_error("无法创建事件文件", "event.file.create", GetLastError()));
+        while (written_total < contents.size())
+        {
+            if (stop_token.stop_requested())
+                return Result<BufferedFileWriteResult>::failure(
+                    file_error("事件文件写入已取消", "event.file.write.cancel"));
+            const auto remaining = contents.size() - static_cast<std::size_t>(written_total);
+            const DWORD chunk = static_cast<DWORD>(
+                (std::min)(remaining,
+                           static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD written{};
+            if (WriteFile(file.get(), contents.data() + written_total, chunk, &written, nullptr) ==
+                    FALSE ||
+                written == 0U || written > chunk)
+                return Result<BufferedFileWriteResult>::failure(
+                    file_error("事件文件发生短写", "event.file.write", GetLastError()));
+            auto hashed = hash.update(contents.subspan(static_cast<std::size_t>(written_total),
+                                                       static_cast<std::size_t>(written)));
+            if (!hashed)
+                return Result<BufferedFileWriteResult>::failure(std::move(hashed).error());
+            written_total += written;
+        }
+    }
+    auto digest = hash.finish();
+    if (!digest)
+        return Result<BufferedFileWriteResult>::failure(std::move(digest).error());
+    return Result<BufferedFileWriteResult>::success(
+        {.bytes_written = written_total, .sha256 = std::move(digest).value()});
+}
 
 Result<std::wstring> volume_root_for(const std::filesystem::path& path)
 {
@@ -101,90 +230,29 @@ class WindowsEventFileSystem final : public IEventFileSystem
         return Result<void>::success();
     }
 
-    Result<void> write_new_file_durable(const std::filesystem::path& path,
-                                        const std::span<const std::byte> contents) override
+    Result<BufferedFileWriteResult> write_new_file_buffered(
+        const std::filesystem::path& path, const std::span<const std::byte> contents,
+        const std::stop_token stop_token) override
     {
-        if (path.empty() || contents.empty())
-            return Result<void>::failure(file_error("事件文件路径或内容为空", "event.file.write"));
-
-        UniqueHandle file{CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr)};
-        if (!file.valid())
-            return Result<void>::failure(
-                file_error("无法创建事件文件", "event.file.create", GetLastError()));
-
-        std::size_t written_total = 0U;
-        while (written_total < contents.size())
-        {
-            const auto remaining = contents.size() - written_total;
-            const DWORD chunk = static_cast<DWORD>(
-                (std::min)(remaining,
-                           static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
-            DWORD written = 0U;
-            if (WriteFile(file.get(), contents.data() + written_total, chunk, &written, nullptr) ==
-                    FALSE ||
-                written == 0U)
-            {
-                return Result<void>::failure(
-                    file_error("事件文件写入不完整", "event.file.write", GetLastError()));
-            }
-            written_total += written;
-        }
-        if (FlushFileBuffers(file.get()) == FALSE)
-            return Result<void>::failure(
-                file_error("无法刷新事件文件", "event.file.flush", GetLastError()));
-        return Result<void>::success();
+        return write_buffered_file(path, contents, stop_token);
     }
 
-    Result<void> write_new_raw_block_durable(const std::filesystem::path& path,
-                                             const std::span<const std::byte> contents) override
+    Result<BufferedFileWriteResult> write_new_raw_block_buffered(
+        const std::filesystem::path& path, const std::span<const std::byte> contents,
+        const std::stop_token stop_token) override
     {
         if (path.empty() || contents.size() <= 8U)
-            return Result<void>::failure(
+            return Result<BufferedFileWriteResult>::failure(
                 file_error("原始块路径或内容无效", "event.file.block.write"));
         auto partial = path;
         partial += L".partial";
-        {
-            UniqueHandle file{CreateFileW(partial.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-                                          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
-                                          nullptr)};
-            if (!file.valid())
-                return Result<void>::failure(file_error("无法创建原始块临时文件",
-                                                        "event.file.block.create", GetLastError()));
-            const auto write_all = [&](const std::span<const std::byte> bytes) -> Result<void> {
-                std::size_t written_total = 0U;
-                while (written_total < bytes.size())
-                {
-                    const DWORD chunk = static_cast<DWORD>(
-                        (std::min)(bytes.size() - written_total,
-                                   static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
-                    DWORD written = 0U;
-                    if (WriteFile(file.get(), bytes.data() + written_total, chunk, &written,
-                                  nullptr) == FALSE ||
-                        written == 0U)
-                        return Result<void>::failure(
-                            file_error("原始块发生短写", "event.file.block.write", GetLastError()));
-                    written_total += written;
-                }
-                return Result<void>::success();
-            };
-            auto body = write_all(contents.first(contents.size() - 8U));
-            if (!body)
-                return body;
-            if (FlushFileBuffers(file.get()) == FALSE)
-                return Result<void>::failure(file_error(
-                    "无法持久刷新原始块主体", "event.file.block.flushBody", GetLastError()));
-            auto marker = write_all(contents.last(8U));
-            if (!marker)
-                return marker;
-            if (FlushFileBuffers(file.get()) == FALSE)
-                return Result<void>::failure(file_error(
-                    "无法持久刷新原始块提交标记", "event.file.block.flushMarker", GetLastError()));
-        }
-        if (MoveFileExW(partial.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH) == FALSE)
-            return Result<void>::failure(
+        auto written = write_buffered_file(partial, contents, stop_token);
+        if (!written)
+            return written;
+        if (MoveFileExW(partial.c_str(), path.c_str(), 0U) == FALSE)
+            return Result<BufferedFileWriteResult>::failure(
                 file_error("无法原子发布原始块", "event.file.block.publish", GetLastError()));
-        return Result<void>::success();
+        return written;
     }
 
     Result<std::vector<std::byte>> read_file_bounded(const std::filesystem::path& path,
@@ -220,6 +288,76 @@ class WindowsEventFileSystem final : public IEventFileSystem
             return Result<std::vector<std::byte>>::failure(
                 file_error("事件文件读取内存预算不足", "event.file.read"));
         }
+    }
+
+    Result<HashedFileContents> read_file_bounded_hashed(const std::filesystem::path& path,
+                                                        const std::size_t maximum_bytes) override
+    {
+        if (path.empty() || maximum_bytes == 0U)
+            return Result<HashedFileContents>::failure(
+                file_error("事件文件读取参数无效", "event.file.readHashed"));
+        std::error_code size_error;
+        const auto size = std::filesystem::file_size(path, size_error);
+        if (size_error || size == 0U || size > maximum_bytes ||
+            size > static_cast<std::uintmax_t>((std::numeric_limits<std::size_t>::max)()))
+            return Result<HashedFileContents>::failure(
+                file_error("事件文件为空、过大或无法读取大小", "event.file.readHashed.size",
+                           static_cast<DWORD>(size_error.value())));
+        UniqueHandle file{CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr)};
+        if (!file.valid())
+            return Result<HashedFileContents>::failure(
+                file_error("无法打开事件文件", "event.file.readHashed.open", GetLastError()));
+        CngSha256 hash;
+        if (auto initialized = hash.initialize(); !initialized)
+            return Result<HashedFileContents>::failure(std::move(initialized).error());
+        std::vector<std::byte> contents;
+        try
+        {
+            contents.resize(static_cast<std::size_t>(size));
+        }
+        catch (const std::exception&)
+        {
+            return Result<HashedFileContents>::failure(
+                file_error("无法分配事件文件读取缓冲区", "event.file.readHashed.allocate"));
+        }
+        std::size_t read_total{};
+        while (read_total < contents.size())
+        {
+            const DWORD requested = static_cast<DWORD>(
+                (std::min)(contents.size() - read_total,
+                           static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
+            DWORD read{};
+            if (ReadFile(file.get(), contents.data() + read_total, requested, &read, nullptr) ==
+                    FALSE ||
+                read == 0U || read > requested)
+                return Result<HashedFileContents>::failure(
+                    file_error("事件文件发生短读", "event.file.readHashed.read", GetLastError()));
+            if (auto updated = hash.update(
+                    std::span{contents}.subspan(read_total, static_cast<std::size_t>(read)));
+                !updated)
+                return Result<HashedFileContents>::failure(std::move(updated).error());
+            read_total += read;
+        }
+        auto digest = hash.finish();
+        if (!digest)
+            return Result<HashedFileContents>::failure(std::move(digest).error());
+        return Result<HashedFileContents>::success(
+            {.contents = std::move(contents), .sha256 = std::move(digest).value()});
+    }
+
+    Result<std::uint64_t> file_size(const std::filesystem::path& path) override
+    {
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(path, error) || error)
+            return Result<std::uint64_t>::failure(file_error(
+                "事件文件不存在或类型错误", "event.file.size", static_cast<DWORD>(error.value())));
+        const auto size = std::filesystem::file_size(path, error);
+        if (error || size > (std::numeric_limits<std::uint64_t>::max)())
+            return Result<std::uint64_t>::failure(file_error(
+                "无法读取事件文件大小", "event.file.size", static_cast<DWORD>(error.value())));
+        return Result<std::uint64_t>::success(static_cast<std::uint64_t>(size));
     }
 
     Result<EventPathKind> path_kind(const std::filesystem::path& path) override
@@ -288,7 +426,7 @@ class WindowsEventFileSystem final : public IEventFileSystem
             return Result<void>::failure(file_error("事件事务目录和正式目录不在同一卷",
                                                     "event.file.atomicMove",
                                                     ERROR_NOT_SAME_DEVICE));
-        if (MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH) == FALSE)
+        if (MoveFileExW(source.c_str(), destination.c_str(), 0U) == FALSE)
             return Result<void>::failure(
                 file_error("无法原子提交事件目录", "event.file.atomicMove", GetLastError()));
         return Result<void>::success();

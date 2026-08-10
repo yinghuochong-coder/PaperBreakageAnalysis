@@ -522,8 +522,8 @@ struct EventRuntimeImpl final
                 report(*completion.error);
             return;
         }
-        auto indexed =
-            options.database->index_committed_event(completion.outcome->committed_directory);
+        auto indexed = options.database->index_committed_manifest(
+            completion.outcome->committed_directory, completion.outcome->manifest_json);
         if (!indexed)
         {
             ++event_failures;

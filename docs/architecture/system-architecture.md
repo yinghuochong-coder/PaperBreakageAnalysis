@@ -659,25 +659,23 @@ IPC 层不直接操作相机、数据库或配置文件。业务用例返回稳�
 
 ### 12.2 事件目录
 
-事件 manifest schema v2 不兼容 v1。`manifest.json` 使用 `decisionState`、算法确认时间、
-`triggerCount` 和 `rawBlocks`；每个块记录相机、墙上/单调时间范围、帧号/序号范围、帧数、
-文件大小、CRC32C 与 SHA-256。原始证据按相机及单调时钟 1 秒窗口分块，单块最多 256 帧，
-格式复用 `PBNVME1` v1 的 4 KiB 头页、固定帧索引、逐帧 CRC32C、尾页和提交标记。
+当前规范由 ADR-017 定义。新事件使用 manifest v3 / `PBNVME2`，普通顺序缓冲写中以 Windows
+CNG 对实际成功写入字节计算一次 SHA-256；不使用 write-through，不调用 `FlushFileBuffers`，
+提交阶段和 SQLite 建索引阶段不读回原始负载。`PBNVME2` 保留头、索引项、索引区和尾页结构
+CRC32C，逐帧和 Data CRC 保留字段写零。manifest 明确声明 `writeMode=buffered`、
+`powerLossDurable=false`、`verification=upload-or-on-demand`。
 
-块写入顺序固定为：临时块主体和尾页、持久刷新、最后 8 字节提交标记、再次持久刷新、
-同卷原子发布块名。全部块、关键帧和 `event.json` 完成后最后写 manifest，再原子提交事件
-目录；取消或失败保留 `.transactions` 内的可恢复目录，正式目录绝不能暴露伪提交。
-
-部署 schema v2 前必须由用户人工归档旧 `events.db` 和旧事件目录并提供空事件根目录。
-代码不删除、不移动旧数据；检测到非空旧库、schema v1 manifest 或无法识别的旧 manifest
-时拒绝启动并报告 `EVENT_SCHEMA_UNSUPPORTED`。
+全部块、关键帧和 `event.json` 完成后最后写 manifest，再以不覆盖目标的同卷原子改名发布事件
+目录；取消或失败保留 `.transactions`。`Committed` 只表示文件已关闭且目录已发布到操作系统
+命名空间，不承诺突然断电后的可恢复性。manifest v2 / `PBNVME1` 保持只读检查和导出兼容，
+不迁移、不重写。
 
 - 事件根目录与临时目录必须位于同一卷，以保证最终 rename 语义；
 - 所有文件先写入唯一临时目录；
-- 每个文件写完后记录长度和校验；
+- 每个文件写入时同步记录实际长度和 CNG SHA-256；
 - manifest 最后生成；
-- 必要数据和目录元数据刷新后再原子重命名；
-- 未完成目录在启动时恢复、隔离或明确标损；
+- 文件关闭后执行普通同卷原子重命名；
+- 未完成目录启动时只做 manifest、路径、存在性和长度检查，再发布或隔离；
 - 正式目录不可被原地修改；复核和上传状态主要记录在数据库，必要的事件版本更新采用新版本元数据文件而非破坏原始证据。
 
 ### 12.3 SQLite
@@ -692,6 +690,15 @@ IPC 层不直接操作相机、数据库或配置文件。业务用例返回稳�
   manifest 来表达可变保留状态。
 
 ### 12.4 NVMe 滚动缓存
+
+当前规范由 ADR-017 定义：每次服务启动创建唯一 `cacheRoot/sessions/<session-id>`，使用当前
+session 独立派生索引、从 1 开始的代次和仅进程内有效的租约。启动不枚举、不读取、不删除旧
+session 或旧版根目录块，也不恢复旧索引、租约和尾块。`maximumCacheStorageGiB` 只限制当前
+session；旧数据继续占用卷空间，由卷级水位阻止耗尽，只能在服务停止后人工清理。
+
+滚动块为 `PBNVME2` 普通缓冲写，保留限速、总截止时间、有界队列、结构 CRC、临时文件和一次
+原子改名，删除逐帧/Data CRC、双刷新和两阶段耐久提交。以下 M7-01～M7-04 描述作为历史实现
+证据保留，其中启动恢复、尾块修复、跨重启索引/租约恢复已经被 ADR-017 取代，不是当前行为。
 
 M7 按 ADR-011 实现 NVMe v1 块：每相机 1 秒、原始帧不压缩、显式小端字段，文件由
 4096 字节头页、96 字节定长帧索引、原始数据区和 4096 字节提交尾页组成。逐帧及块区域
@@ -1043,15 +1050,16 @@ SCM 启停阶段的 `service-scm-status` 在线程日志运行时创建之前工
 | ADR-004 | Accepted | 所有跨线程通道固定容量并观测背压 | 稳定性和内存上限 |
 | ADR-005 | Accepted | 帧用池化只读共享所有权 | 跨分支零拷贝与 RAII |
 | ADR-006 | Accepted | 单调时间用于窗口，墙上时间用于展示 | 抵抗系统时间跳变 |
-| ADR-007 | Accepted | 事件使用临时目录、manifest 最后写、原子提交 | 防止读取半成品并支持恢复 |
+| ADR-007 | Superseded in part | 事件使用临时目录、manifest 最后写、原子提交 | 可见性保证保留；强制持久化被 ADR-017 取代 |
 | ADR-008 | Accepted | SQLite 只存元数据，事件文件独立保存 | 避免高速图像 BLOB 和数据库膨胀 |
 | ADR-009 | Accepted | 本机 IPC 使用 QLocalServer/QLocalSocket | Qt 集成和本机命名管道 |
 | ADR-010 | Proposed | 初版算法采用进程内接口实现，保留以后隔离进程的可能 | M6 在 ABI/故障隔离评审时确认 |
-| ADR-011 | Accepted | 每相机 1 秒原始块、显式小端头/索引/提交尾页、CRC32C、上界容量和 80% 持续带宽准入 | `decisions/adr-011-nvme-rolling-cache-format-capacity.md` |
+| ADR-011 | Superseded in part | 每相机 1 秒原始块、显式小端头/索引/提交尾页、CRC32C、上界容量和 80% 持续带宽准入 | 布局/容量保留；断电与跨重启恢复被 ADR-017 取代 |
 | [ADR-012](decisions/adr-012-uplink-v1-plaintext-protocol.md) | Accepted | Uplink v1 明文无鉴权协议、断点续传与参考模拟器 | M8-00 |
 | ADR-013 | Deferred | Plant IO 生产协议 | DEC-005/另行批准 |
 | ADR-014 | Deferred | 安装器技术 | M9-01 |
 | ADR-015 | Accepted | VS 2026/v145、CMake 4.2、外部 SDK 与 vcpkg manifest 基线 | `decisions/adr-015-windows-toolchain-dependencies.md` |
+| [ADR-017](decisions/adr-017-buffered-event-persistence-nonrecoverable-nvme-cache.md) | Accepted | 缓冲事件写入、按需完整校验、非恢复式 session 级 NVMe 缓存 | M5/M7 合并优化 |
 
 ## 21. 需求追踪
 

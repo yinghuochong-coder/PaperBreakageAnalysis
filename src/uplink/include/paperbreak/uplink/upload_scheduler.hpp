@@ -10,6 +10,7 @@
 #include <memory>
 #include <stop_token>
 #include <string>
+#include <string_view>
 
 namespace paperbreak::uplink
 {
@@ -43,6 +44,8 @@ struct PersistentUploadSchedulerConfig final
     std::uint32_t maximum_attempts{10U};
     ThreadRegistrationFactory register_thread;
     DebugDiagnosticSink diagnostics;
+    std::function<void(std::string_view event_id, std::string_view error_code)>
+        integrity_failure_observer;
 };
 
 enum class PersistentUploadSchedulerState

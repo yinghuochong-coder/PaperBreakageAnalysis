@@ -110,6 +110,19 @@ class RawDatabase final
         return value;
     }
 
+    [[nodiscard]] std::string scalar_text(const std::string& sql) const
+    {
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(database_, sql.c_str(), -1, &statement, nullptr) != SQLITE_OK)
+            throw std::runtime_error{"sqlite prepare failed"};
+        const auto result = sqlite3_step(statement);
+        const auto* value = result == SQLITE_ROW ? sqlite3_column_text(statement, 0) : nullptr;
+        const std::string text =
+            value == nullptr ? std::string{} : reinterpret_cast<const char*>(value);
+        sqlite3_finalize(statement);
+        return text;
+    }
+
     [[nodiscard]] std::set<std::string> table_names() const
     {
         sqlite3_stmt* statement = nullptr;
@@ -358,6 +371,112 @@ TEST(StorageMetadataDatabase, RejectsUnsupportedAndCorruptDatabasesAndRestoresBa
     auto restored = EventMetadataDatabase::open(options);
     ASSERT_TRUE(restored) << restored.error().business_code;
     EXPECT_EQ(restored.value()->open_report().schema_version, database_schema_version);
+}
+
+TEST(StorageMetadataDatabase, MigratesNonEmptyV5DatabaseWithBackupToUnverified)
+{
+    TemporaryDirectory temporary{"migration-v5"};
+    const auto options = database_options(temporary);
+    auto database = EventMetadataDatabase::open(options);
+    ASSERT_TRUE(database);
+    const auto persisted =
+        persist_event(options, event_request("019fcb3d-5555-7000-8000-000000000005", "CAM01",
+                                             "Confirmed", 5100ms));
+    ASSERT_TRUE(database.value()->index_committed_manifest(persisted.committed_directory,
+                                                           persisted.manifest_json));
+    database.value().reset();
+    {
+        RawDatabase raw{options.database_path};
+        raw.execute(R"sql(
+PRAGMA foreign_keys=OFF;
+DROP TABLE event_cameras;
+DROP TABLE event_files;
+DROP TABLE key_frames;
+DROP TABLE event_retention;
+DROP TABLE upload_jobs;
+ALTER TABLE events RENAME TO events_v6_source;
+CREATE TABLE events AS SELECT
+ event_id,event_schema_version,event_state,decision_state,persistence_state,review_state,
+ review_decision,artifacts_available,trigger_count,candidate_time_utc_ms,confirmed_time_utc_ms,
+ start_time_utc_ms,end_time_utc_ms,trigger_camera_id,trigger_frame_number,trigger_reason,
+ confidence,pre_event_ms,post_event_ms,algorithm_name,algorithm_version,config_version,machine_id,
+ production_line_id,paper_type,paper_speed,upload_state,time_quality,relative_directory,
+ storage_state,window_complete,truncated_by_maximum_duration,stopped_early,indexed_at_utc_ms,
+ review_revision,reviewed_at_utc_ms,reviewed_by FROM events_v6_source;
+DROP TABLE events_v6_source;
+PRAGMA user_version=5;
+)sql");
+    }
+
+    auto migrated = EventMetadataDatabase::open(options);
+    ASSERT_TRUE(migrated) << migrated.error().business_code << " " << migrated.error().message;
+    EXPECT_TRUE(migrated.value()->open_report().migrated);
+    ASSERT_TRUE(migrated.value()->open_report().migration_backup.has_value());
+    EXPECT_TRUE(
+        std::filesystem::is_regular_file(*migrated.value()->open_report().migration_backup));
+    RawDatabase raw{options.database_path};
+    EXPECT_EQ(raw.scalar_int64("PRAGMA user_version"), 6);
+    EXPECT_EQ(raw.scalar_text("SELECT integrity_state FROM events LIMIT 1"), "Unverified");
+    EXPECT_EQ(raw.scalar_int64("SELECT integrity_checked_at_utc_ms IS NULL FROM events LIMIT 1"),
+              1);
+}
+
+TEST(StorageMetadataDatabase, IntegrityFailurePreservesDecisionAndReviewAndBlocksUploads)
+{
+    TemporaryDirectory temporary{"integrity-state"};
+    const auto options = database_options(temporary);
+    auto database = EventMetadataDatabase::open(options);
+    ASSERT_TRUE(database);
+    const auto persisted =
+        persist_event(options, event_request("019fcb3d-6666-7000-8000-000000000006", "CAM01",
+                                             "Candidate", 6100ms));
+    ASSERT_TRUE(database.value()->index_committed_manifest(persisted.committed_directory,
+                                                           persisted.manifest_json));
+    auto unverified = database.value()->get_event(persisted.event_id);
+    ASSERT_TRUE(unverified);
+    EXPECT_EQ(unverified.value().integrity_state, "Unverified");
+    EXPECT_FALSE(unverified.value().integrity_checked_at_utc_ms.has_value());
+
+    auto reviewed = database.value()->review_event(
+        persisted.event_id, 1U, EventReviewDecision::confirmed, 7000, "S-1-5-21-integrity-test");
+    ASSERT_TRUE(reviewed);
+    auto upload = database.value()->enqueue_upload_job(
+        {.idempotency_key = "integrity-upload-job",
+         .event_id = persisted.event_id,
+         .kind = UploadJobKind::raw_file,
+         .logical_id = "raw-0",
+         .relative_path = (persisted.committed_directory.lexically_relative(options.event_root) /
+                           "raw/camera-0/block-0.pbnvme")
+                              .generic_string(),
+         .checksum = "sha256:" + std::string(64U, '0'),
+         .upload_bytes = 1U,
+         .created_at_utc_ms = 7001});
+    ASSERT_TRUE(upload);
+
+    ASSERT_TRUE(database.value()->mark_event_integrity_verified(persisted.event_id, 7002));
+    auto verified = database.value()->get_event(persisted.event_id);
+    ASSERT_TRUE(verified);
+    EXPECT_EQ(verified.value().integrity_state, "Verified");
+    EXPECT_EQ(verified.value().integrity_checked_at_utc_ms, 7002);
+
+    const auto decision_before = verified.value().decision_state;
+    const auto review_before = verified.value().review_state;
+    const auto persistence_before = verified.value().persistence_state;
+    ASSERT_TRUE(database.value()->mark_event_integrity_failed(persisted.event_id,
+                                                              "EVENT_INTEGRITY_FAILED", 7003));
+    auto failed = database.value()->get_event(persisted.event_id);
+    ASSERT_TRUE(failed);
+    EXPECT_EQ(failed.value().integrity_state, "Failed");
+    EXPECT_EQ(failed.value().integrity_error_code, "EVENT_INTEGRITY_FAILED");
+    EXPECT_EQ(failed.value().storage_state, "Damaged");
+    EXPECT_FALSE(failed.value().artifacts_available);
+    EXPECT_EQ(failed.value().decision_state, decision_before);
+    EXPECT_EQ(failed.value().review_state, review_before);
+    EXPECT_EQ(failed.value().persistence_state, persistence_before);
+    auto failed_upload = database.value()->get_upload_job("integrity-upload-job");
+    ASSERT_TRUE(failed_upload);
+    ASSERT_TRUE(failed_upload.value().has_value());
+    EXPECT_EQ(failed_upload.value()->state, UploadJobState::manual_intervention);
 }
 
 TEST(StorageMetadataDatabase, RejectsLegacyEventDirectoryWithoutDeletingIt)

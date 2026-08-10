@@ -173,7 +173,7 @@ std::uint32_t little_u32(const std::vector<std::byte>& bytes, const std::size_t 
 
 } // namespace
 
-TEST(StorageNvmeCache, Crc32cAndMaximumBlockLayoutMatchV1Contract)
+TEST(StorageNvmeCache, Crc32cAndMaximumBlockLayoutMatchV2Contract)
 {
     constexpr std::string_view check = "123456789";
     EXPECT_EQ(paperbreak::storage::crc32c(std::as_bytes(std::span{check})), 0xE3069283U);
@@ -182,7 +182,7 @@ TEST(StorageNvmeCache, Crc32cAndMaximumBlockLayoutMatchV1Contract)
     EXPECT_EQ(maximum.value(), 16384U);
 }
 
-TEST(StorageNvmeCache, WindowsStorePublishesV1FooterMarkerAndCrc)
+TEST(StorageNvmeCache, WindowsStorePublishesV2FooterMarkerAndStructuralCrc)
 {
     TemporaryDirectory temporary{"format"};
     auto store = paperbreak::storage::make_windows_nvme_block_store();
@@ -208,10 +208,14 @@ TEST(StorageNvmeCache, WindowsStorePublishesV1FooterMarkerAndCrc)
     std::vector<std::byte> bytes(static_cast<std::size_t>(written.value().physical_bytes));
     input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     ASSERT_TRUE(input);
-    EXPECT_EQ(std::string(reinterpret_cast<const char*>(bytes.data()), 7U), "PBNVME1");
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(bytes.data()), 7U), "PBNVME2");
     EXPECT_EQ(std::string(reinterpret_cast<const char*>(bytes.data() + bytes.size() - 8U), 7U),
-              "COMMIT1");
+              "COMMIT2");
     EXPECT_EQ(little_u32(bytes, bytes.size() - 4096U + 12U), 2U);
+    EXPECT_EQ(little_u32(bytes, 4096U + 76U), 0U);
+    EXPECT_EQ(little_u32(bytes, 4096U + 96U + 76U), 0U);
+    EXPECT_EQ(little_u32(bytes, bytes.size() - 4096U + 60U), 0U);
+    EXPECT_EQ(written.value().data_crc32c, 0U);
     const auto stored_footer_crc = little_u32(bytes, bytes.size() - 12U);
     std::fill(bytes.end() - 12U, bytes.end() - 8U, std::byte{0U});
     EXPECT_EQ(
@@ -267,6 +271,41 @@ TEST(StorageNvmeCache, QueueIsBoundedPerCameraAndNeverWaitsForBlockedWriter)
     store->release();
     cache.value()->request_stop();
     EXPECT_TRUE(cache.value()->join(std::chrono::steady_clock::now() + 2s));
+}
+
+TEST(StorageNvmeCache, EachStartUsesANewEmptySessionAndLeavesOldCacheUntouched)
+{
+    TemporaryDirectory temporary{"sessions"};
+    const auto old_session = temporary.path() / "sessions" / "old-session";
+    const auto legacy_block = temporary.path() / "legacy-block.pbnvme";
+    std::filesystem::create_directories(old_session);
+    {
+        std::ofstream old_file{old_session / "old.pbnvme", std::ios::binary};
+        old_file << "old-session-data";
+        std::ofstream legacy_file{legacy_block, std::ios::binary};
+        legacy_file << "legacy-root-data";
+    }
+
+    auto first = paperbreak::storage::NvmeRollingCache::create(options(temporary.path()));
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(first.value()->start());
+    const auto first_snapshot = first.value()->snapshot();
+    EXPECT_EQ(first_snapshot.indexed_blocks, 0U);
+    EXPECT_EQ(first_snapshot.active_session_root.parent_path(), temporary.path() / "sessions");
+    EXPECT_NE(first_snapshot.active_session_root, old_session);
+    first.value()->request_stop();
+    ASSERT_TRUE(first.value()->join(std::chrono::steady_clock::now() + 2s));
+
+    auto second = paperbreak::storage::NvmeRollingCache::create(options(temporary.path()));
+    ASSERT_TRUE(second);
+    ASSERT_TRUE(second.value()->start());
+    const auto second_snapshot = second.value()->snapshot();
+    EXPECT_EQ(second_snapshot.indexed_blocks, 0U);
+    EXPECT_NE(second_snapshot.active_session_root, first_snapshot.active_session_root);
+    EXPECT_TRUE(std::filesystem::is_regular_file(old_session / "old.pbnvme"));
+    EXPECT_TRUE(std::filesystem::is_regular_file(legacy_block));
+    second.value()->request_stop();
+    EXPECT_TRUE(second.value()->join(std::chrono::steady_clock::now() + 2s));
 }
 
 TEST(StorageNvmeCache, JoinHonorsCallerDeadlineAndCanFinishAfterCancellation)

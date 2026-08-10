@@ -15,7 +15,7 @@
 namespace paperbreak::storage
 {
 
-inline constexpr std::uint32_t database_schema_version = 5U;
+inline constexpr std::uint32_t database_schema_version = 6U;
 inline constexpr std::size_t database_default_page_size = 50U;
 inline constexpr std::size_t database_maximum_page_size = 200U;
 inline constexpr std::size_t maximum_upload_job_capacity = 1000000U;
@@ -76,6 +76,9 @@ struct EventMetadataRecord final
     double confidence{};
     std::string upload_state;
     std::string storage_state;
+    std::string integrity_state{"Unverified"};
+    std::optional<std::int64_t> integrity_checked_at_utc_ms;
+    std::string integrity_error_code;
     bool retention_locked{};
     bool deletion_allowed{};
     std::string deletion_state;
@@ -294,6 +297,17 @@ class EventMetadataDatabase final
     /// Verifies and atomically indexes one already committed M5-06 event directory.
     [[nodiscard]] Result<void> index_committed_event(
         const std::filesystem::path& committed_directory);
+    [[nodiscard]] Result<void> index_committed_manifest(
+        const std::filesystem::path& committed_directory, std::string_view manifest_json);
+
+    /// Records an on-demand/upload integrity result without changing decision, review, or
+    /// persistence state. Failure also disables artifacts and moves unfinished upload jobs to
+    /// ManualIntervention.
+    [[nodiscard]] Result<void> mark_event_integrity_verified(std::string_view event_id,
+                                                             std::int64_t checked_at_utc_ms);
+    [[nodiscard]] Result<void> mark_event_integrity_failed(std::string_view event_id,
+                                                           std::string_view error_code,
+                                                           std::int64_t checked_at_utc_ms);
 
     /// Creates the query-visible row as soon as the canonical aggregate id is known.
     [[nodiscard]] Result<EventMetadataRecord> create_collecting_event(
