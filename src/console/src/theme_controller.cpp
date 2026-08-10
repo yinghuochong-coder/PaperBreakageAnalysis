@@ -190,7 +190,32 @@ QString style_sheet(const ThemeColors& c)
         QComboBox#theme-selector { background: %9; color: %10; border-color: %11; min-width: 92px; }
         QComboBox#theme-selector QAbstractItemView { background: %2; color: %4; }
         QScrollArea { background: transparent; border: 0; }
-        QWidget#camera-editor { background: %2; border: 1px solid %8; border-radius: 6px; }
+        QWidget#camera-page-header, QWidget#camera-action-bar {
+            background: %2; border: 1px solid %8; border-radius: 6px;
+        }
+        QWidget#camera-editor { background: transparent; border: 0; }
+        QWidget#page-camera-configuration QGroupBox[role="cameraPanel"] {
+            background: %2; border-color: %8; border-radius: 6px; margin-top: 9px;
+            padding-top: 10px;
+        }
+        QWidget#page-camera-configuration QGroupBox[role="cameraPanel"]::title {
+            font-weight: 600; color: %4;
+        }
+        QWidget#page-camera-configuration QLineEdit,
+        QWidget#page-camera-configuration QSpinBox,
+        QWidget#page-camera-configuration QDoubleSpinBox,
+        QWidget#page-camera-configuration QComboBox {
+            min-height: 22px;
+        }
+        QWidget#page-camera-configuration QPushButton { min-height: 24px; }
+        QWidget#page-camera-configuration QPushButton[role="primaryAction"] {
+            background: %14; color: %15; border-color: %14; font-weight: 600;
+            min-width: 128px;
+        }
+        QWidget#page-camera-configuration QPushButton[role="primaryAction"]:hover {
+            border-color: %4;
+        }
+        QLabel#camera-operation-status { padding-right: 10px; }
         QListWidget#discovered-devices { background: %2; }
         QWidget[role="previewTile"] { background: %18; border-radius: 5px; }
         QLabel[role="previewImage"] { color: %11; background: %19; }

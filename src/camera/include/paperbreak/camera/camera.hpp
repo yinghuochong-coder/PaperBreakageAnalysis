@@ -134,6 +134,8 @@ struct CameraCapabilities final
     std::optional<SteppedRange<double>> gain_db;
     std::optional<SteppedRange<double>> frame_rate;
     std::optional<RoiCapabilities> roi;
+    bool supports_reverse_x{};
+    bool supports_reverse_y{};
     std::vector<PixelFormat> pixel_formats;
     std::vector<TriggerMode> trigger_modes;
     std::vector<std::string> trigger_sources;
@@ -153,6 +155,8 @@ struct CameraParameterSnapshot final
     std::optional<double> gain_db;
     std::optional<double> frame_rate;
     std::optional<Roi> roi;
+    std::optional<bool> reverse_x;
+    std::optional<bool> reverse_y;
     std::optional<PixelFormat> pixel_format;
     std::optional<TriggerMode> trigger_mode;
     std::optional<std::string> trigger_source;

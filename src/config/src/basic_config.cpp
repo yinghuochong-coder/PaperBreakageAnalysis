@@ -404,13 +404,21 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
     std::set<std::string> enabled_serials;
     for (std::size_t index = 0; index < cameras.size(); ++index)
     {
-        const Json& camera = cameras.at(index);
+        Json camera = cameras.at(index);
         const std::string pointer = "/cameras/" + std::to_string(index);
+        if (camera.is_object())
+        {
+            if (!camera.contains("reverseX"))
+                camera["reverseX"] = false;
+            if (!camera.contains("reverseY"))
+                camera["reverseY"] = false;
+        }
         if (auto fields =
                 exact_fields(camera, pointer,
                              {"id", "enabled", "serialNumber", "location", "exposureUs", "gainDb",
                               "frameRate", "roi", "pixelFormat", "triggerMode", "triggerSource",
-                              "triggerDelayUs", "packetSizeBytes", "interPacketDelayNs"});
+                              "triggerDelayUs", "packetSizeBytes", "interPacketDelayNs", "reverseX",
+                              "reverseY"});
             !fields)
             return Result<EdgeConfig>::failure(fields.error());
         auto id = string_field(camera, "id", pointer, 5U);
@@ -421,6 +429,8 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
         auto gain = finite_field(camera, "gainDb", pointer, -24.0, 48.0);
         auto rate = finite_field(camera, "frameRate", pointer, 0.1, 1000.0);
         auto roi = parse_roi(camera.at("roi"), pointer + "/roi");
+        auto reverse_x = bool_field(camera, "reverseX", pointer);
+        auto reverse_y = bool_field(camera, "reverseY", pointer);
         auto pixel_text = string_field(camera, "pixelFormat", pointer, 32U);
         auto mode_text = string_field(camera, "triggerMode", pointer, 32U);
         auto trigger_source = string_field(camera, "triggerSource", pointer, 64U, true);
@@ -446,6 +456,10 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
             return Result<EdgeConfig>::failure(rate.error());
         if (!roi)
             return Result<EdgeConfig>::failure(roi.error());
+        if (!reverse_x)
+            return Result<EdgeConfig>::failure(reverse_x.error());
+        if (!reverse_y)
+            return Result<EdgeConfig>::failure(reverse_y.error());
         if (!pixel_text)
             return Result<EdgeConfig>::failure(pixel_text.error());
         if (!mode_text)
@@ -499,6 +513,8 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
                                   .gain_db = gain.value(),
                                   .frame_rate = rate.value(),
                                   .roi = roi.value(),
+                                  .reverse_x = reverse_x.value(),
+                                  .reverse_y = reverse_y.value(),
                                   .pixel_format = pixel.value(),
                                   .trigger_mode = mode.value(),
                                   .trigger_source = std::move(trigger_source).value(),
@@ -1044,6 +1060,8 @@ std::string serialize_config(const EdgeConfig& config)
                            {"gainDb", camera.gain_db},
                            {"frameRate", camera.frame_rate},
                            {"roi", roi_json(camera.roi)},
+                           {"reverseX", camera.reverse_x},
+                           {"reverseY", camera.reverse_y},
                            {"pixelFormat", pixel_format_name(camera.pixel_format)},
                            {"triggerMode", trigger_mode_name(camera.trigger_mode)},
                            {"triggerSource", camera.trigger_source},

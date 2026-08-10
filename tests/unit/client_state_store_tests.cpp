@@ -150,17 +150,18 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
             ++list_requests;
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json =
-                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"pixelFormat":"Mono8","triggerMode":"Continuous"}}],"storedConfigRevision":7,"topologyRestartRequired":false})",
+                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous"}}],"storedConfigRevision":7,"topologyRestartRequired":false})",
                  .binary = {}});
         }
         ++operation_requests;
         last_command = request.command;
+        last_payload_json = request.payload_json;
         return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
             {.payload_json =
                  request.command == "camera.discover"
                      ? R"({"devices":[{"model":"Mock","serialNumber":"MOCK-01","ip":"127.0.0.1","networkInterface":"mock0","exclusiveAccessAvailable":true}]})"
                  : request.command == "camera.getConfig"
-                     ? R"({"cameraId":"CAM01","state":"connected","actual":{"exposureUs":777.0,"gainDb":3.0,"frameRate":25.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}})"
+                     ? R"({"cameraId":"CAM01","state":"connected","actual":{"exposureUs":777.0,"gainDb":3.0,"frameRate":25.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":false,"reverseY":true,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}})"
                  : request.command == "camera.connect"
                      ? R"({"cameraId":"CAM01","state":"connected","actual":{"exposureUs":101.0},"saved":false,"dispatched":false,"applied":false,"restartRequired":false,"applyError":{"code":"CAMERA_CONFIG_FAILED","message":"保存参数不符合当前设备能力"}})"
                  : request.command == "camera.updateConfig" || request.command == "camera.bind"
@@ -172,6 +173,7 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
     std::atomic_uint64_t list_requests{};
     std::atomic_uint64_t operation_requests{};
     std::string last_command;
+    std::string last_payload_json;
 };
 
 class OperationsHandler final : public paperbreak::ipc::IRequestHandler
@@ -861,6 +863,10 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     EXPECT_EQ(camera.saved_config_revision, 7U);
     EXPECT_DOUBLE_EQ(camera.saved.exposure_us.value(), 100.0);
     EXPECT_DOUBLE_EQ(camera.actual.exposure_us.value(), 101.0);
+    EXPECT_TRUE(camera.saved.reverse_x);
+    EXPECT_FALSE(camera.saved.reverse_y);
+    EXPECT_TRUE(camera.actual.reverse_x);
+    EXPECT_FALSE(camera.actual.reverse_y);
     EXPECT_EQ(latest.stored_config_revision, 7U);
     EXPECT_FALSE(latest.topology_restart_required);
     EXPECT_EQ(latest.discovered_devices.front().network_interface, "mock0");
@@ -881,6 +887,8 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     ASSERT_TRUE(client.control("camera.getConfig", "CAM01"));
     ASSERT_TRUE(wait_until([&] { return explicit_readback_observed.load(); }));
     EXPECT_EQ(handler->last_command, "camera.getConfig");
+    EXPECT_FALSE(latest.cameras.front().actual.reverse_x);
+    EXPECT_TRUE(latest.cameras.front().actual.reverse_y);
 
     ASSERT_TRUE(client.discover());
     ASSERT_TRUE(wait_until([&] {
@@ -893,6 +901,8 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
 
     auto changed = camera.saved;
     changed.exposure_us = 120.0;
+    changed.reverse_x = false;
+    changed.reverse_y = true;
     ASSERT_TRUE(client.update_config("CAM01", 7U, changed));
     ASSERT_TRUE(wait_until([&] {
         return latest.operation.has_value() &&
@@ -902,6 +912,9 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     EXPECT_TRUE(latest.operation->dispatched);
     EXPECT_TRUE(latest.operation->applied);
     EXPECT_FALSE(latest.operation->restart_required);
+    const auto update_payload = nlohmann::json::parse(handler->last_payload_json);
+    EXPECT_FALSE(update_payload["parameters"]["reverseX"].get<bool>());
+    EXPECT_TRUE(update_payload["parameters"]["reverseY"].get<bool>());
 
     ASSERT_TRUE(client.bind("CAM02", "MOCK-02", "出口", 7U));
     ASSERT_TRUE(wait_until([&] {

@@ -57,6 +57,8 @@
         "gainDb": { "type": "number", "minimum": -24, "maximum": 48 },
         "frameRate": { "type": "number", "minimum": 0.1, "maximum": 1000 },
         "roi": { "$ref": "#/$defs/roi" },
+        "reverseX": { "type": "boolean", "default": false },
+        "reverseY": { "type": "boolean", "default": false },
         "pixelFormat": { "enum": ["Mono8", "Mono10", "Mono12", "BayerRG8"] },
         "triggerMode": { "enum": ["Continuous", "Hardware", "Software"] },
         "triggerSource": { "type": "string", "maxLength": 64 },

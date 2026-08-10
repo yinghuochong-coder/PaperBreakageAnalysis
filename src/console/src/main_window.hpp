@@ -128,6 +128,7 @@ class MainWindow final : public QMainWindow
     void closeEvent(QCloseEvent* event) override;
     void populate_camera_editor();
     void populate_camera_editor(const CameraParameterValue& value);
+    void update_camera_configuration_summary();
     void update_camera_controls();
     void run_camera_control(const std::string& command, bool confirmation_required);
     void show_camera_result(const Result<void>& result);
@@ -181,6 +182,8 @@ class MainWindow final : public QMainWindow
     QSpinBox* camera_roi_height_{};
     QSpinBox* camera_roi_x_{};
     QSpinBox* camera_roi_y_{};
+    QCheckBox* camera_reverse_x_{};
+    QCheckBox* camera_reverse_y_{};
     QComboBox* camera_pixel_format_{};
     QComboBox* camera_trigger_mode_{};
     QLineEdit* camera_trigger_source_{};

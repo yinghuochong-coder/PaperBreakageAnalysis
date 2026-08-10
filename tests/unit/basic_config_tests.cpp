@@ -175,6 +175,29 @@ TEST(BasicConfig, AcceptsCompleteVersionTwoAtUnicodeAndSpacePath)
     EXPECT_EQ(result.value().config_revision, 1U);
 }
 
+TEST(BasicConfig, DefaultsLegacyCameraMirroringOffAndSerializesExplicitValues)
+{
+    const TemporaryDirectory directory;
+    auto contents = replace_once(
+        valid_config(), "\"cameras\": []",
+        R"("cameras": [{"id":"CAM01","enabled":true,"serialNumber":"MOCK-01","location":"入口","exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}])");
+    auto parsed = paperbreak::config::parse_config(contents, directory.path());
+    ASSERT_TRUE(parsed) << parsed.error().message;
+    ASSERT_EQ(parsed.value().cameras.size(), 1U);
+    EXPECT_FALSE(parsed.value().cameras.front().reverse_x);
+    EXPECT_FALSE(parsed.value().cameras.front().reverse_y);
+
+    contents = replace_once(contents, "\"pixelFormat\":\"Mono8\"",
+                            "\"reverseX\":true,\"reverseY\":true,\"pixelFormat\":\"Mono8\"");
+    parsed = paperbreak::config::parse_config(contents, directory.path());
+    ASSERT_TRUE(parsed) << parsed.error().message;
+    EXPECT_TRUE(parsed.value().cameras.front().reverse_x);
+    EXPECT_TRUE(parsed.value().cameras.front().reverse_y);
+    const auto serialized = paperbreak::config::serialize_config(parsed.value());
+    EXPECT_NE(serialized.find("\"reverseX\": true"), std::string::npos);
+    EXPECT_NE(serialized.find("\"reverseY\": true"), std::string::npos);
+}
+
 TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
 {
     const TemporaryDirectory directory;

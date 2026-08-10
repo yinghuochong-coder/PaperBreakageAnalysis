@@ -27,6 +27,8 @@ struct CameraParameterValue final
     std::optional<double> gain_db;
     std::optional<double> frame_rate;
     std::optional<CameraRoiValue> roi;
+    bool reverse_x{};
+    bool reverse_y{};
     std::string pixel_format;
     std::string trigger_mode;
     std::string trigger_source;

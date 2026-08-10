@@ -317,6 +317,8 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
     "gainDb":2.0,
     "frameRate":30.0,
     "roi":{"width":1920,"height":1080,"offsetX":0,"offsetY":0},
+    "reverseX":false,
+    "reverseY":false,
     "pixelFormat":"Mono8",
     "triggerMode":"Continuous",
     "triggerSource":"",

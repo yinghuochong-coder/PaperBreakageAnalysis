@@ -153,6 +153,30 @@ TEST(CameraMockFrames, ProducesAllFormatsAndDeterministicPatterns)
     }
 }
 
+TEST(CameraMockFrames, AppliesHorizontalAndVerticalMirroringToAcquiredPixels)
+{
+    auto normal = open_camera(camera_config("MOCK-NORMAL"));
+    auto mirrored = open_camera(camera_config("MOCK-MIRRORED"));
+    ASSERT_TRUE(mirrored.device->stop_acquisition());
+    auto applied = mirrored.device->apply_parameters({.reverse_x = true, .reverse_y = true});
+    ASSERT_TRUE(applied);
+    EXPECT_EQ(applied.value().reverse_x, true);
+    EXPECT_EQ(applied.value().reverse_y, true);
+    ASSERT_TRUE(mirrored.device->start_acquisition());
+
+    FrameBuffer normal_buffer{64U};
+    FrameBuffer mirrored_buffer{64U};
+    capture(*normal.device, normal_buffer);
+    capture(*mirrored.device, mirrored_buffer);
+    ASSERT_EQ(normal_buffer.size(), 12U);
+    ASSERT_EQ(mirrored_buffer.size(), normal_buffer.size());
+    const auto normal_bytes = normal_buffer.bytes();
+    const auto mirrored_bytes = mirrored_buffer.bytes();
+    for (std::size_t y = 0U; y < 3U; ++y)
+        for (std::size_t x = 0U; x < 4U; ++x)
+            EXPECT_EQ(mirrored_bytes[y * 4U + x], normal_bytes[(2U - y) * 4U + (3U - x)]);
+}
+
 TEST(CameraMockLifecycle, AppliesAndReadsParametersAndRejectsIllegalStates)
 {
     auto provider_result = MockCameraProvider::create({camera_config()});
@@ -167,11 +191,15 @@ TEST(CameraMockLifecycle, AppliesAndReadsParametersAndRejectsIllegalStates)
     EXPECT_FALSE(device->connect());
     auto applied = device->apply_parameters({.frame_rate = 50.0,
                                              .roi = Roi{2U, 2U, 0U, 0U},
+                                             .reverse_x = true,
+                                             .reverse_y = false,
                                              .pixel_format = PixelFormat::mono10,
                                              .trigger_mode = TriggerMode::software});
     ASSERT_TRUE(applied);
     EXPECT_EQ(applied.value().frame_rate, 50.0);
     EXPECT_EQ(applied.value().roi, (Roi{2U, 2U, 0U, 0U}));
+    EXPECT_EQ(applied.value().reverse_x, true);
+    EXPECT_EQ(applied.value().reverse_y, false);
     EXPECT_FALSE(applied.value().trigger_source);
     EXPECT_EQ(device->read_parameters().value(), applied.value());
 

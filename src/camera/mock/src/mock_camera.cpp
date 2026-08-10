@@ -156,7 +156,8 @@ std::uint16_t sample_value(const MockFramePattern pattern, const std::uint64_t s
 
 void fill_pattern(FrameBuffer& destination, const FrameGeometry geometry, const PixelFormat format,
                   const MockFramePattern pattern, const std::uint64_t seed,
-                  const std::uint64_t frame_number) noexcept
+                  const std::uint64_t frame_number, const bool reverse_x,
+                  const bool reverse_y) noexcept
 {
     auto bytes = destination.writable_bytes();
     std::fill_n(bytes.begin(), static_cast<std::size_t>(geometry.height) * geometry.stride,
@@ -169,7 +170,10 @@ void fill_pattern(FrameBuffer& destination, const FrameGeometry geometry, const 
         const auto row = static_cast<std::size_t>(y) * geometry.stride;
         for (std::uint32_t x = 0U; x < geometry.width; ++x)
         {
-            const auto value = sample_value(pattern, seed, frame_number, x, y, maximum);
+            const auto source_x = reverse_x ? geometry.width - 1U - x : x;
+            const auto source_y = reverse_y ? geometry.height - 1U - y : y;
+            const auto value =
+                sample_value(pattern, seed, frame_number, source_x, source_y, maximum);
             if (sixteen_bit)
             {
                 const auto offset = row + static_cast<std::size_t>(x) * 2U;
@@ -207,6 +211,8 @@ struct MockSharedState final
                                                .height = {1U, config.height, 1U},
                                                .offset_x = {0U, config.width - 1U, 1U},
                                                .offset_y = {0U, config.height - 1U, 1U}},
+                        .supports_reverse_x = true,
+                        .supports_reverse_y = true,
                         .pixel_formats = {PixelFormat::mono8, PixelFormat::mono10,
                                           PixelFormat::mono12, PixelFormat::bayer_rg8},
                         .trigger_modes = {TriggerMode::continuous, TriggerMode::hardware,
@@ -220,6 +226,8 @@ struct MockSharedState final
                       .gain_db = 0.0,
                       .frame_rate = config.frame_rate,
                       .roi = Roi{config.width, config.height, 0U, 0U},
+                      .reverse_x = false,
+                      .reverse_y = false,
                       .pixel_format = config.pixel_format,
                       .trigger_mode = config.trigger_mode,
                       .trigger_source = config.trigger_mode == TriggerMode::hardware
@@ -478,6 +486,10 @@ class MockCameraDevice final : public ICameraDevice
             candidate.frame_rate = parameters.frame_rate;
         if (parameters.roi)
             candidate.roi = parameters.roi;
+        if (parameters.reverse_x)
+            candidate.reverse_x = parameters.reverse_x;
+        if (parameters.reverse_y)
+            candidate.reverse_y = parameters.reverse_y;
         if (parameters.pixel_format)
             candidate.pixel_format = parameters.pixel_format;
         if (parameters.trigger_mode)
@@ -646,7 +658,9 @@ class MockCameraDevice final : public ICameraDevice
         }
         ++state_->camera_frame_number;
         fill_pattern(destination, geometry, format, state_->config.pattern,
-                     state_->config.random_seed, state_->camera_frame_number);
+                     state_->config.random_seed, state_->camera_frame_number,
+                     state_->parameters.reverse_x.value_or(false),
+                     state_->parameters.reverse_y.value_or(false));
         static_cast<void>(destination.set_size(*size));
         ++state_->frames_generated;
 

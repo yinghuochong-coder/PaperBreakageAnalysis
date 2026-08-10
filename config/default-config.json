@@ -34,6 +34,8 @@
       "location": "安装工位",
       "packetSizeBytes": 1500,
       "pixelFormat": "Mono8",
+      "reverseX": false,
+      "reverseY": false,
       "roi": {
         "height": 1240,
         "offsetX": 0,
@@ -55,6 +57,8 @@
       "location": "NoLed",
       "packetSizeBytes": 8164,
       "pixelFormat": "Mono8",
+      "reverseX": false,
+      "reverseY": false,
       "roi": {
         "height": 1240,
         "offsetX": 0,

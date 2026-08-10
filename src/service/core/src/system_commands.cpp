@@ -983,6 +983,10 @@ Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
                              {"height", p.roi->height},
                              {"offsetX", p.roi->offset_x},
                              {"offsetY", p.roi->offset_y}};
+        if (p.reverse_x)
+            actual["reverseX"] = *p.reverse_x;
+        if (p.reverse_y)
+            actual["reverseY"] = *p.reverse_y;
         if (p.pixel_format)
         {
             switch (*p.pixel_format)
@@ -1042,6 +1046,8 @@ Json saved_camera_json(const config::CameraConfig& value)
                   {"height", value.roi.height},
                   {"offsetX", value.roi.offset_x},
                   {"offsetY", value.roi.offset_y}}},
+                {"reverseX", value.reverse_x},
+                {"reverseY", value.reverse_y},
                 {"triggerSource", value.trigger_source},
                 {"triggerDelayUs", value.trigger_delay_us},
                 {"packetSizeBytes", value.packet_size_bytes},
@@ -1113,6 +1119,8 @@ camera::CameraParameterSnapshot camera_parameters(const config::CameraConfig& va
         .frame_rate = value.frame_rate,
         .roi =
             camera::Roi{value.roi.width, value.roi.height, value.roi.offset_x, value.roi.offset_y},
+        .reverse_x = value.reverse_x,
+        .reverse_y = value.reverse_y,
         .pixel_format = pixel,
         .trigger_mode = trigger,
         .trigger_delay_us = value.trigger_delay_us,
@@ -1187,6 +1195,8 @@ Result<Json> bound_camera_json(const std::string& id, const std::string& serial,
                                     {"height", actual.roi->height},
                                     {"offsetX", actual.roi->offset_x},
                                     {"offsetY", actual.roi->offset_y}}},
+                                  {"reverseX", actual.reverse_x.value_or(false)},
+                                  {"reverseY", actual.reverse_y.value_or(false)},
                                   {"pixelFormat", std::move(pixel_format)},
                                   {"triggerMode", std::move(trigger_mode)},
                                   {"triggerSource", actual.trigger_source.value_or("")},
@@ -2481,13 +2491,13 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                     "camera.updateConfig 需要 expectedConfigRevision 和 parameters 对象",
                     "ipc.camera.updateConfig"));
             const Json& parameters = payload.value()["parameters"];
-            static constexpr std::array<std::string_view, 9U> allowed{
+            static constexpr std::array<std::string_view, 12U> allowed{
                 "exposureUs",    "gainDb",         "frameRate",
                 "roi",           "pixelFormat",    "triggerMode",
-                "triggerSource", "triggerDelayUs", "packetSizeBytes"};
+                "triggerSource", "triggerDelayUs", "packetSizeBytes",
+                "interPacketDelayNs", "reverseX", "reverseY"};
             for (auto it = parameters.begin(); it != parameters.end(); ++it)
-                if (std::find(allowed.begin(), allowed.end(), it.key()) == allowed.end() &&
-                    it.key() != "interPacketDelayNs")
+                if (std::find(allowed.begin(), allowed.end(), it.key()) == allowed.end())
                     return Result<ipc::CommandResponse>::failure(command_error(
                         "IPC_REQUEST_INVALID", Severity::error, "camera.updateConfig 包含未知参数",
                         "ipc.camera.updateConfig"));

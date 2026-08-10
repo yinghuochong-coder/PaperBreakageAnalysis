@@ -67,6 +67,8 @@ struct CameraConfig final
     double gain_db{};
     double frame_rate{};
     RoiConfig roi;
+    bool reverse_x{};
+    bool reverse_y{};
     PixelFormat pixel_format{PixelFormat::mono8};
     TriggerMode trigger_mode{TriggerMode::continuous};
     std::string trigger_source;

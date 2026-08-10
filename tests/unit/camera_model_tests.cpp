@@ -35,6 +35,8 @@ CameraCapabilities rich_capabilities()
                                .height = {10U, 80U, 10U},
                                .offset_x = {0U, 80U, 10U},
                                .offset_y = {0U, 70U, 10U}},
+        .supports_reverse_x = true,
+        .supports_reverse_y = true,
         .pixel_formats = {PixelFormat::mono8, PixelFormat::bayer_rg8},
         .trigger_modes = {TriggerMode::continuous, TriggerMode::hardware, TriggerMode::software},
         .trigger_sources = {"Line0"},
@@ -54,6 +56,8 @@ CameraParameterSnapshot valid_parameters()
             .gain_db = 1.5,
             .frame_rate = 40.0,
             .roi = Roi{40U, 20U, 20U, 10U},
+            .reverse_x = true,
+            .reverse_y = false,
             .pixel_format = PixelFormat::mono8,
             .trigger_mode = TriggerMode::hardware,
             .trigger_source = "Line0",
@@ -244,6 +248,17 @@ TEST(CameraCapabilities, RejectsRoiAndDigitalIoOutsideCapabilities)
     result = validate_parameters(rich_capabilities(), parameters);
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().details.back().value, "unsupported-line");
+}
+
+TEST(CameraCapabilities, RejectsEnablingUnsupportedImageMirroring)
+{
+    CameraCapabilities capabilities;
+    auto result = validate_parameters(capabilities, {.reverse_x = true});
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().details.front().value, "reverseX");
+    EXPECT_EQ(result.error().details.back().value, "unsupported");
+
+    EXPECT_TRUE(validate_parameters(capabilities, {.reverse_x = false, .reverse_y = false}));
 }
 
 TEST(CameraCapabilities, ValidationPreventsDeviceWrite)

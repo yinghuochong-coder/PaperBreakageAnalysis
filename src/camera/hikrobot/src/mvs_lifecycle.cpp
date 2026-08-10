@@ -511,6 +511,19 @@ Result<std::optional<MVCC_ENUMVALUE>> optional_enumeration(const MvsApi& api, vo
                         "camera.hikrobot.capabilities", node, "read-failed"));
 }
 
+Result<bool> supports_optional_boolean(const MvsApi& api, void* handle, const char* node)
+{
+    bool value{};
+    const int code = api.get_bool_value(handle, node, &value);
+    if (code == MV_OK)
+        return Result<bool>::success(true);
+    if (optional_node_absent(code))
+        return Result<bool>::success(false);
+    return Result<bool>::failure(parameter_error(CameraErrorKind::parameter_read_failed, code,
+                                                 "camera.hikrobot.capabilities", node,
+                                                 "read-failed"));
+}
+
 bool supports(const MVCC_ENUMVALUE& value, const unsigned int item) noexcept
 {
     return std::find(value.nSupportValue, value.nSupportValue + value.nSupportedNum, item) !=
@@ -599,6 +612,14 @@ Result<CameraCapabilities> read_capabilities_locked(const MvsApi& api, void* han
                       .offset_x = integer_range(*offset_x.value()),
                       .offset_y = integer_range(*offset_y.value())};
     }
+
+    const auto reverse_x = supports_optional_boolean(api, handle, "ReverseX");
+    const auto reverse_y = supports_optional_boolean(api, handle, "ReverseY");
+    if (!reverse_x || !reverse_y)
+        return Result<CameraCapabilities>::failure(!reverse_x ? reverse_x.error()
+                                                               : reverse_y.error());
+    result.supports_reverse_x = reverse_x.value();
+    result.supports_reverse_y = reverse_y.value();
 
     const auto pixels = optional_enumeration(api, handle, "PixelFormat");
     const auto trigger_mode = optional_enumeration(api, handle, "TriggerMode");
@@ -745,6 +766,26 @@ Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* 
                 !width ? width.error() : (!height ? height.error() : (!x ? x.error() : y.error())));
         result.roi = {width.value(), height.value(), x.value(), y.value()};
     }
+    if (capabilities.supports_reverse_x)
+    {
+        bool value{};
+        const int code = api.get_bool_value(handle, "ReverseX", &value);
+        if (code != MV_OK)
+            return Result<CameraParameterSnapshot>::failure(parameter_error(
+                CameraErrorKind::parameter_read_failed, code, "camera.hikrobot.readParameters",
+                "ReverseX", "read-failed"));
+        result.reverse_x = value;
+    }
+    if (capabilities.supports_reverse_y)
+    {
+        bool value{};
+        const int code = api.get_bool_value(handle, "ReverseY", &value);
+        if (code != MV_OK)
+            return Result<CameraParameterSnapshot>::failure(parameter_error(
+                CameraErrorKind::parameter_read_failed, code, "camera.hikrobot.readParameters",
+                "ReverseY", "read-failed"));
+        result.reverse_y = value;
+    }
     if (!capabilities.pixel_formats.empty())
     {
         MVCC_ENUMVALUE value{};
@@ -860,6 +901,16 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
             !r)
             return r;
     }
+    if (parameters.reverse_x && capabilities.supports_reverse_x)
+        if (auto r = check(api.set_bool_value(handle, "ReverseX", *parameters.reverse_x),
+                           "ReverseX");
+            !r)
+            return r;
+    if (parameters.reverse_y && capabilities.supports_reverse_y)
+        if (auto r = check(api.set_bool_value(handle, "ReverseY", *parameters.reverse_y),
+                           "ReverseY");
+            !r)
+            return r;
     if (parameters.pixel_format)
         if (auto r = check(api.set_enum_value(handle, "PixelFormat",
                                               native_pixel_format(*parameters.pixel_format)),

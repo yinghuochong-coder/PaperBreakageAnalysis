@@ -364,6 +364,7 @@ void configure_parameter_nodes(FakeContext& state)
         {"PixelFormat", {PixelType_Gvsp_Mono8, {PixelType_Gvsp_Mono8, PixelType_Gvsp_Mono12}}},
         {"TriggerMode", {0U, {0U, 1U}}},
         {"TriggerSource", {0U, {0U, 7U}}}};
+    state.booleans = {{"ReverseX", false}, {"ReverseY", true}};
 }
 
 TEST_F(MvsLifecycleTest, DeviceListOwnsBoundedSdkListValue)
@@ -473,6 +474,8 @@ TEST_F(MvsLifecycleTest, MapsParameterCapabilitiesAndReadsCompleteSnapshot)
     EXPECT_EQ(capabilities.value().exposure_us->minimum, 10.0);
     ASSERT_TRUE(capabilities.value().roi);
     EXPECT_EQ(capabilities.value().roi->sensor_width, 1600U);
+    EXPECT_TRUE(capabilities.value().supports_reverse_x);
+    EXPECT_TRUE(capabilities.value().supports_reverse_y);
     EXPECT_EQ(capabilities.value().pixel_formats,
               (std::vector<PixelFormat>{PixelFormat::mono8, PixelFormat::mono12}));
     EXPECT_EQ(capabilities.value().trigger_modes,
@@ -485,6 +488,8 @@ TEST_F(MvsLifecycleTest, MapsParameterCapabilitiesAndReadsCompleteSnapshot)
     ASSERT_TRUE(snapshot);
     EXPECT_EQ(snapshot.value().exposure_us, 1000.0);
     EXPECT_EQ(snapshot.value().roi, (Roi{1600U, 1200U, 0U, 0U}));
+    EXPECT_EQ(snapshot.value().reverse_x, false);
+    EXPECT_EQ(snapshot.value().reverse_y, true);
     EXPECT_EQ(snapshot.value().pixel_format, PixelFormat::mono8);
     EXPECT_EQ(snapshot.value().trigger_mode, TriggerMode::continuous);
     EXPECT_EQ(snapshot.value().packet_size_bytes, 1500U);
@@ -503,11 +508,15 @@ TEST_F(MvsLifecycleTest, ParameterApplyPausesWritesReadsBackAndResumesStreaming)
 
     const auto applied = handle.apply_parameters({.exposure_us = 2500.0,
                                                   .roi = Roi{800U, 600U, 8U, 4U},
+                                                  .reverse_x = true,
+                                                  .reverse_y = false,
                                                   .pixel_format = PixelFormat::mono12});
 
     ASSERT_TRUE(applied);
     EXPECT_EQ(applied.value().exposure_us, 2496.0);
     EXPECT_EQ(applied.value().roi, (Roi{800U, 600U, 8U, 4U}));
+    EXPECT_EQ(applied.value().reverse_x, true);
+    EXPECT_EQ(applied.value().reverse_y, false);
     EXPECT_EQ(applied.value().pixel_format, PixelFormat::mono12);
     const auto stop = std::find(context_.calls.begin(), context_.calls.end(), "stop");
     const auto first_write =

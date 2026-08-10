@@ -203,6 +203,16 @@ Result<void> validate_enums(const CameraCapabilities& capabilities,
     return Result<void>::success();
 }
 
+Result<void> validate_optional_feature(const std::optional<bool>& value, const bool supported,
+                                       const std::string_view name)
+{
+    if (value.value_or(false) && !supported)
+    {
+        return Result<void>::failure(invalid_parameter(std::string{name}, "unsupported"));
+    }
+    return Result<void>::success();
+}
+
 Result<void> validate_digital_io(const CameraCapabilities& capabilities,
                                  const CameraParameterSnapshot& parameters)
 {
@@ -381,6 +391,20 @@ Result<void> validate_parameters(const CameraCapabilities& capabilities,
         return result;
     }
     if (auto result = validate_roi(capabilities, parameters); !result)
+    {
+        return result;
+    }
+    if (auto result =
+            validate_optional_feature(parameters.reverse_x, capabilities.supports_reverse_x,
+                                      "reverseX");
+        !result)
+    {
+        return result;
+    }
+    if (auto result =
+            validate_optional_feature(parameters.reverse_y, capabilities.supports_reverse_y,
+                                      "reverseY");
+        !result)
     {
         return result;
     }

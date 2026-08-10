@@ -13,20 +13,25 @@
 #include "src/system_tray_controller.hpp"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QLabel>
+#include <QLayout>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSettings>
 #include <QTableWidget>
 #include <QTimer>
 #include <QUrl>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -536,8 +541,55 @@ int main(int argc, char* argv[])
         const bool empty_configuration_kept_discovery =
             main_window.discovered_camera_count() == 1U &&
             main_window.camera_device_controls_disabled();
-        camera_smoke.cameras.push_back({.id = "CAM01", .state = "disconnected"});
+        camera_smoke.cameras.push_back(
+            {.id = "CAM01", .location = "入口", .state = "disconnected", .serial = "CONFIG-01"});
+        camera_smoke.cameras.push_back(
+            {.id = "CAM02", .location = "出口", .state = "connected", .serial = "CONFIG-02"});
+        camera_smoke.cameras.front().saved.reverse_x = true;
+        camera_smoke.cameras.front().saved.reverse_y = false;
+        camera_smoke.cameras.back().saved.reverse_x = false;
+        camera_smoke.cameras.back().saved.reverse_y = true;
         camera_smoke.discovered_devices.front().exclusive_access_available = true;
+        main_window.apply_camera_snapshot(camera_smoke);
+        auto* const camera_selector =
+            main_window.findChild<QComboBox*>(QStringLiteral("camera-selector"));
+        auto* const camera_status =
+            main_window.findChild<QLabel*>(QStringLiteral("camera-configuration-status"));
+        auto* const camera_discover =
+            main_window.findChild<QPushButton*>(QStringLiteral("camera-discover"));
+        auto* const camera_discovered_panel =
+            main_window.findChild<QWidget*>(QStringLiteral("camera-discovered-panel"));
+        auto* const discovered_devices =
+            main_window.findChild<QWidget*>(QStringLiteral("discovered-devices"));
+        auto* const reverse_x =
+            main_window.findChild<QCheckBox*>(QStringLiteral("camera-reverse-x"));
+        auto* const reverse_y =
+            main_window.findChild<QCheckBox*>(QStringLiteral("camera-reverse-y"));
+        const bool first_camera_mirroring_loaded =
+            reverse_x && reverse_y && reverse_x->isChecked() && !reverse_y->isChecked();
+        const bool camera_discover_above_list =
+            camera_discover && camera_discovered_panel && discovered_devices &&
+            camera_discover->parentWidget() == camera_discovered_panel &&
+            camera_discovered_panel->layout() &&
+            camera_discovered_panel->layout()->indexOf(camera_discover) <
+                camera_discovered_panel->layout()->indexOf(discovered_devices);
+        const bool first_camera_status_only =
+            camera_selector && camera_status && camera_selector->currentText() ==
+                                                   QStringLiteral("CAM01") &&
+            camera_status->text().contains(QStringLiteral("CAM01")) &&
+            !camera_status->text().contains(QStringLiteral("CAM02"));
+        if (camera_selector)
+            camera_selector->setCurrentText(QStringLiteral("CAM02"));
+        application.processEvents();
+        const bool selected_camera_status_only =
+            camera_status && camera_status->text().contains(QStringLiteral("CAM02")) &&
+            !camera_status->text().contains(QStringLiteral("CAM01"));
+        const bool selected_camera_mirroring_loaded =
+            reverse_x && reverse_y && !reverse_x->isChecked() && reverse_y->isChecked();
+        const bool camera_banner_removed =
+            std::ranges::none_of(main_window.findChildren<QLabel*>(), [](const QLabel* label) {
+                return label && label->text() == QStringLiteral("相机配置与实际值");
+            });
         camera_smoke.topology_restart_required = true;
         main_window.apply_camera_snapshot(camera_smoke);
         const bool restart_state_disabled_controls = main_window.camera_device_controls_disabled();
@@ -625,6 +677,42 @@ int main(int argc, char* argv[])
         algorithm_smoke.runtime.prototype_only = true;
         algorithm_smoke.runtime.has_current_frame = true;
         main_window.apply_algorithm_snapshot(algorithm_smoke);
+        auto* const camera_parameter_grid =
+            main_window.findChild<QWidget*>(QStringLiteral("camera-editor"));
+        auto* const camera_control_grid =
+            main_window.findChild<QWidget*>(QStringLiteral("camera-control-grid"));
+        auto* const camera_scroll =
+            main_window.findChild<QScrollArea*>(QStringLiteral("camera-configuration-scroll"));
+        const bool camera_page_selected = main_window.select_page(2U);
+        main_window.resize(1680, 900);
+        application.processEvents();
+        const int wide_parameter_columns =
+            camera_parameter_grid ? camera_parameter_grid->property("layoutColumns").toInt() : 0;
+        const int wide_control_columns =
+            camera_control_grid ? camera_control_grid->property("layoutColumns").toInt() : 0;
+        main_window.resize(1040, 680);
+        application.processEvents();
+        const int narrow_parameter_columns =
+            camera_parameter_grid ? camera_parameter_grid->property("layoutColumns").toInt() : 0;
+        const int narrow_control_columns =
+            camera_control_grid ? camera_control_grid->property("layoutColumns").toInt() : 0;
+        const bool camera_layout_responsive =
+            camera_page_selected && wide_parameter_columns >= 2 &&
+            narrow_parameter_columns < wide_parameter_columns && wide_control_columns >= 4 &&
+            narrow_control_columns < wide_control_columns && camera_scroll &&
+            !camera_scroll->horizontalScrollBar()->isVisible();
+        if (!camera_layout_responsive)
+        {
+            std::cerr << "camera layout smoke failed: selected=" << camera_page_selected
+                      << " parameterColumns=" << wide_parameter_columns << "/"
+                      << narrow_parameter_columns << " controlColumns=" << wide_control_columns
+                      << "/" << narrow_control_columns << " horizontalScrollVisible="
+                      << (camera_scroll && camera_scroll->horizontalScrollBar()->isVisible())
+                      << '\n';
+        }
+        main_window.resize(1280, 800);
+        application.processEvents();
+        static_cast<void>(main_window.select_page(0U));
         auto* const event_upload_policy =
             main_window.findChild<QComboBox*>(QStringLiteral("event-upload-policy"));
         auto* const event_config_save =
@@ -674,12 +762,16 @@ int main(int argc, char* argv[])
         smoke_ok = tray.is_visible() && main_window.isVisible() && tray.action_count() == 8U &&
                    !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
-                   main_window.camera_configuration_ready() && empty_configuration_kept_discovery &&
-                   restart_state_disabled_controls && main_window.operations_pages_ready() &&
-                   main_window.algorithm_page_ready() && main_window.event_pages_ready() &&
-                   main_window.storage_page_ready() && main_window.uplink_page_ready() &&
-                   event_configuration_editable && local_time_displayed &&
-                   diagnostic_enabled_when_connected && diagnostic_disabled_when_disconnected &&
+                   main_window.camera_configuration_ready() && camera_layout_responsive &&
+                   camera_banner_removed && camera_discover_above_list &&
+                   first_camera_status_only && selected_camera_status_only &&
+                   first_camera_mirroring_loaded && selected_camera_mirroring_loaded &&
+                   empty_configuration_kept_discovery && restart_state_disabled_controls &&
+                   main_window.operations_pages_ready() && main_window.algorithm_page_ready() &&
+                   main_window.event_pages_ready() && main_window.storage_page_ready() &&
+                   main_window.uplink_page_ready() && event_configuration_editable &&
+                   local_time_displayed && diagnostic_enabled_when_connected &&
+                   diagnostic_disabled_when_disconnected &&
                    theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
                    selected_light && selected_dark && dark_theme_persisted && selected_system &&
                    main_window.select_page(11U) && main_window.select_page(0U);

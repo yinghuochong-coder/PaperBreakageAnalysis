@@ -73,6 +73,10 @@ void parse_parameters(const Json& source, CameraParameterValue& target)
                 roi["width"].get<std::uint32_t>(), roi["height"].get<std::uint32_t>(),
                 roi["offsetX"].get<std::uint32_t>(), roi["offsetY"].get<std::uint32_t>()};
     }
+    if (source.contains("reverseX") && source["reverseX"].is_boolean())
+        target.reverse_x = source["reverseX"].get<bool>();
+    if (source.contains("reverseY") && source["reverseY"].is_boolean())
+        target.reverse_y = source["reverseY"].get<bool>();
     if (source.contains("pixelFormat") && source["pixelFormat"].is_string())
         target.pixel_format = source["pixelFormat"].get<std::string>();
     if (source.contains("triggerMode") && source["triggerMode"].is_string())
@@ -101,6 +105,8 @@ Json parameter_json(const CameraParameterValue& value)
                          {"height", value.roi->height},
                          {"offsetX", value.roi->offset_x},
                          {"offsetY", value.roi->offset_y}};
+    result["reverseX"] = value.reverse_x;
+    result["reverseY"] = value.reverse_y;
     if (!value.pixel_format.empty())
         result["pixelFormat"] = value.pixel_format;
     if (!value.trigger_mode.empty())

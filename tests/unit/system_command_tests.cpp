@@ -875,7 +875,7 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     auto updated = commands.handle(
         fixture.request(
             "camera.updateConfig",
-            R"({"cameraId":"CAM01","expectedConfigRevision":2,"parameters":{"exposureUs":120.0}})"),
+            R"({"cameraId":"CAM01","expectedConfigRevision":2,"parameters":{"exposureUs":120.0,"reverseX":true,"reverseY":true}})"),
         reader, {});
     ASSERT_TRUE(updated);
     const Json update_json = Json::parse(updated.value().payload_json);
@@ -883,6 +883,8 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     EXPECT_TRUE(update_json["dispatched"].get<bool>());
     EXPECT_TRUE(update_json["applied"].get<bool>());
     EXPECT_EQ(update_json["actual"]["exposureUs"], 120.0);
+    EXPECT_TRUE(update_json["actual"]["reverseX"].get<bool>());
+    EXPECT_TRUE(update_json["actual"]["reverseY"].get<bool>());
 
     auto software_mode = commands.handle(
         fixture.request(

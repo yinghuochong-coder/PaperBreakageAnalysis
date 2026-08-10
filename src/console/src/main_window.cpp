@@ -25,6 +25,7 @@
 #include <QPen>
 #include <QPixmap>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSpinBox>
@@ -44,6 +45,7 @@
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace paperbreak::console
 {
@@ -55,6 +57,81 @@ constexpr int table_header_vertical_margin = 12;
 constexpr int event_table_visible_rows = 10;
 constexpr auto local_date_time_format = "yyyy-MM-dd HH:mm:ss.zzz ttt";
 constexpr auto local_clock_format = "yyyy-MM-dd HH:mm:ss ttt";
+
+class ResponsiveGrid final : public QWidget
+{
+  public:
+    ResponsiveGrid(const int minimum_item_width, const int maximum_columns, const int spacing = 10)
+        : minimum_item_width_(minimum_item_width), maximum_columns_(maximum_columns),
+          spacing_(spacing)
+    {
+        auto layout = std::make_unique<QGridLayout>(this);
+        grid_ = layout.get();
+        grid_->setContentsMargins(0, 0, 0, 0);
+        grid_->setHorizontalSpacing(spacing_);
+        grid_->setVerticalSpacing(spacing_);
+        static_cast<void>(layout.release());
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        update_columns(width());
+    }
+
+    void add_widget(QWidget* widget)
+    {
+        if (!widget)
+            return;
+        widget->setParent(this);
+        widgets_.push_back(widget);
+        relayout(column_count_);
+    }
+
+    [[nodiscard]] QSize minimumSizeHint() const override
+    {
+        QSize hint = QWidget::minimumSizeHint();
+        hint.setWidth(minimum_item_width_);
+        return hint;
+    }
+
+  protected:
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QWidget::resizeEvent(event);
+        update_columns(event->size().width());
+    }
+
+  private:
+    void update_columns(const int available_width)
+    {
+        const int columns =
+            std::clamp((std::max(0, available_width) + spacing_) / (minimum_item_width_ + spacing_),
+                       1, maximum_columns_);
+        if (columns == column_count_)
+            return;
+        relayout(columns);
+    }
+
+    void relayout(const int columns)
+    {
+        column_count_ = std::max(1, columns);
+        for (QWidget* widget : widgets_)
+            grid_->removeWidget(widget);
+        for (std::size_t index = 0; index < widgets_.size(); ++index)
+        {
+            const int position = static_cast<int>(index);
+            grid_->addWidget(widgets_[index], position / column_count_, position % column_count_);
+        }
+        for (int column = 0; column < maximum_columns_; ++column)
+            grid_->setColumnStretch(column, column < column_count_ ? 1 : 0);
+        setProperty("layoutColumns", column_count_);
+        updateGeometry();
+    }
+
+    QGridLayout* grid_{};
+    std::vector<QWidget*> widgets_;
+    int minimum_item_width_{};
+    int maximum_columns_{};
+    int spacing_{};
+    int column_count_{};
+};
 
 std::optional<QDateTime> parse_external_date_time(const QString& text)
 {
@@ -514,38 +591,65 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             page->setObjectName(QStringLiteral("page-camera-configuration"));
             auto* layout = make_layout<QVBoxLayout>(page);
             layout->setContentsMargins(24, 20, 24, 20);
-            auto* heading = make_child<QLabel>(page, QStringLiteral("相机配置与实际值"));
-            heading->setProperty("role", "pageTitle");
-            layout->addWidget(heading);
 
             auto* scroll = make_child<QScrollArea>(page);
+            scroll->setObjectName(QStringLiteral("camera-configuration-scroll"));
             scroll->setWidgetResizable(true);
+            scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
             QWidget* content = make_child<QWidget>(scroll);
-            auto* content_layout = make_layout<QVBoxLayout>(content);
+            content->setObjectName(QStringLiteral("camera-configuration-content"));
+            auto* content_layout = make_layout<QHBoxLayout>(content);
             content_layout->setContentsMargins(2, 2, 8, 2);
-            content_layout->setSpacing(12);
+            content_layout->setSpacing(14);
 
-            auto* configured_group = make_child<QGroupBox>(content, QStringLiteral("已配置槽位"));
+            auto* sidebar = make_child<QWidget>(content);
+            sidebar->setObjectName(QStringLiteral("camera-device-sidebar"));
+            sidebar->setMinimumWidth(280);
+            sidebar->setMaximumWidth(330);
+            auto* sidebar_layout = make_layout<QVBoxLayout>(sidebar);
+            sidebar_layout->setContentsMargins(0, 0, 0, 0);
+            sidebar_layout->setSpacing(12);
+
+            auto* configured_group =
+                make_child<QGroupBox>(sidebar, QStringLiteral("已配置槽位与状态"));
+            configured_group->setObjectName(QStringLiteral("camera-configured-panel"));
+            configured_group->setProperty("role", "cameraPanel");
             auto* configured_layout = make_layout<QVBoxLayout>(configured_group);
             camera_selector_ = make_child<QComboBox>(configured_group);
             camera_selector_->setObjectName(QStringLiteral("camera-selector"));
             camera_configuration_value_ =
                 make_child<QLabel>(configured_group, QStringLiteral("正在从后台服务读取相机配置"));
+            camera_configuration_value_->setObjectName(
+                QStringLiteral("camera-configuration-status"));
             camera_configuration_value_->setWordWrap(true);
             camera_configuration_value_->setProperty("role", "muted");
             configured_layout->addWidget(camera_selector_);
             configured_layout->addWidget(camera_configuration_value_);
-            content_layout->addWidget(configured_group);
+            sidebar_layout->addWidget(configured_group);
 
-            auto* discovered_group = make_child<QGroupBox>(content, QStringLiteral("网络发现设备"));
+            auto* discovered_group = make_child<QGroupBox>(sidebar, QStringLiteral("网络发现设备"));
+            discovered_group->setObjectName(QStringLiteral("camera-discovered-panel"));
+            discovered_group->setProperty("role", "cameraPanel");
             auto* discovered_layout = make_layout<QVBoxLayout>(discovered_group);
+            auto* discover =
+                make_child<QPushButton>(discovered_group, QStringLiteral("重新发现设备"));
+            discover->setObjectName(QStringLiteral("camera-discover"));
+            QObject::connect(discover, &QPushButton::clicked, this, [this] {
+                if (camera_actions_.discover)
+                    show_camera_result(camera_actions_.discover());
+            });
+            discovered_layout->addWidget(discover);
             discovered_devices_ = make_child<QListWidget>(discovered_group);
             discovered_devices_->setObjectName(QStringLiteral("discovered-devices"));
-            discovered_devices_->setMinimumHeight(92);
+            discovered_devices_->setMinimumHeight(140);
             discovered_layout->addWidget(discovered_devices_);
             auto* binding = make_child<QWidget>(discovered_group);
-            auto* binding_layout = make_layout<QHBoxLayout>(binding);
+            binding->setObjectName(QStringLiteral("camera-binding-form"));
+            auto* binding_layout = make_layout<QFormLayout>(binding);
             binding_layout->setContentsMargins(0, 0, 0, 0);
+            binding_layout->setHorizontalSpacing(10);
+            binding_layout->setVerticalSpacing(8);
+            binding_layout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
             camera_bind_slot_ = make_child<QComboBox>(binding);
             camera_bind_slot_->setObjectName(QStringLiteral("camera-bind-slot"));
             camera_bind_location_ = make_child<QLineEdit>(binding);
@@ -554,79 +658,40 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             camera_bind_location_->setMaxLength(128);
             camera_bind_button_ = make_child<QPushButton>(binding, QStringLiteral("绑定到槽位"));
             camera_bind_button_->setObjectName(QStringLiteral("camera-bind"));
-            binding_layout->addWidget(make_child<QLabel>(binding, QStringLiteral("逻辑槽位")));
-            binding_layout->addWidget(camera_bind_slot_);
-            binding_layout->addWidget(camera_bind_location_, 1);
-            binding_layout->addWidget(camera_bind_button_);
+            binding_layout->addRow(QStringLiteral("逻辑槽位"), camera_bind_slot_);
+            binding_layout->addRow(camera_bind_location_);
+            binding_layout->addRow(camera_bind_button_);
             discovered_layout->addWidget(binding);
-            content_layout->addWidget(discovered_group);
-
-            camera_editor_ = make_child<QWidget>(content);
-            camera_editor_->setObjectName(QStringLiteral("camera-editor"));
-            auto* form = make_layout<QFormLayout>(camera_editor_);
-            form->setContentsMargins(12, 12, 12, 12);
-            camera_exposure_ = make_child<QDoubleSpinBox>(camera_editor_);
-            camera_exposure_->setRange(1.0, 10000000.0);
-            camera_exposure_->setDecimals(1);
-            camera_gain_ = make_child<QDoubleSpinBox>(camera_editor_);
-            camera_gain_->setRange(-24.0, 48.0);
-            camera_gain_->setDecimals(2);
-            camera_fps_ = make_child<QDoubleSpinBox>(camera_editor_);
-            camera_fps_->setRange(0.1, 1000.0);
-            camera_fps_->setDecimals(3);
-            camera_roi_width_ = make_child<QSpinBox>(camera_editor_);
-            camera_roi_width_->setRange(1, 16384);
-            camera_roi_height_ = make_child<QSpinBox>(camera_editor_);
-            camera_roi_height_->setRange(1, 16384);
-            camera_roi_x_ = make_child<QSpinBox>(camera_editor_);
-            camera_roi_x_->setRange(0, 16383);
-            camera_roi_y_ = make_child<QSpinBox>(camera_editor_);
-            camera_roi_y_->setRange(0, 16383);
-            camera_pixel_format_ = make_child<QComboBox>(camera_editor_);
-            camera_pixel_format_->addItems({QStringLiteral("Mono8"), QStringLiteral("Mono10"),
-                                            QStringLiteral("Mono12"), QStringLiteral("BayerRG8")});
-            camera_trigger_mode_ = make_child<QComboBox>(camera_editor_);
-            camera_trigger_mode_->addItems({QStringLiteral("Continuous"),
-                                            QStringLiteral("Hardware"),
-                                            QStringLiteral("Software")});
-            camera_trigger_source_ = make_child<QLineEdit>(camera_editor_);
-            camera_trigger_delay_ = make_child<QSpinBox>(camera_editor_);
-            camera_trigger_delay_->setRange(0, 60000000);
-            camera_packet_size_ = make_child<QSpinBox>(camera_editor_);
-            camera_packet_size_->setRange(576, 9000);
-            camera_packet_delay_ = make_child<QSpinBox>(camera_editor_);
-            camera_packet_delay_->setRange(0, 1000000000);
-            form->addRow(QStringLiteral("曝光 (us)"), camera_exposure_);
-            form->addRow(QStringLiteral("增益 (dB)"), camera_gain_);
-            form->addRow(QStringLiteral("帧率 (fps)"), camera_fps_);
-            form->addRow(QStringLiteral("ROI 宽"), camera_roi_width_);
-            form->addRow(QStringLiteral("ROI 高"), camera_roi_height_);
-            form->addRow(QStringLiteral("ROI X"), camera_roi_x_);
-            form->addRow(QStringLiteral("ROI Y"), camera_roi_y_);
-            form->addRow(QStringLiteral("像素格式"), camera_pixel_format_);
-            form->addRow(QStringLiteral("触发模式"), camera_trigger_mode_);
-            form->addRow(QStringLiteral("触发源"), camera_trigger_source_);
-            form->addRow(QStringLiteral("触发延迟 (us)"), camera_trigger_delay_);
-            form->addRow(QStringLiteral("包大小 (bytes)"), camera_packet_size_);
-            form->addRow(QStringLiteral("包间延迟 (ns)"), camera_packet_delay_);
-            content_layout->addWidget(camera_editor_);
+            sidebar_layout->addWidget(discovered_group);
+            sidebar_layout->addStretch(1);
+            content_layout->addWidget(sidebar);
 
             camera_control_actions_ = make_child<QWidget>(content);
-            auto* action_layout = make_layout<QHBoxLayout>(camera_control_actions_);
-            action_layout->setContentsMargins(0, 0, 0, 0);
+            camera_control_actions_->setObjectName(QStringLiteral("camera-main-panel"));
+            auto* main_layout = make_layout<QVBoxLayout>(camera_control_actions_);
+            main_layout->setContentsMargins(0, 0, 0, 0);
+            main_layout->setSpacing(12);
+
+            auto* control_group =
+                make_child<QGroupBox>(camera_control_actions_, QStringLiteral("相机控制"));
+            control_group->setObjectName(QStringLiteral("camera-control-panel"));
+            control_group->setProperty("role", "cameraPanel");
+            auto* control_group_layout = make_layout<QVBoxLayout>(control_group);
+            auto* action_grid = make_child<ResponsiveGrid>(control_group, 108, 7, 8);
+            action_grid->setObjectName(QStringLiteral("camera-control-grid"));
             const auto add_action = [&](const QString& text, const std::string& command,
                                         const bool confirm) {
-                auto* button = make_child<QPushButton>(camera_control_actions_, text);
+                auto* button = make_child<QPushButton>(action_grid, text);
                 button->setObjectName(
                     QStringLiteral("camera-%1").arg(QString::fromStdString(command)));
                 QObject::connect(button, &QPushButton::clicked, this, [this, command, confirm] {
                     run_camera_control(command, confirm);
                 });
-                action_layout->addWidget(button);
+                action_grid->add_widget(button);
             };
             add_action(QStringLiteral("连接"), "camera.connect", false);
             camera_read_parameters_button_ =
-                make_child<QPushButton>(camera_control_actions_, QStringLiteral("读取当前参数"));
+                make_child<QPushButton>(action_grid, QStringLiteral("读取当前参数"));
             camera_read_parameters_button_->setObjectName(QStringLiteral("camera-read-parameters"));
             QObject::connect(camera_read_parameters_button_, &QPushButton::clicked, this, [this] {
                 if (!camera_actions_.control || !camera_selector_ ||
@@ -638,15 +703,116 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                     camera_parameter_read_pending_ = true;
                 show_camera_result(result);
             });
-            action_layout->addWidget(camera_read_parameters_button_);
+            action_grid->add_widget(camera_read_parameters_button_);
             add_action(QStringLiteral("断开"), "camera.disconnect", true);
             add_action(QStringLiteral("开始采集"), "camera.start", true);
             add_action(QStringLiteral("停止采集"), "camera.stop", true);
             add_action(QStringLiteral("抓取快照"), "camera.captureSnapshot", false);
             add_action(QStringLiteral("软件触发"), "camera.softwareTrigger", false);
-            auto* save =
-                make_child<QPushButton>(camera_control_actions_, QStringLiteral("保存并下发"));
+            control_group_layout->addWidget(action_grid);
+            main_layout->addWidget(control_group);
+
+            auto* editor_grid = make_child<ResponsiveGrid>(camera_control_actions_, 280, 3, 12);
+            camera_editor_ = editor_grid;
+            camera_editor_->setObjectName(QStringLiteral("camera-editor"));
+            auto* acquisition_panel =
+                make_child<QGroupBox>(camera_editor_, QStringLiteral("采集参数"));
+            acquisition_panel->setObjectName(QStringLiteral("camera-acquisition-panel"));
+            acquisition_panel->setProperty("role", "cameraPanel");
+            auto* acquisition_form = make_layout<QFormLayout>(acquisition_panel);
+            acquisition_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            acquisition_form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            camera_exposure_ = make_child<QDoubleSpinBox>(acquisition_panel);
+            camera_exposure_->setRange(1.0, 10000000.0);
+            camera_exposure_->setDecimals(1);
+            camera_gain_ = make_child<QDoubleSpinBox>(acquisition_panel);
+            camera_gain_->setRange(-24.0, 48.0);
+            camera_gain_->setDecimals(2);
+            camera_fps_ = make_child<QDoubleSpinBox>(acquisition_panel);
+            camera_fps_->setRange(0.1, 1000.0);
+            camera_fps_->setDecimals(3);
+            acquisition_form->addRow(QStringLiteral("曝光 (us)"), camera_exposure_);
+            acquisition_form->addRow(QStringLiteral("增益 (dB)"), camera_gain_);
+            acquisition_form->addRow(QStringLiteral("帧率 (fps)"), camera_fps_);
+            editor_grid->add_widget(acquisition_panel);
+
+            auto* roi_panel =
+                make_child<QGroupBox>(camera_editor_, QStringLiteral("ROI / 图像方向"));
+            roi_panel->setObjectName(QStringLiteral("camera-roi-panel"));
+            roi_panel->setProperty("role", "cameraPanel");
+            auto* roi_form = make_layout<QFormLayout>(roi_panel);
+            roi_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            roi_form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            camera_roi_width_ = make_child<QSpinBox>(roi_panel);
+            camera_roi_width_->setRange(1, 16384);
+            camera_roi_height_ = make_child<QSpinBox>(roi_panel);
+            camera_roi_height_->setRange(1, 16384);
+            camera_roi_x_ = make_child<QSpinBox>(roi_panel);
+            camera_roi_x_->setRange(0, 16383);
+            camera_roi_y_ = make_child<QSpinBox>(roi_panel);
+            camera_roi_y_->setRange(0, 16383);
+            camera_reverse_x_ = make_child<QCheckBox>(roi_panel);
+            camera_reverse_x_->setObjectName(QStringLiteral("camera-reverse-x"));
+            camera_reverse_y_ = make_child<QCheckBox>(roi_panel);
+            camera_reverse_y_->setObjectName(QStringLiteral("camera-reverse-y"));
+            roi_form->addRow(QStringLiteral("宽度"), camera_roi_width_);
+            roi_form->addRow(QStringLiteral("高度"), camera_roi_height_);
+            roi_form->addRow(QStringLiteral("水平偏移"), camera_roi_x_);
+            roi_form->addRow(QStringLiteral("垂直偏移"), camera_roi_y_);
+            roi_form->addRow(QStringLiteral("水平镜像"), camera_reverse_x_);
+            roi_form->addRow(QStringLiteral("垂直镜像"), camera_reverse_y_);
+            editor_grid->add_widget(roi_panel);
+
+            auto* trigger_panel =
+                make_child<QGroupBox>(camera_editor_, QStringLiteral("触发与同步"));
+            trigger_panel->setObjectName(QStringLiteral("camera-trigger-panel"));
+            trigger_panel->setProperty("role", "cameraPanel");
+            auto* trigger_form = make_layout<QFormLayout>(trigger_panel);
+            trigger_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            trigger_form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            camera_pixel_format_ = make_child<QComboBox>(trigger_panel);
+            camera_pixel_format_->addItems({QStringLiteral("Mono8"), QStringLiteral("Mono10"),
+                                            QStringLiteral("Mono12"), QStringLiteral("BayerRG8")});
+            camera_trigger_mode_ = make_child<QComboBox>(trigger_panel);
+            camera_trigger_mode_->addItems({QStringLiteral("Continuous"),
+                                            QStringLiteral("Hardware"),
+                                            QStringLiteral("Software")});
+            camera_trigger_source_ = make_child<QLineEdit>(trigger_panel);
+            camera_trigger_delay_ = make_child<QSpinBox>(trigger_panel);
+            camera_trigger_delay_->setRange(0, 60000000);
+            trigger_form->addRow(QStringLiteral("像素格式"), camera_pixel_format_);
+            trigger_form->addRow(QStringLiteral("触发模式"), camera_trigger_mode_);
+            trigger_form->addRow(QStringLiteral("触发源"), camera_trigger_source_);
+            trigger_form->addRow(QStringLiteral("触发延迟 (us)"), camera_trigger_delay_);
+            editor_grid->add_widget(trigger_panel);
+
+            auto* transport_panel =
+                make_child<QGroupBox>(camera_editor_, QStringLiteral("传输与性能"));
+            transport_panel->setObjectName(QStringLiteral("camera-transport-panel"));
+            transport_panel->setProperty("role", "cameraPanel");
+            auto* transport_form = make_layout<QFormLayout>(transport_panel);
+            transport_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            transport_form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            camera_packet_size_ = make_child<QSpinBox>(transport_panel);
+            camera_packet_size_->setRange(576, 9000);
+            camera_packet_delay_ = make_child<QSpinBox>(transport_panel);
+            camera_packet_delay_->setRange(0, 1000000000);
+            transport_form->addRow(QStringLiteral("包大小 (bytes)"), camera_packet_size_);
+            transport_form->addRow(QStringLiteral("包间延迟 (ns)"), camera_packet_delay_);
+            editor_grid->add_widget(transport_panel);
+            main_layout->addWidget(camera_editor_);
+
+            auto* footer = make_child<QWidget>(camera_control_actions_);
+            footer->setObjectName(QStringLiteral("camera-action-bar"));
+            auto* footer_layout = make_layout<QHBoxLayout>(footer);
+            footer_layout->setContentsMargins(14, 10, 14, 10);
+            camera_operation_value_ = make_child<QLabel>(footer, QStringLiteral("尚未执行操作"));
+            camera_operation_value_->setObjectName(QStringLiteral("camera-operation-status"));
+            camera_operation_value_->setWordWrap(true);
+            camera_operation_value_->setProperty("role", "muted");
+            auto* save = make_child<QPushButton>(footer, QStringLiteral("保存并下发"));
             save->setObjectName(QStringLiteral("camera-update-config"));
+            save->setProperty("role", "primaryAction");
             QObject::connect(save, &QPushButton::clicked, this, [this] {
                 if (!camera_actions_.update_config || camera_selector_->currentIndex() < 0)
                     return;
@@ -666,6 +832,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                                           static_cast<std::uint32_t>(camera_roi_height_->value()),
                                           static_cast<std::uint32_t>(camera_roi_x_->value()),
                                           static_cast<std::uint32_t>(camera_roi_y_->value())},
+                    .reverse_x = camera_reverse_x_->isChecked(),
+                    .reverse_y = camera_reverse_y_->isChecked(),
                     .pixel_format = camera_pixel_format_->currentText().toStdString(),
                     .trigger_mode = camera_trigger_mode_->currentText().toStdString(),
                     .trigger_source = camera_trigger_source_->text().toStdString(),
@@ -677,23 +845,16 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                     camera_snapshot_.cameras[index].id,
                     camera_snapshot_.cameras[index].saved_config_revision, value));
             });
-            action_layout->addWidget(save);
-            content_layout->addWidget(camera_control_actions_);
+            footer_layout->addWidget(camera_operation_value_, 1);
+            footer_layout->addWidget(save);
+            main_layout->addStretch(1);
+            main_layout->addWidget(footer);
+            content_layout->addWidget(camera_control_actions_, 1);
 
-            auto* discover = make_child<QPushButton>(content, QStringLiteral("重新发现设备"));
-            discover->setObjectName(QStringLiteral("camera-discover"));
-            QObject::connect(discover, &QPushButton::clicked, this, [this] {
-                if (camera_actions_.discover)
-                    show_camera_result(camera_actions_.discover());
-            });
-            content_layout->addWidget(discover);
-            camera_operation_value_ = make_child<QLabel>(content, QStringLiteral("尚未执行操作"));
-            camera_operation_value_->setWordWrap(true);
-            content_layout->addWidget(camera_operation_value_);
-            content_layout->addStretch(1);
             scroll->setWidget(content);
             layout->addWidget(scroll, 1);
             QObject::connect(camera_selector_, &QComboBox::currentIndexChanged, this, [this] {
+                update_camera_configuration_summary();
                 populate_camera_editor();
                 update_camera_controls();
             });
@@ -1794,36 +1955,13 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
         camera_bind_slot_->setCurrentIndex(previous_slot_index);
     camera_bind_slot_->blockSignals(false);
 
-    QStringList lines;
     std::size_t healthy = 0U;
     for (const auto& camera : snapshot.cameras)
     {
         if (camera.state == "connected" || camera.state == "acquiring")
             ++healthy;
-        lines.push_back(
-            QStringLiteral(
-                "%1 · %2 · 序列号 %3 · 状态 %4\n型号 %5 · IP %6\n保存值：曝光 %7 us / 增益 %8 dB / "
-                "帧率 %9 fps\n实际值：曝光 %10 us / 增益 %11 dB / 帧率 %12 fps")
-                .arg(QString::fromStdString(camera.id), QString::fromStdString(camera.location),
-                     QString::fromStdString(camera.serial), QString::fromStdString(camera.state),
-                     QString::fromStdString(camera.model), QString::fromStdString(camera.ip))
-                .arg(camera.saved.exposure_us.value_or(0.0), 0, 'f', 1)
-                .arg(camera.saved.gain_db.value_or(0.0), 0, 'f', 1)
-                .arg(camera.saved.frame_rate.value_or(0.0), 0, 'f', 1)
-                .arg(camera.actual.exposure_us.value_or(0.0), 0, 'f', 1)
-                .arg(camera.actual.gain_db.value_or(0.0), 0, 'f', 1)
-                .arg(camera.actual.frame_rate.value_or(0.0), 0, 'f', 1));
     }
-    if (snapshot.cameras.empty())
-    {
-        lines.push_back(QStringLiteral(
-            "当前保存配置未包含相机。网络发现结果单独显示在下方，可选择可用设备绑定。"));
-    }
-    if (snapshot.topology_restart_required)
-        lines.push_back(QStringLiteral("相机拓扑已保存但尚未生效，请通过托盘菜单重启后台服务。"));
-    if (snapshot.stale)
-        lines.push_back(QStringLiteral("相机数据不可用或已过期；旧值不会作为实时状态使用。"));
-    camera_configuration_value_->setText(lines.join(QStringLiteral("\n\n")));
+    update_camera_configuration_summary();
     camera_count_value_->setText(QStringLiteral("%1/%2").arg(healthy).arg(snapshot.cameras.size()));
     if (snapshot.operation)
     {
@@ -1886,6 +2024,43 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
     update_camera_controls();
 }
 
+void MainWindow::update_camera_configuration_summary()
+{
+    if (!camera_configuration_value_ || !camera_selector_)
+        return;
+
+    const int selected_index = camera_selector_->currentIndex();
+    QString summary;
+    if (selected_index < 0 ||
+        static_cast<std::size_t>(selected_index) >= camera_snapshot_.cameras.size())
+    {
+        summary = QStringLiteral(
+            "当前保存配置未包含相机。可从网络发现设备列表选择可用设备绑定。");
+    }
+    else
+    {
+        const auto& camera = camera_snapshot_.cameras[static_cast<std::size_t>(selected_index)];
+        summary =
+            QStringLiteral(
+                "%1 · %2 · 序列号 %3 · 状态 %4\n型号 %5 · IP %6\n保存值：曝光 %7 us / 增益 %8 dB / "
+                "帧率 %9 fps\n实际值：曝光 %10 us / 增益 %11 dB / 帧率 %12 fps")
+                .arg(QString::fromStdString(camera.id), QString::fromStdString(camera.location),
+                     QString::fromStdString(camera.serial), QString::fromStdString(camera.state),
+                     QString::fromStdString(camera.model), QString::fromStdString(camera.ip))
+                .arg(camera.saved.exposure_us.value_or(0.0), 0, 'f', 1)
+                .arg(camera.saved.gain_db.value_or(0.0), 0, 'f', 1)
+                .arg(camera.saved.frame_rate.value_or(0.0), 0, 'f', 1)
+                .arg(camera.actual.exposure_us.value_or(0.0), 0, 'f', 1)
+                .arg(camera.actual.gain_db.value_or(0.0), 0, 'f', 1)
+                .arg(camera.actual.frame_rate.value_or(0.0), 0, 'f', 1);
+    }
+    if (camera_snapshot_.topology_restart_required)
+        summary += QStringLiteral("\n\n相机拓扑已保存但尚未生效，请通过托盘菜单重启后台服务。");
+    if (camera_snapshot_.stale)
+        summary += QStringLiteral("\n\n相机数据不可用或已过期；旧值不会作为实时状态使用。");
+    camera_configuration_value_->setText(summary);
+}
+
 void MainWindow::populate_camera_editor()
 {
     if (!camera_selector_ || camera_selector_->currentIndex() < 0)
@@ -1911,6 +2086,8 @@ void MainWindow::populate_camera_editor(const CameraParameterValue& value)
         camera_roi_x_->setValue(static_cast<int>(value.roi->offset_x));
         camera_roi_y_->setValue(static_cast<int>(value.roi->offset_y));
     }
+    camera_reverse_x_->setChecked(value.reverse_x);
+    camera_reverse_y_->setChecked(value.reverse_y);
     camera_pixel_format_->setCurrentText(QString::fromStdString(value.pixel_format));
     camera_trigger_mode_->setCurrentText(QString::fromStdString(value.trigger_mode));
     camera_trigger_source_->setText(QString::fromStdString(value.trigger_source));
@@ -2861,12 +3038,27 @@ bool MainWindow::select_page(const std::size_t index) noexcept
 bool MainWindow::camera_configuration_ready() const noexcept
 {
     return camera_selector_ && camera_exposure_ && camera_gain_ && camera_fps_ &&
-           camera_roi_width_ && camera_roi_height_ && camera_pixel_format_ &&
-           camera_trigger_mode_ && camera_trigger_source_ && camera_packet_size_ &&
+           camera_roi_width_ && camera_roi_height_ && camera_roi_x_ && camera_roi_y_ &&
+           camera_reverse_x_ && camera_reverse_y_ &&
+           camera_pixel_format_ && camera_trigger_mode_ && camera_trigger_source_ &&
+           camera_trigger_delay_ && camera_packet_size_ && camera_packet_delay_ &&
            discovered_devices_ && camera_bind_slot_ && camera_bind_location_ &&
-           camera_bind_button_ && findChild<QPushButton*>(QStringLiteral("camera-discover")) &&
+           camera_bind_button_ && camera_configuration_value_ && camera_operation_value_ &&
+           findChild<QWidget*>(QStringLiteral("camera-device-sidebar")) &&
+           findChild<QWidget*>(QStringLiteral("camera-control-panel")) &&
+           findChild<QWidget*>(QStringLiteral("camera-acquisition-panel")) &&
+           findChild<QWidget*>(QStringLiteral("camera-roi-panel")) &&
+           findChild<QWidget*>(QStringLiteral("camera-trigger-panel")) &&
+           findChild<QWidget*>(QStringLiteral("camera-transport-panel")) &&
+           findChild<QWidget*>(QStringLiteral("camera-action-bar")) &&
+           findChild<QPushButton*>(QStringLiteral("camera-discover")) &&
            findChild<QPushButton*>(QStringLiteral("camera-read-parameters")) &&
+           findChild<QPushButton*>(QStringLiteral("camera-camera.connect")) &&
            findChild<QPushButton*>(QStringLiteral("camera-camera.disconnect")) &&
+           findChild<QPushButton*>(QStringLiteral("camera-camera.start")) &&
+           findChild<QPushButton*>(QStringLiteral("camera-camera.stop")) &&
+           findChild<QPushButton*>(QStringLiteral("camera-camera.captureSnapshot")) &&
+           findChild<QPushButton*>(QStringLiteral("camera-camera.softwareTrigger")) &&
            findChild<QPushButton*>(QStringLiteral("camera-update-config"));
 }
 
