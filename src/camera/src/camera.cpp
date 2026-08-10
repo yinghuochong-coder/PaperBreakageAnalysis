@@ -77,7 +77,8 @@ bool valid_external_text(const std::string_view value, const std::size_t maximum
 
 Error invalid_parameter(std::string parameter, std::string reason)
 {
-    return make_camera_error(CameraErrorKind::config_failed, "相机参数不符合设备能力",
+    const auto message = "相机参数不符合设备能力（参数：" + parameter + "，原因：" + reason + "）";
+    return make_camera_error(CameraErrorKind::config_failed, message,
                              "camera.validateParameters", std::nullopt,
                              {{"parameter", std::move(parameter)}, {"reason", std::move(reason)}});
 }
@@ -154,13 +155,14 @@ Result<void> validate_roi(const CameraCapabilities& capabilities,
     }
     const auto& value = *parameters.roi;
     const auto& limits = *capabilities.roi;
-    if (!contains_integral(limits.width, value.width) ||
-        !contains_integral(limits.height, value.height) ||
-        !contains_integral(limits.offset_x, value.offset_x) ||
-        !contains_integral(limits.offset_y, value.offset_y))
-    {
-        return Result<void>::failure(invalid_parameter("roi", "out-of-range-or-step"));
-    }
+    if (!contains_integral(limits.width, value.width))
+        return Result<void>::failure(invalid_parameter("roi.width", "out-of-range-or-step"));
+    if (!contains_integral(limits.height, value.height))
+        return Result<void>::failure(invalid_parameter("roi.height", "out-of-range-or-step"));
+    if (!contains_integral(limits.offset_x, value.offset_x))
+        return Result<void>::failure(invalid_parameter("roi.offsetX", "out-of-range-or-step"));
+    if (!contains_integral(limits.offset_y, value.offset_y))
+        return Result<void>::failure(invalid_parameter("roi.offsetY", "out-of-range-or-step"));
     if (value.width > limits.sensor_width || value.offset_x > limits.sensor_width - value.width ||
         value.height > limits.sensor_height || value.offset_y > limits.sensor_height - value.height)
     {

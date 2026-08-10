@@ -867,6 +867,10 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     const Json connected_json = Json::parse(connected.value().payload_json);
     EXPECT_EQ(connected_json["actual"]["exposureUs"], 100.0);
     EXPECT_EQ(connected_json["actual"]["pixelFormat"], "Mono8");
+    ASSERT_TRUE(connected_json.contains("capabilities"));
+    EXPECT_EQ(connected_json["capabilities"]["roi"]["sensorWidth"], 64U);
+    EXPECT_EQ(connected_json["capabilities"]["roi"]["sensorHeight"], 48U);
+    EXPECT_EQ(connected_json["capabilities"]["roi"]["offsetY"]["increment"], 1U);
     auto readback =
         commands.handle(fixture.request("camera.getConfig", R"({"cameraId":"CAM01"})"), reader, {});
     ASSERT_TRUE(readback);

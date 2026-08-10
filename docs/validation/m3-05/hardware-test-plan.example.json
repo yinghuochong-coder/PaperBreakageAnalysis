@@ -11,6 +11,7 @@
     "exposureUs": 1000.0,
     "gainDb": 0.0,
     "frameRate": 60.0,
+    "roi": { "width": 1624, "height": 1240, "offsetX": 0, "offsetY": 0 },
     "triggerMode": "continuous",
     "packetSizeBytes": 1500,
     "interPacketDelay": 0

@@ -251,8 +251,11 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 `camera.list` 和 `camera.discover` 允许已认证本机用户调用，payload 必须为空。`camera.list`
 返回顶层 `storedConfigRevision`、`topologyRestartRequired` 和最多四个配置槽位 `cameras`；
 每个槽位包含 `cameraId`、`location`、`enabled`、`serialNumber`、`state`、
-`savedConfigRevision`、完整 `saved` 参数，以及设备已连接时的 `device` 和服务回读 `actual`
-参数。`topologyRestartRequired=true` 表示保存的相机拓扑与当前运行拓扑不同，连接、采集和参数
+`savedConfigRevision`、完整 `saved` 参数，以及设备已连接时的 `device`、服务回读 `actual`
+参数和 `capabilities`。当前 `capabilities.roi` 包含传感器宽高，以及 `width`、`height`、
+`offsetX`、`offsetY` 各自的 `minimum`、`maximum`、`increment`；控制台必须按设备返回的范围和
+步进约束输入，服务仍会对宽高与偏移量组合做最终校验。`topologyRestartRequired=true` 表示保存的
+相机拓扑与当前运行拓扑不同，连接、采集和参数
 下发均应等待服务重启。
 
 `camera.discover` 返回结构如下；字段名是 IPC v1 的固定名称：

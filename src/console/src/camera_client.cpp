@@ -91,6 +91,56 @@ void parse_parameters(const Json& source, CameraParameterValue& target)
         target.inter_packet_delay_ns = source["interPacketDelayNs"].get<std::uint32_t>();
 }
 
+bool parse_integer_range(const Json& source, CameraIntegerRangeValue& target)
+{
+    if (!source.is_object() || !source.contains("minimum") ||
+        !source["minimum"].is_number_unsigned() || !source.contains("maximum") ||
+        !source["maximum"].is_number_unsigned() || !source.contains("increment") ||
+        !source["increment"].is_number_unsigned())
+        return false;
+    CameraIntegerRangeValue parsed{source["minimum"].get<std::uint32_t>(),
+                                   source["maximum"].get<std::uint32_t>(),
+                                   source["increment"].get<std::uint32_t>()};
+    if (parsed.increment == 0U || parsed.maximum < parsed.minimum)
+        return false;
+    target = parsed;
+    return true;
+}
+
+bool parse_roi_capabilities(const Json& source, CameraRoiCapabilitiesValue& target)
+{
+    if (!source.is_object() || !source.contains("sensorWidth") ||
+        !source["sensorWidth"].is_number_unsigned() || !source.contains("sensorHeight") ||
+        !source["sensorHeight"].is_number_unsigned() || !source.contains("width") ||
+        !source.contains("height") || !source.contains("offsetX") ||
+        !source.contains("offsetY"))
+        return false;
+    CameraRoiCapabilitiesValue parsed;
+    parsed.sensor_width = source["sensorWidth"].get<std::uint32_t>();
+    parsed.sensor_height = source["sensorHeight"].get<std::uint32_t>();
+    if (parsed.sensor_width == 0U || parsed.sensor_height == 0U ||
+        !parse_integer_range(source["width"], parsed.width) ||
+        !parse_integer_range(source["height"], parsed.height) ||
+        !parse_integer_range(source["offsetX"], parsed.offset_x) ||
+        !parse_integer_range(source["offsetY"], parsed.offset_y))
+        return false;
+    target = parsed;
+    return true;
+}
+
+bool parse_capabilities(const Json& source, CameraClientItem& target)
+{
+    if (!source.is_object())
+        return false;
+    if (!source.contains("roi"))
+        return true;
+    CameraRoiCapabilitiesValue roi;
+    if (!parse_roi_capabilities(source["roi"], roi))
+        return false;
+    target.roi_capabilities = roi;
+    return true;
+}
+
 Json parameter_json(const CameraParameterValue& value)
 {
     Json result = Json::object();
@@ -255,6 +305,13 @@ void CameraClient::list_completed(ipc::ClientRequestHandle handle,
             parse_parameters(item["saved"], value.saved);
         if (item.contains("actual"))
             parse_parameters(item["actual"], value.actual);
+        if (item.contains("capabilities") && !parse_capabilities(item["capabilities"], value))
+        {
+            snapshot_.error = protocol_error("camera.list 相机能力结构无效");
+            snapshot_.stale = true;
+            notify();
+            return;
+        }
         items.push_back(std::move(value));
     }
     snapshot_.cameras = std::move(items);
@@ -374,6 +431,14 @@ void CameraClient::operation_completed(ipc::ClientRequestHandle handle,
             {
                 camera->actual = {};
                 parse_parameters(payload["actual"], camera->actual);
+            }
+            if (payload.contains("capabilities") &&
+                !parse_capabilities(payload["capabilities"], *camera))
+            {
+                snapshot_.operation->message = "相机能力响应结构无效";
+                snapshot_.error = protocol_error(snapshot_.operation->message);
+                notify();
+                return;
             }
         }
     }

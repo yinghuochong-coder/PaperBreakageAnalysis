@@ -41,6 +41,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string_view>
 #include <tuple>
@@ -57,6 +59,19 @@ constexpr int table_header_vertical_margin = 12;
 constexpr int event_table_visible_rows = 10;
 constexpr auto local_date_time_format = "yyyy-MM-dd HH:mm:ss.zzz ttt";
 constexpr auto local_clock_format = "yyyy-MM-dd HH:mm:ss ttt";
+
+void normalize_stepped_spin_box(QSpinBox* input)
+{
+    const int minimum = input->property("cameraStepMinimum").toInt();
+    const int increment = input->property("cameraStepIncrement").toInt();
+    if (increment <= 1)
+        return;
+    const auto delta = static_cast<std::int64_t>(input->value()) - minimum;
+    const auto aligned = static_cast<std::int64_t>(minimum) +
+                         ((delta + increment / 2) / increment) * increment;
+    input->setValue(static_cast<int>(std::clamp<std::int64_t>(
+        aligned, input->minimum(), input->maximum())));
+}
 
 class ResponsiveGrid final : public QWidget
 {
@@ -744,13 +759,21 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             roi_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
             roi_form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
             camera_roi_width_ = make_child<QSpinBox>(roi_panel);
+            camera_roi_width_->setObjectName(QStringLiteral("camera-roi-width"));
             camera_roi_width_->setRange(1, 16384);
             camera_roi_height_ = make_child<QSpinBox>(roi_panel);
+            camera_roi_height_->setObjectName(QStringLiteral("camera-roi-height"));
             camera_roi_height_->setRange(1, 16384);
             camera_roi_x_ = make_child<QSpinBox>(roi_panel);
+            camera_roi_x_->setObjectName(QStringLiteral("camera-roi-offset-x"));
             camera_roi_x_->setRange(0, 16383);
             camera_roi_y_ = make_child<QSpinBox>(roi_panel);
+            camera_roi_y_->setObjectName(QStringLiteral("camera-roi-offset-y"));
             camera_roi_y_->setRange(0, 16383);
+            for (auto* input :
+                 {camera_roi_width_, camera_roi_height_, camera_roi_x_, camera_roi_y_})
+                QObject::connect(input, &QSpinBox::editingFinished, input,
+                                 [input] { normalize_stepped_spin_box(input); });
             camera_reverse_x_ = make_child<QCheckBox>(roi_panel);
             camera_reverse_x_->setObjectName(QStringLiteral("camera-reverse-x"));
             camera_reverse_y_ = make_child<QCheckBox>(roi_panel);
@@ -2008,6 +2031,7 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
             {
                 camera_editor_id_ = actual->id;
                 camera_editor_revision_ = actual->saved_config_revision;
+                configure_camera_roi_editor(*actual);
                 populate_camera_editor(actual->actual);
                 loaded_actual = true;
             }
@@ -2071,7 +2095,52 @@ void MainWindow::populate_camera_editor()
     const auto& value = camera_snapshot_.cameras[index].saved;
     camera_editor_id_ = camera_snapshot_.cameras[index].id;
     camera_editor_revision_ = camera_snapshot_.cameras[index].saved_config_revision;
+    configure_camera_roi_editor(camera_snapshot_.cameras[index]);
     populate_camera_editor(value);
+}
+
+void MainWindow::configure_camera_roi_editor(const CameraClientItem& camera)
+{
+    const auto configure = [](QSpinBox* input, const CameraIntegerRangeValue& range,
+                              const std::uint32_t maximum) {
+        const auto to_int = [](const std::uint32_t value) {
+            return static_cast<int>(std::min<std::uint32_t>(
+                value, static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
+        };
+        const int minimum = to_int(range.minimum);
+        const int bounded_maximum = std::max(minimum, to_int(maximum));
+        const int increment = std::max(1, to_int(range.increment));
+        input->setRange(minimum, bounded_maximum);
+        input->setSingleStep(increment);
+        input->setProperty("cameraStepMinimum", minimum);
+        input->setProperty("cameraStepIncrement", increment);
+        input->setToolTip(QStringLiteral("有效范围：%1～%2；步进：%3")
+                              .arg(minimum)
+                              .arg(bounded_maximum)
+                              .arg(increment));
+    };
+
+    if (!camera.roi_capabilities)
+    {
+        camera_roi_width_->setRange(1, 16384);
+        camera_roi_height_->setRange(1, 16384);
+        camera_roi_x_->setRange(0, 16383);
+        camera_roi_y_->setRange(0, 16383);
+        for (auto* input : {camera_roi_width_, camera_roi_height_, camera_roi_x_, camera_roi_y_})
+        {
+            input->setSingleStep(1);
+            input->setProperty("cameraStepMinimum", input->minimum());
+            input->setProperty("cameraStepIncrement", 1);
+            input->setToolTip(QStringLiteral("连接相机后读取设备支持的范围与步进"));
+        }
+        return;
+    }
+
+    const auto& roi = *camera.roi_capabilities;
+    configure(camera_roi_width_, roi.width, roi.sensor_width);
+    configure(camera_roi_height_, roi.height, roi.sensor_height);
+    configure(camera_roi_x_, roi.offset_x, roi.offset_x.maximum);
+    configure(camera_roi_y_, roi.offset_y, roi.offset_y.maximum);
 }
 
 void MainWindow::populate_camera_editor(const CameraParameterValue& value)

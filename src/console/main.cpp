@@ -27,6 +27,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QSpinBox>
 #include <QTableWidget>
 #include <QTimer>
 #include <QUrl>
@@ -549,6 +550,14 @@ int main(int argc, char* argv[])
         camera_smoke.cameras.front().saved.reverse_y = false;
         camera_smoke.cameras.back().saved.reverse_x = false;
         camera_smoke.cameras.back().saved.reverse_y = true;
+        camera_smoke.cameras.back().roi_capabilities =
+            paperbreak::console::CameraRoiCapabilitiesValue{
+                .sensor_width = 1624U,
+                .sensor_height = 1240U,
+                .width = {32U, 1624U, 4U},
+                .height = {4U, 1240U, 4U},
+                .offset_x = {0U, 1592U, 2U},
+                .offset_y = {0U, 1232U, 16U}};
         camera_smoke.discovered_devices.front().exclusive_access_available = true;
         main_window.apply_camera_snapshot(camera_smoke);
         auto* const camera_selector =
@@ -586,6 +595,18 @@ int main(int argc, char* argv[])
             !camera_status->text().contains(QStringLiteral("CAM01"));
         const bool selected_camera_mirroring_loaded =
             reverse_x && reverse_y && !reverse_x->isChecked() && reverse_y->isChecked();
+        auto* const offset_y =
+            main_window.findChild<QSpinBox*>(QStringLiteral("camera-roi-offset-y"));
+        const bool roi_capabilities_loaded =
+            offset_y && offset_y->minimum() == 0 && offset_y->maximum() == 1232 &&
+            offset_y->singleStep() == 16;
+        if (offset_y)
+        {
+            offset_y->setValue(100);
+            static_cast<void>(QMetaObject::invokeMethod(offset_y, "editingFinished",
+                                                        Qt::DirectConnection));
+        }
+        const bool roi_offset_aligned = offset_y && offset_y->value() == 96;
         const bool camera_banner_removed =
             std::ranges::none_of(main_window.findChildren<QLabel*>(), [](const QLabel* label) {
                 return label && label->text() == QStringLiteral("相机配置与实际值");
@@ -766,6 +787,7 @@ int main(int argc, char* argv[])
                    camera_banner_removed && camera_discover_above_list &&
                    first_camera_status_only && selected_camera_status_only &&
                    first_camera_mirroring_loaded && selected_camera_mirroring_loaded &&
+                   roi_capabilities_loaded && roi_offset_aligned &&
                    empty_configuration_kept_discovery && restart_state_disabled_controls &&
                    main_window.operations_pages_ready() && main_window.algorithm_page_ready() &&
                    main_window.event_pages_ready() && main_window.storage_page_ready() &&

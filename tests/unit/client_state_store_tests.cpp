@@ -150,7 +150,7 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
             ++list_requests;
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json =
-                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous"}}],"storedConfigRevision":7,"topologyRestartRequired":false})",
+                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"capabilities":{"roi":{"sensorWidth":1624,"sensorHeight":1240,"width":{"minimum":32,"maximum":1624,"increment":4},"height":{"minimum":4,"maximum":1240,"increment":4},"offsetX":{"minimum":0,"maximum":1592,"increment":2},"offsetY":{"minimum":0,"maximum":1232,"increment":16}}},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous"}}],"storedConfigRevision":7,"topologyRestartRequired":false})",
                  .binary = {}});
         }
         ++operation_requests;
@@ -161,7 +161,7 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
                  request.command == "camera.discover"
                      ? R"({"devices":[{"model":"Mock","serialNumber":"MOCK-01","ip":"127.0.0.1","networkInterface":"mock0","exclusiveAccessAvailable":true}]})"
                  : request.command == "camera.getConfig"
-                     ? R"({"cameraId":"CAM01","state":"connected","actual":{"exposureUs":777.0,"gainDb":3.0,"frameRate":25.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":false,"reverseY":true,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}})"
+                     ? R"({"cameraId":"CAM01","state":"connected","capabilities":{"roi":{"sensorWidth":1624,"sensorHeight":1240,"width":{"minimum":32,"maximum":1624,"increment":4},"height":{"minimum":4,"maximum":1240,"increment":4},"offsetX":{"minimum":0,"maximum":1592,"increment":2},"offsetY":{"minimum":0,"maximum":1232,"increment":16}}},"actual":{"exposureUs":777.0,"gainDb":3.0,"frameRate":25.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":false,"reverseY":true,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}})"
                  : request.command == "camera.connect"
                      ? R"({"cameraId":"CAM01","state":"connected","actual":{"exposureUs":101.0},"saved":false,"dispatched":false,"applied":false,"restartRequired":false,"applyError":{"code":"CAMERA_CONFIG_FAILED","message":"保存参数不符合当前设备能力"}})"
                  : request.command == "camera.updateConfig" || request.command == "camera.bind"
@@ -867,6 +867,10 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     EXPECT_FALSE(camera.saved.reverse_y);
     EXPECT_TRUE(camera.actual.reverse_x);
     EXPECT_FALSE(camera.actual.reverse_y);
+    ASSERT_TRUE(camera.roi_capabilities.has_value());
+    EXPECT_EQ(camera.roi_capabilities->sensor_height, 1240U);
+    EXPECT_EQ(camera.roi_capabilities->offset_y.maximum, 1232U);
+    EXPECT_EQ(camera.roi_capabilities->offset_y.increment, 16U);
     EXPECT_EQ(latest.stored_config_revision, 7U);
     EXPECT_FALSE(latest.topology_restart_required);
     EXPECT_EQ(latest.discovered_devices.front().network_interface, "mock0");
@@ -889,6 +893,8 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     EXPECT_EQ(handler->last_command, "camera.getConfig");
     EXPECT_FALSE(latest.cameras.front().actual.reverse_x);
     EXPECT_TRUE(latest.cameras.front().actual.reverse_y);
+    ASSERT_TRUE(latest.cameras.front().roi_capabilities.has_value());
+    EXPECT_EQ(latest.cameras.front().roi_capabilities->offset_y.increment, 16U);
 
     ASSERT_TRUE(client.discover());
     ASSERT_TRUE(wait_until([&] {

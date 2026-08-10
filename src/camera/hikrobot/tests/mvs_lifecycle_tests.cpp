@@ -353,7 +353,11 @@ void configure_parameter_nodes(FakeContext& state)
                     {"Gain", {2.0F, 0.0F, 24.0F}},
                     {"AcquisitionFrameRate", {30.0F, 1.0F, 60.0F}},
                     {"TriggerDelay", {0.0F, 0.0F, 1000.0F}}};
-    state.integers = {{"Width", {1600, 64, 1600, 4}},
+    state.integers = {{"WidthMax", {1600, 1600, 1600, 0}},
+                      {"HeightMax", {1200, 1200, 1200, 0}},
+                      {"SensorWidth", {1600, 1600, 1600, 0}},
+                      {"SensorHeight", {1200, 1200, 1200, 0}},
+                      {"Width", {1600, 64, 1600, 4}},
                       {"Height", {1200, 64, 1200, 2}},
                       {"OffsetX", {0, 0, 1536, 4}},
                       {"OffsetY", {0, 0, 1136, 2}},
@@ -493,6 +497,29 @@ TEST_F(MvsLifecycleTest, MapsParameterCapabilitiesAndReadsCompleteSnapshot)
     EXPECT_EQ(snapshot.value().pixel_format, PixelFormat::mono8);
     EXPECT_EQ(snapshot.value().trigger_mode, TriggerMode::continuous);
     EXPECT_EQ(snapshot.value().packet_size_bytes, 1500U);
+}
+
+TEST_F(MvsLifecycleTest, ExpandsDynamicVerticalOffsetRangeForSmallerRequestedHeight)
+{
+    configure_parameter_nodes(context_);
+    context_.integers["Height"].current = 600;
+    context_.integers["Height"].maximum = 600;
+    context_.integers["OffsetY"].maximum = 0;
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+
+    const auto capabilities = handle.capabilities();
+    ASSERT_TRUE(capabilities);
+    ASSERT_TRUE(capabilities.value().roi);
+    EXPECT_EQ(capabilities.value().roi->sensor_height, 1200U);
+    EXPECT_EQ(capabilities.value().roi->height.maximum, 1200U);
+    EXPECT_EQ(capabilities.value().roi->offset_y.maximum, 1136U);
+
+    const auto applied = handle.apply_parameters({.roi = Roi{1600U, 600U, 0U, 4U}});
+
+    ASSERT_TRUE(applied);
+    EXPECT_EQ(applied.value().roi, (Roi{1600U, 600U, 0U, 4U}));
 }
 
 TEST_F(MvsLifecycleTest, ParameterApplyPausesWritesReadsBackAndResumesStreaming)

@@ -958,6 +958,13 @@ Result<ipc::CommandResponse> algorithm_configuration_response(config::ConfigRepo
          .binary = {}});
 }
 
+template <typename T> Json stepped_range_json(const camera::SteppedRange<T>& value)
+{
+    return {{"minimum", value.minimum},
+            {"maximum", value.maximum},
+            {"increment", value.increment}};
+}
+
 Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
 {
     Json result{{"cameraId", value.camera_id},
@@ -968,6 +975,17 @@ Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
                             {"serialNumber", value.device->serial_number},
                             {"ip", value.device->ip_address},
                             {"networkInterface", value.device->network_interface}};
+    if (value.capabilities && value.capabilities->roi)
+    {
+        const auto& roi = *value.capabilities->roi;
+        result["capabilities"]["roi"] = {
+            {"sensorWidth", roi.sensor_width},
+            {"sensorHeight", roi.sensor_height},
+            {"width", stepped_range_json(roi.width)},
+            {"height", stepped_range_json(roi.height)},
+            {"offsetX", stepped_range_json(roi.offset_x)},
+            {"offsetY", stepped_range_json(roi.offset_y)}};
+    }
     if (value.actual)
     {
         const auto& p = *value.actual;

@@ -49,6 +49,7 @@ PaperBreakCameraHardwareTest.exe --probe --output records\probe-<rig>-<UTC>.json
 复制 `hardware-test-plan.example.json`，填写实际序列号和经设备/带宽预算批准的参数。计划约束：
 
 - `CAM01` 起连续排列，最多四路，序列号唯一；
+- 可选 `roi` 必须完整提供 `width`、`height`、`offsetX`、`offsetY`；工具先执行安全结构上限校验，再由实体设备能力校验范围、步进和组合；
 - 运行 1～3600 秒，资源样本不超过 3601；
 - 队列/池容量最多 256，缓冲字节数必须覆盖实际 payload；
 - `minimumFpsRatio` 是目标帧率验收比例，不得通过扩大队列掩盖丢帧；

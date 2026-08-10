@@ -37,10 +37,10 @@
       "reverseX": false,
       "reverseY": false,
       "roi": {
-        "height": 1240,
-        "offsetX": 0,
-        "offsetY": 0,
-        "width": 1624
+        "height": 600,
+        "offsetX": 400,
+        "offsetY": 160,
+        "width": 800
       },
       "serialNumber": "DB1888674",
       "triggerDelayUs": 0,
@@ -71,7 +71,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 22,
+  "configRevision": 44,
   "configSchemaVersion": 2,
   "event": {
     "generatePreviewVideo": true,
@@ -99,7 +99,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-10T03:03:49.952Z",
+  "modifiedAt": "2026-08-10T07:01:54.089Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

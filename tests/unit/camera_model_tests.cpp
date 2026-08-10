@@ -250,6 +250,21 @@ TEST(CameraCapabilities, RejectsRoiAndDigitalIoOutsideCapabilities)
     EXPECT_EQ(result.error().details.back().value, "unsupported-line");
 }
 
+TEST(CameraCapabilities, IdentifiesTheSpecificInvalidRoiField)
+{
+    auto parameters = valid_parameters();
+    parameters.roi->offset_y = 11U;
+
+    const auto result = validate_parameters(rich_capabilities(), parameters);
+
+    ASSERT_FALSE(result);
+    ASSERT_EQ(result.error().details.size(), 2U);
+    EXPECT_EQ(result.error().details.front().value, "roi.offsetY");
+    EXPECT_EQ(result.error().details.back().value, "out-of-range-or-step");
+    EXPECT_EQ(result.error().message,
+              "相机参数不符合设备能力（参数：roi.offsetY，原因：out-of-range-or-step）");
+}
+
 TEST(CameraCapabilities, RejectsEnablingUnsupportedImageMirroring)
 {
     CameraCapabilities capabilities;

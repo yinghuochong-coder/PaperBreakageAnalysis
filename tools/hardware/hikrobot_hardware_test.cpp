@@ -36,6 +36,7 @@ using paperbreak::camera::AcquisitionWorker;
 using paperbreak::camera::AcquisitionWorkerOptions;
 using paperbreak::camera::CameraParameterSnapshot;
 using paperbreak::camera::CameraSlotBinding;
+using paperbreak::camera::CameraCapabilities;
 using paperbreak::camera::FrameBufferPool;
 using paperbreak::camera::FrameDequeueStatus;
 using paperbreak::camera::ICameraDevice;
@@ -149,6 +150,26 @@ paperbreak::Result<Plan> load_plan(const std::filesystem::path& path)
         if (parameters.contains("interPacketDelay"))
             plan.parameters.inter_packet_delay_ns =
                 parameters.at("interPacketDelay").get<std::uint32_t>();
+        if (parameters.contains("roi"))
+        {
+            const auto& roi = parameters.at("roi");
+            if (!roi.is_object() || !roi.contains("width") ||
+                !roi.at("width").is_number_unsigned() || !roi.contains("height") ||
+                !roi.at("height").is_number_unsigned() || !roi.contains("offsetX") ||
+                !roi.at("offsetX").is_number_unsigned() || !roi.contains("offsetY") ||
+                !roi.at("offsetY").is_number_unsigned())
+                return invalid("roi 必须包含无符号整数 width、height、offsetX 和 offsetY");
+            plan.parameters.roi = paperbreak::camera::Roi{
+                roi.at("width").get<std::uint32_t>(),
+                roi.at("height").get<std::uint32_t>(),
+                roi.at("offsetX").get<std::uint32_t>(),
+                roi.at("offsetY").get<std::uint32_t>()};
+            if (plan.parameters.roi->width == 0U || plan.parameters.roi->width > 16384U ||
+                plan.parameters.roi->height == 0U || plan.parameters.roi->height > 16384U ||
+                plan.parameters.roi->offset_x > 16383U ||
+                plan.parameters.roi->offset_y > 16383U)
+                return invalid("roi 超出硬件测试工具的安全结构上限");
+        }
         if (parameters.contains("triggerMode"))
         {
             plan.parameters.trigger_mode =
@@ -319,6 +340,28 @@ Json parameters_json(const CameraParameterSnapshot& value)
     return result;
 }
 
+template <typename T> Json range_json(const paperbreak::camera::SteppedRange<T>& value)
+{
+    return {{"minimum", value.minimum},
+            {"maximum", value.maximum},
+            {"increment", value.increment}};
+}
+
+Json capabilities_json(const CameraCapabilities& value)
+{
+    Json result = Json::object();
+    if (value.roi)
+    {
+        result["roi"] = {{"sensorWidth", value.roi->sensor_width},
+                         {"sensorHeight", value.roi->sensor_height},
+                         {"width", range_json(value.roi->width)},
+                         {"height", range_json(value.roi->height)},
+                         {"offsetX", range_json(value.roi->offset_x)},
+                         {"offsetY", range_json(value.roi->offset_y)}};
+    }
+    return result;
+}
+
 paperbreak::Result<void> write_record(const std::filesystem::path& output, const Json& record)
 {
     auto failure = [](std::string message) {
@@ -358,6 +401,7 @@ Json run_stage(ICameraProvider& provider, const Plan& plan, const std::size_t ca
     std::vector<std::unique_ptr<AcquisitionQueue>> queues;
     std::vector<std::unique_ptr<AcquisitionWorker>> workers;
     std::vector<CameraParameterSnapshot> actual_parameters;
+    Json capability_records = Json::array();
     std::vector<std::jthread> consumers;
     std::atomic<std::uint64_t> consumed{};
     auto cleanup = [&] {
@@ -393,10 +437,22 @@ Json run_stage(ICameraProvider& provider, const Plan& plan, const std::size_t ca
             cleanup();
             return stage;
         }
+        auto capabilities = device->capabilities();
+        if (!capabilities)
+        {
+            stage["error"] = error_json(capabilities.error());
+            static_cast<void>(device->disconnect());
+            cleanup();
+            return stage;
+        }
+        capability_records.push_back(
+            {{"cameraId", plan.bindings[index].camera_id},
+             {"capabilities", capabilities_json(capabilities.value())}});
         auto applied = device->apply_parameters(plan.parameters);
         if (!applied)
         {
             stage["error"] = error_json(applied.error());
+            stage["capabilityRecords"] = std::move(capability_records);
             static_cast<void>(device->disconnect());
             cleanup();
             return stage;
@@ -491,6 +547,7 @@ Json run_stage(ICameraProvider& provider, const Plan& plan, const std::size_t ca
         cameras.push_back(std::move(camera));
     }
     stage["status"] = passed ? "passed" : "failed";
+    stage["capabilityRecords"] = std::move(capability_records);
     stage["finishedUtc"] = utc_now();
     stage["consumedFrames"] = consumed.load(std::memory_order_relaxed);
     stage["cameras"] = std::move(cameras);

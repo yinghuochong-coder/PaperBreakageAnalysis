@@ -21,6 +21,23 @@ struct CameraRoiValue final
     std::uint32_t offset_y{};
 };
 
+struct CameraIntegerRangeValue final
+{
+    std::uint32_t minimum{};
+    std::uint32_t maximum{};
+    std::uint32_t increment{1U};
+};
+
+struct CameraRoiCapabilitiesValue final
+{
+    std::uint32_t sensor_width{};
+    std::uint32_t sensor_height{};
+    CameraIntegerRangeValue width;
+    CameraIntegerRangeValue height;
+    CameraIntegerRangeValue offset_x;
+    CameraIntegerRangeValue offset_y;
+};
+
 struct CameraParameterValue final
 {
     std::optional<double> exposure_us;
@@ -49,6 +66,7 @@ struct CameraClientItem final
     std::uint64_t saved_config_revision{};
     CameraParameterValue saved;
     CameraParameterValue actual;
+    std::optional<CameraRoiCapabilitiesValue> roi_capabilities;
 };
 
 struct CameraDiscoveredDevice final

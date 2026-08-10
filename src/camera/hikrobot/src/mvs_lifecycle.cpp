@@ -463,7 +463,7 @@ Result<std::optional<MVCC_FLOATVALUE>> optional_float(const MvsApi& api, void* h
 }
 
 Result<std::optional<MVCC_INTVALUE_EX>> optional_integer(const MvsApi& api, void* handle,
-                                                         const char* node)
+                                                          const char* node)
 {
     MVCC_INTVALUE_EX value{};
     const int code = api.get_int_value(handle, node, &value);
@@ -483,6 +483,30 @@ Result<std::optional<MVCC_INTVALUE_EX>> optional_integer(const MvsApi& api, void
         return Result<std::optional<MVCC_INTVALUE_EX>>::success(std::nullopt);
     }
     return Result<std::optional<MVCC_INTVALUE_EX>>::failure(
+        parameter_error(CameraErrorKind::parameter_read_failed, code,
+                        "camera.hikrobot.capabilities", node, "read-failed"));
+}
+
+Result<std::optional<std::uint32_t>> optional_integer_current(const MvsApi& api, void* handle,
+                                                              const char* node)
+{
+    MVCC_INTVALUE_EX value{};
+    const int code = api.get_int_value(handle, node, &value);
+    if (code == MV_OK)
+    {
+        if (value.nCurValue < 0 ||
+            value.nCurValue > std::numeric_limits<std::uint32_t>::max())
+        {
+            return Result<std::optional<std::uint32_t>>::failure(parameter_error(
+                CameraErrorKind::parameter_read_failed, MV_E_PARAMETER,
+                "camera.hikrobot.capabilities", node, "value-out-of-range"));
+        }
+        return Result<std::optional<std::uint32_t>>::success(
+            static_cast<std::uint32_t>(value.nCurValue));
+    }
+    if (optional_node_absent(code))
+        return Result<std::optional<std::uint32_t>>::success(std::nullopt);
+    return Result<std::optional<std::uint32_t>>::failure(
         parameter_error(CameraErrorKind::parameter_read_failed, code,
                         "camera.hikrobot.capabilities", node, "read-failed"));
 }
@@ -534,6 +558,25 @@ SteppedRange<std::uint32_t> integer_range(const MVCC_INTVALUE_EX& value)
 {
     return {static_cast<std::uint32_t>(value.nMin), static_cast<std::uint32_t>(value.nMax),
             static_cast<std::uint32_t>(value.nInc)};
+}
+
+SteppedRange<std::uint32_t> roi_range_with_boundary(const MVCC_INTVALUE_EX& value,
+                                                    const std::uint32_t boundary_maximum)
+{
+    auto result = integer_range(value);
+    const auto offset_span =
+        boundary_maximum >= result.minimum ? boundary_maximum - result.minimum : 0U;
+    result.maximum = result.minimum + offset_span / result.increment * result.increment;
+    return result;
+}
+
+SteppedRange<std::uint32_t> roi_offset_range(const MVCC_INTVALUE_EX& value,
+                                             const std::uint32_t sensor_extent,
+                                             const std::uint32_t minimum_roi_extent)
+{
+    const auto boundary_maximum =
+        sensor_extent >= minimum_roi_extent ? sensor_extent - minimum_roi_extent : 0U;
+    return roi_range_with_boundary(value, boundary_maximum);
 }
 
 std::optional<PixelFormat> map_pixel_format(const unsigned int value) noexcept
@@ -598,19 +641,47 @@ Result<CameraCapabilities> read_capabilities_locked(const MvsApi& api, void* han
     const auto height = optional_integer(api, handle, "Height");
     const auto offset_x = optional_integer(api, handle, "OffsetX");
     const auto offset_y = optional_integer(api, handle, "OffsetY");
-    if (!width || !height || !offset_x || !offset_y)
-        return Result<CameraCapabilities>::failure(
-            !width
-                ? width.error()
-                : (!height ? height.error() : (!offset_x ? offset_x.error() : offset_y.error())));
+    const auto width_max_node = optional_integer_current(api, handle, "WidthMax");
+    const auto height_max_node = optional_integer_current(api, handle, "HeightMax");
+    const auto sensor_width_node = optional_integer_current(api, handle, "SensorWidth");
+    const auto sensor_height_node = optional_integer_current(api, handle, "SensorHeight");
+    if (!width)
+        return Result<CameraCapabilities>::failure(width.error());
+    if (!height)
+        return Result<CameraCapabilities>::failure(height.error());
+    if (!offset_x)
+        return Result<CameraCapabilities>::failure(offset_x.error());
+    if (!offset_y)
+        return Result<CameraCapabilities>::failure(offset_y.error());
+    if (!width_max_node)
+        return Result<CameraCapabilities>::failure(width_max_node.error());
+    if (!height_max_node)
+        return Result<CameraCapabilities>::failure(height_max_node.error());
+    if (!sensor_width_node)
+        return Result<CameraCapabilities>::failure(sensor_width_node.error());
+    if (!sensor_height_node)
+        return Result<CameraCapabilities>::failure(sensor_height_node.error());
     if (width.value() && height.value() && offset_x.value() && offset_y.value())
     {
-        result.roi = {.sensor_width = static_cast<std::uint32_t>(width.value()->nMax),
-                      .sensor_height = static_cast<std::uint32_t>(height.value()->nMax),
-                      .width = integer_range(*width.value()),
-                      .height = integer_range(*height.value()),
-                      .offset_x = integer_range(*offset_x.value()),
-                      .offset_y = integer_range(*offset_y.value())};
+        // Width/Height 的 nMax 会受当前 OffsetX/OffsetY 以及采集期间的节点锁定状态影响。
+        // 优先读取只读的 WidthMax/HeightMax，其次读取 SensorWidth/SensorHeight；旧设备没有
+        // 这些节点时才回退到尺寸节点。
+        const auto sensor_width = width_max_node.value().value_or(
+            sensor_width_node.value().value_or(static_cast<std::uint32_t>(width.value()->nMax)));
+        const auto sensor_height = height_max_node.value().value_or(
+            sensor_height_node.value().value_or(static_cast<std::uint32_t>(height.value()->nMax)));
+        result.roi = {.sensor_width = sensor_width,
+                      .sensor_height = sensor_height,
+                      .width = roi_range_with_boundary(*width.value(), sensor_width),
+                      .height = roi_range_with_boundary(*height.value(), sensor_height),
+                      // OffsetX/OffsetY 的 nMax 取决于当前 Width/Height，不能直接当作设备的
+                      // 固定能力上限。这里按传感器边界和最小 ROI 尺寸还原完整可用范围，
+                      // 具体 Width/Height + Offset 组合仍由通用能力校验器检查。
+                      .offset_x = roi_offset_range(*offset_x.value(), sensor_width,
+                                                   static_cast<std::uint32_t>(width.value()->nMin)),
+                      .offset_y = roi_offset_range(
+                          *offset_y.value(), sensor_height,
+                          static_cast<std::uint32_t>(height.value()->nMin))};
     }
 
     const auto reverse_x = supports_optional_boolean(api, handle, "ReverseX");
