@@ -32,6 +32,7 @@
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStackedLayout>
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTableWidget>
@@ -358,23 +359,32 @@ QWidget* make_preview_tile(QWidget* parent, const int index, QLabel*& image, QLa
     tile->setObjectName(QStringLiteral("preview-tile-%1").arg(index + 1));
     tile->setProperty("role", "previewTile");
     tile->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    tile->setMinimumSize(240, 135);
     tile->setFocusPolicy(Qt::StrongFocus);
-    auto* layout = make_layout<QVBoxLayout>(tile);
-    layout->setContentsMargins(6, 6, 6, 6);
+    auto* layout = make_layout<QStackedLayout>(tile);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setStackingMode(QStackedLayout::StackAll);
     image = make_child<QLabel>(
         tile, QStringLiteral("等待 CAM%1 预览帧").arg(index + 1, 2, 10, QChar{'0'}));
+    image->setObjectName(QStringLiteral("preview-image-%1").arg(index + 1));
     image->setAlignment(Qt::AlignCenter);
-    image->setMinimumSize(240, 135);
     image->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     image->setScaledContents(false);
     image->setProperty("role", "previewImage");
     image->setAttribute(Qt::WA_TransparentForMouseEvents);
+    QWidget* overlay_layer = make_child<QWidget>(tile);
+    overlay_layer->setAttribute(Qt::WA_TransparentForMouseEvents);
+    auto* overlay_layout = make_layout<QVBoxLayout>(overlay_layer);
+    overlay_layout->setContentsMargins(8, 8, 8, 8);
+    overlay_layout->addStretch(1);
     overlay = make_child<QLabel>(
-        tile, QStringLiteral("CAM%1 · 无数据").arg(index + 1, 2, 10, QChar{'0'}));
+        overlay_layer, QStringLiteral("CAM%1 · 无数据").arg(index + 1, 2, 10, QChar{'0'}));
     overlay->setProperty("role", "previewOverlay");
     overlay->setAttribute(Qt::WA_TransparentForMouseEvents);
-    layout->addWidget(image, 1);
-    layout->addWidget(overlay);
+    overlay_layout->addWidget(overlay);
+    layout->addWidget(image);
+    layout->addWidget(overlay_layer);
+    layout->setCurrentWidget(overlay_layer);
     return tile;
 }
 
@@ -1880,6 +1890,7 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
         preview_grid_ = make_child<QWidget>(preview_page);
         preview_grid_->setObjectName(QStringLiteral("preview-grid"));
         preview_grid_layout_ = make_layout<QGridLayout>(preview_grid_);
+        preview_grid_layout_->setContentsMargins(0, 0, 0, 0);
         preview_grid_layout_->setSpacing(8);
         preview_grid_layout_->setRowStretch(0, 1);
         preview_grid_layout_->setRowStretch(1, 1);
@@ -1911,12 +1922,12 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                                  set_preview_focus(static_cast<std::size_t>(selection - 1));
                          });
         QObject::connect(one_to_one, &QPushButton::clicked, this, [this] {
-            for (QLabel* image : preview_images_)
-                image->setScaledContents(false);
+            preview_adaptive_scaling_ = false;
+            update_preview_image_scaling();
         });
         QObject::connect(adaptive, &QPushButton::clicked, this, [this] {
-            for (QLabel* image : preview_images_)
-                image->setScaledContents(true);
+            preview_adaptive_scaling_ = true;
+            update_preview_image_scaling();
         });
         QObject::connect(preview_full_screen_button_, &QPushButton::clicked, this, [this] {
             if (preview_presentation_ == PreviewPresentation::full_screen)
@@ -2004,8 +2015,12 @@ void MainWindow::set_preview_focus(const std::size_t index)
         return;
     if (preview_presentation_ == PreviewPresentation::full_screen)
         restore_preview_tiles();
+    else
+        restore_preview_grid_layout();
     preview_selected_index_ = index;
     preview_presentation_ = PreviewPresentation::focused;
+    preview_grid_layout_->removeWidget(preview_tiles_[index]);
+    preview_grid_layout_->addWidget(preview_tiles_[index], 0, 0, 2, 2);
     if (preview_layout_choice_)
     {
         const QSignalBlocker blocker{preview_layout_choice_};
@@ -2013,6 +2028,7 @@ void MainWindow::set_preview_focus(const std::size_t index)
     }
     for (std::size_t tile = 0; tile < preview_tiles_.size(); ++tile)
         preview_tiles_[tile]->setVisible(tile == index);
+    update_preview_image_scaling();
     if (preview_full_screen_button_)
         preview_full_screen_button_->setText(QStringLiteral("全屏"));
 }
@@ -2023,6 +2039,7 @@ void MainWindow::enter_preview_full_screen(const std::size_t index)
         return;
     set_preview_focus(index);
     preview_presentation_ = PreviewPresentation::full_screen;
+    update_preview_image_scaling();
     QWidget* tile = preview_tiles_[index];
     tile->setWindowTitle(QStringLiteral("PaperBreakEdge %1 预览")
                              .arg(preview_layout_choice_->itemText(static_cast<int>(index + 1U))));
@@ -2043,9 +2060,8 @@ void MainWindow::restore_preview_tiles()
         tile->showNormal();
         tile->setWindowFlag(Qt::Window, false);
         tile->setParent(preview_grid_);
-        preview_grid_layout_->addWidget(tile, static_cast<int>(preview_selected_index_ / 2U),
-                                        static_cast<int>(preview_selected_index_ % 2U));
     }
+    restore_preview_grid_layout();
     preview_presentation_ = PreviewPresentation::tiled;
     if (preview_layout_choice_)
     {
@@ -2054,8 +2070,33 @@ void MainWindow::restore_preview_tiles()
     }
     for (QWidget* tile : preview_tiles_)
         tile->show();
+    update_preview_image_scaling();
     if (preview_full_screen_button_)
         preview_full_screen_button_->setText(QStringLiteral("全屏"));
+}
+
+void MainWindow::restore_preview_grid_layout()
+{
+    if (!preview_grid_layout_)
+        return;
+    for (QWidget* tile : preview_tiles_)
+        preview_grid_layout_->removeWidget(tile);
+    for (std::size_t index = 0; index < preview_tiles_.size(); ++index)
+    {
+        preview_grid_layout_->addWidget(preview_tiles_[index], static_cast<int>(index / 2U),
+                                        static_cast<int>(index % 2U));
+    }
+}
+
+void MainWindow::update_preview_image_scaling()
+{
+    for (std::size_t index = 0; index < preview_images_.size(); ++index)
+    {
+        const bool selected_pane_fills_area =
+            preview_presentation_ != PreviewPresentation::tiled && index == preview_selected_index_;
+        preview_images_[index]->setScaledContents(preview_adaptive_scaling_ ||
+                                                  selected_pane_fills_area);
+    }
 }
 
 void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)

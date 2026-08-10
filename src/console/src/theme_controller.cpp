@@ -219,7 +219,10 @@ QString style_sheet(const ThemeColors& c)
         QListWidget#discovered-devices { background: %2; }
         QWidget[role="previewTile"] { background: %18; border-radius: 5px; }
         QLabel[role="previewImage"] { color: %11; background: %19; }
-        QLabel[role="previewOverlay"] { color: %13; font-size: 11px; }
+        QLabel[role="previewOverlay"] {
+            color: %13; background: rgba(0, 0, 0, 150); border-radius: 3px;
+            padding: 5px 8px; font-size: 11px;
+        }
         QToolTip { background: %2; color: %4; border: 1px solid %8; }
     )")
         .arg(QString::fromLatin1(c.window), QString::fromLatin1(c.panel),

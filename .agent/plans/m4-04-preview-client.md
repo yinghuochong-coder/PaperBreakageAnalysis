@@ -1,7 +1,7 @@
 # M4-04：单路和四宫格预览 ExecPlan
 
 ## 元数据
-- 状态：completed
+- 状态：completed（2026-08-10 独占网格跨度修正）
 - 负责人：Codex
 - 创建日期：2026-08-03
 - 最后更新：2026-08-10
@@ -68,6 +68,8 @@
 - [x] 3. 更新路线图和本计划，执行 Debug、Release、CTest 与差异检查并回填证据。
 - [x] 4. 缺陷修复：从 `CameraClientSnapshot` 同步实际相机编号；相机集合变化时取消旧在途订阅并重新发送，避免单路配置被默认四路请求整体拒绝。
 - [x] 5. 固定图像控件的布局尺寸策略，实现窗格双击三态循环，并用离屏 smoke 覆盖不同图像尺寸和完整交互循环。
+- [x] 6. 独占视频区和窗格全屏强制让图像铺满容器，将状态信息改为画面叠加层，并验证恢复四宫格后回到用户缩放偏好。
+- [x] 7. 独占模式把选中窗格从原单元格改为跨越完整 2×2 网格，恢复时重建四个原始单元格，并用窗格/网格几何断言覆盖。
 
 ## 验证计划
 
@@ -99,6 +101,7 @@ ctest --preset windows-vs2026-release
 - [x] 暂停仅影响客户端订阅/绘制，不发送采集停止。
 - [x] 单元测试覆盖暂停和无效相机集；离屏 UI smoke 覆盖启动与导航。
 - [x] Debug/Release 构建和非安装树扫描 CTest 已实际执行并记录限制。
+- [x] 独占和全屏时图像控件与窗格同尺寸且开启铺满，恢复四宫格后恢复用户缩放偏好。
 
 ## 进度记录
 
@@ -107,6 +110,10 @@ ctest --preset windows-vs2026-release
 - 2026-08-03：修复单路配置仍订阅 `CAM01～CAM04` 及在途订阅切换竞态。
 - 2026-08-10：开始预览窗格尺寸稳定及双击三态交互修正，状态 in-progress。
 - 2026-08-10：完成窗格尺寸与交互修正、Debug/Release 构建和全量 CTest，状态 completed。
+- 2026-08-10：根据反馈开始修正独占/全屏图像铺满行为，状态 in-progress。
+- 2026-08-10：完成图像铺满、帧信息浮层及 Debug/Release 验证，状态 completed。
+- 2026-08-10：用户截图确认独占窗格仍停留在左上单元格，开始修正网格跨度，状态 in-progress。
+- 2026-08-10：独占窗格改为跨满 2×2 视频网格，Debug/Release 预览烟测通过，状态 completed。
 
 ## 决策记录
 
@@ -134,6 +141,11 @@ ctest --preset windows-vs2026-release
 | 2026-08-10 | 窗格连续三次双击离屏 smoke | 通过 | 四宫格 → 独占视频区 → 窗格全屏 → 四宫格；父级与布局选择同步恢复 |
 | 2026-08-10 | Debug/Release 全量构建与 CTest | 29/29、29/29 通过 | 两种配置均包含 `qt_console_smoke`；未使用实体相机 |
 | 2026-08-10 | 本次变更行 clang-format 与 `git diff --check` | 通过 | 全仓 `format-check` 被未修改的 `src/camera/hikrobot/src/mvs_lifecycle.cpp` 既有格式问题阻断 |
+| 2026-08-10 | 独占/全屏铺满离屏 smoke | 通过 | 两个状态均验证图像控件与窗格同尺寸且 `scaledContents=true`；恢复四宫格后回到进入前的 1:1 |
+| 2026-08-10 | Debug 构建及 `qt_console_smoke` | 通过 | MSVC `/WX` 构建成功，定向预览烟测通过 |
+| 2026-08-10 | Debug 全量 CTest | 27/29 | `service_console_smoke` 重跑通过；通用 unit 中 `EventRuntimeNvme.FailedEventPersistenceKeepsLeaseProtected` 隔离 3 次为 2 过 1 失败，`IpcServer.DisconnectsWhenPeerAuthorizationFails` 隔离 3 次全过，均与 UI 变更无关 |
+| 2026-08-10 | Release 全量构建与 CTest | 29/29 通过 | 包含更新后的 `qt_console_smoke` 和安装树扫描 |
+| 2026-08-10 | 独占窗格跨满视频区 Debug/Release 验证 | 通过 | 两种配置的 `qt_console_smoke` 均断言选中窗格几何等于完整视频网格；Release 全量 28/29，唯一失败 `service_console_smoke` 因用户运行中的 Debug 服务占用 IPC 端点而返回 `IPC_BUSY` |
 
 ## 完成摘要
 
@@ -142,3 +154,7 @@ ctest --preset windows-vs2026-release
 缺陷修复后，Console 会使用相机配置返回的实际槽位建立订阅，单独配置 `CAM01` 时不再因默认请求不存在的 `CAM02～CAM04` 而被服务端拒绝；在途默认请求也会被取消并替换。模拟 IPC 与全量 CTest 已通过，实体相机桌面显示仍待人工验证。
 
 2026-08-10 交互修正后，预览图像不再影响 2×2 布局尺寸；每个窗格连续双击可从四宫格进入独占视频区、再进入该窗格全屏、再恢复四宫格，Esc/关闭全屏窗格与页面全屏按钮复用同一恢复路径。Debug/Release 全量构建和 CTest 均通过，实体相机与真实桌面人工交互仍未执行。
+
+随后根据用户反馈，独占视频区和窗格全屏改为强制铺满当前容器；帧号、帧率和状态改为底部半透明浮层，不再挤占图像高度。四宫格仍遵从用户选择的 1:1/自适应模式。更新后的 Release 全量 CTest 29/29 通过；Debug 全量 CTest 的两个非 UI 用例呈现既有时序波动，相关隔离结果已如实记录。实体相机和真实桌面人工显示仍未执行。
+
+用户截图进一步暴露了独占状态仅隐藏其他窗格、选中窗格仍受左上网格单元限制的问题。修正后，选中窗格在独占状态跨越完整 2×2 网格，恢复时统一重建四个单元格；离屏烟测直接断言窗格几何等于视频网格。当前运行中的 Debug 服务占用了 IPC 端点，因此本轮 Release 全量 CTest 的非 UI `service_console_smoke` 无法启动第二个服务实例；未终止用户进程。实体相机和真实桌面人工显示仍未执行。

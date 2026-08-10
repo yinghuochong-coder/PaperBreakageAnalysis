@@ -37,10 +37,10 @@
       "reverseX": false,
       "reverseY": false,
       "roi": {
-        "height": 1200,
-        "offsetX": 0,
-        "offsetY": 0,
-        "width": 1624
+        "height": 600,
+        "offsetX": 500,
+        "offsetY": 208,
+        "width": 800
       },
       "serialNumber": "DB1888674",
       "triggerDelayUs": 0,
@@ -51,7 +51,7 @@
       "enabled": true,
       "exposureUs": 500.0,
       "frameRate": 60.0,
-      "gainDb": 23.011899948120117,
+      "gainDb": 23.01,
       "id": "CAM02",
       "interPacketDelayNs": 400,
       "location": "NoLed",
@@ -60,10 +60,10 @@
       "reverseX": false,
       "reverseY": false,
       "roi": {
-        "height": 1240,
+        "height": 600,
         "offsetX": 0,
         "offsetY": 0,
-        "width": 1624
+        "width": 800
       },
       "serialNumber": "DB2180723",
       "triggerDelayUs": 0,
@@ -71,7 +71,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 46,
+  "configRevision": 51,
   "configSchemaVersion": 2,
   "event": {
     "generatePreviewVideo": true,
@@ -99,7 +99,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-10T07:21:42.207Z",
+  "modifiedAt": "2026-08-10T07:47:18.098Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

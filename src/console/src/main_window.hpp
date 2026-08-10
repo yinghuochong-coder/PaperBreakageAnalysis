@@ -138,6 +138,8 @@ class MainWindow final : public QMainWindow
     void set_preview_focus(std::size_t index);
     void enter_preview_full_screen(std::size_t index);
     void restore_preview_tiles();
+    void restore_preview_grid_layout();
+    void update_preview_image_scaling();
     void populate_camera_editor();
     void populate_camera_editor(const CameraParameterValue& value);
     void configure_camera_roi_editor(const CameraClientItem& camera);
@@ -184,6 +186,7 @@ class MainWindow final : public QMainWindow
     QPushButton* preview_full_screen_button_{};
     PreviewPresentation preview_presentation_{PreviewPresentation::tiled};
     std::size_t preview_selected_index_{};
+    bool preview_adaptive_scaling_{};
     QLabel* preview_status_{};
     QLabel* camera_configuration_value_{};
     QLabel* camera_operation_value_{};

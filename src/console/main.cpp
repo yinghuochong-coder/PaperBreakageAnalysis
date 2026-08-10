@@ -86,6 +86,10 @@ bool preview_pane_smoke(paperbreak::console::MainWindow& main_window, QApplicati
             return false;
         initial_sizes[index] = tiles[index]->size();
     }
+    auto* const first_image = main_window.findChild<QLabel*>(QStringLiteral("preview-image-1"));
+    auto* const grid = main_window.findChild<QWidget*>(QStringLiteral("preview-grid"));
+    if (!first_image || !grid)
+        return false;
 
     paperbreak::console::PreviewSnapshot snapshot;
     snapshot.connection.state = paperbreak::ipc::ClientConnectionState::connected;
@@ -115,21 +119,24 @@ bool preview_pane_smoke(paperbreak::console::MainWindow& main_window, QApplicati
     send_left_double_click(tiles[0]);
     application.processEvents();
     const bool focused =
-        tiles[0]->isVisible() && !tiles[0]->isWindow() &&
+        tiles[0]->isVisible() && !tiles[0]->isWindow() && first_image->hasScaledContents() &&
+        first_image->size() == tiles[0]->size() && tiles[0]->geometry() == grid->rect() &&
         std::ranges::none_of(tiles.begin() + 1, tiles.end(),
                              [](const QWidget* tile) { return tile->isVisible(); });
     send_left_double_click(tiles[0]);
     application.processEvents();
-    const bool full_screen = tiles[0]->isWindow() && tiles[0]->isFullScreen();
+    const bool full_screen = tiles[0]->isWindow() && tiles[0]->isFullScreen() &&
+                             first_image->hasScaledContents() &&
+                             first_image->size() == tiles[0]->size();
     send_left_double_click(tiles[0]);
     application.processEvents();
     auto* const layout_choice =
         main_window.findChild<QComboBox*>(QStringLiteral("preview-layout-choice"));
-    auto* const grid = main_window.findChild<QWidget*>(QStringLiteral("preview-grid"));
     const bool restored =
         !tiles[0]->isWindow() &&
         std::ranges::all_of(tiles, [](const QWidget* tile) { return tile->isVisible(); }) &&
-        tiles[0]->parentWidget() == grid && layout_choice && layout_choice->currentIndex() == 0;
+        tiles[0]->parentWidget() == grid && tiles[0]->size() == initial_sizes[0] &&
+        !first_image->hasScaledContents() && layout_choice && layout_choice->currentIndex() == 0;
     return small_frame_kept_sizes && large_frame_kept_sizes && focused && full_screen && restored;
 }
 
