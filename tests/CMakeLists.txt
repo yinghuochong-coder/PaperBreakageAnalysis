@@ -75,6 +75,19 @@ target_compile_definitions(PaperBreakTests PRIVATE
     PAPERBREAK_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 set_target_properties(PaperBreakTests PROPERTIES FOLDER "PaperBreak/Tests")
 
+add_executable(PaperBreakConsoleUiTests
+    test_main_widgets.cpp
+    unit/event_detail_view_tests.cpp)
+target_link_libraries(PaperBreakConsoleUiTests
+    PRIVATE
+        paperbreak_console_widgets
+        paperbreak_compiler_options
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Widgets
+        GTest::gtest)
+set_target_properties(PaperBreakConsoleUiTests PROPERTIES FOLDER "PaperBreak/Tests")
+
 set(paperbreak_test_data_dir "${CMAKE_CURRENT_BINARY_DIR}/data")
 file(MAKE_DIRECTORY "${paperbreak_test_data_dir}")
 configure_file(data/basic-config-valid.json
@@ -100,6 +113,12 @@ set_tests_properties(unit PROPERTIES
 add_test(NAME simulation
     COMMAND PaperBreakTests --gtest_filter=Simulation*)
 set_tests_properties(simulation PROPERTIES LABELS "simulation")
+
+add_test(NAME console_ui
+    COMMAND PaperBreakConsoleUiTests)
+set_tests_properties(console_ui PROPERTIES
+    LABELS "unit;ui"
+    ENVIRONMENT "PATH=$<TARGET_FILE_DIR:Qt6::Core>\\;$ENV{PATH};QT_QPA_PLATFORM=offscreen")
 
 add_test(NAME hardware_baseline
     COMMAND PaperBreakTests --gtest_filter=HardwareBaseline.*)

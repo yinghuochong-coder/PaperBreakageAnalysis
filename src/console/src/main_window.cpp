@@ -1,5 +1,6 @@
 #include "main_window.hpp"
 
+#include "paperbreak/console/event_detail_view.hpp"
 #include "paperbreak/console/navigation_model.hpp"
 
 #include <QCheckBox>
@@ -1316,18 +1317,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             paging_layout->addWidget(event_next_);
             paging_layout->addStretch(1);
             layout->addWidget(paging);
-            auto* details = make_child<QWidget>(page);
-            auto* details_layout = make_layout<QHBoxLayout>(details);
-            event_thumbnail_ = make_child<QLabel>(details, QStringLiteral("选择事件加载缩略图"));
-            event_thumbnail_->setMinimumSize(240, 140);
-            event_thumbnail_->setAlignment(Qt::AlignCenter);
-            event_thumbnail_->setScaledContents(true);
-            event_manifest_ = make_child<QTextEdit>(details);
-            event_manifest_->setReadOnly(true);
-            event_manifest_->setPlaceholderText(QStringLiteral("选择事件查看已校验 manifest"));
-            details_layout->addWidget(event_thumbnail_);
-            details_layout->addWidget(event_manifest_, 1);
-            layout->addWidget(details);
+            event_detail_ = make_child<EventDetailView>(page);
+            layout->addWidget(event_detail_);
             auto* actions = make_child<QWidget>(page);
             auto* action_layout = make_layout<QHBoxLayout>(actions);
             action_layout->setContentsMargins(0, 0, 0, 0);
@@ -2666,15 +2657,14 @@ void MainWindow::apply_event_snapshot(const EventClientSnapshot& snapshot)
     if (has_detail)
     {
         const auto& detail = *snapshot.detail;
-        event_manifest_->setPlainText(QString::fromStdString(detail.manifest_json));
+        event_detail_->set_manifest_text(QString::fromStdString(detail.manifest_json));
         QImage thumbnail;
         if (!detail.thumbnail_jpeg.empty())
             static_cast<void>(
                 thumbnail.loadFromData(reinterpret_cast<const uchar*>(detail.thumbnail_jpeg.data()),
                                        static_cast<int>(detail.thumbnail_jpeg.size()), "JPG"));
-        event_thumbnail_->setPixmap(thumbnail.isNull() ? QPixmap{} : QPixmap::fromImage(thumbnail));
-        if (thumbnail.isNull())
-            event_thumbnail_->setText(QStringLiteral("缩略图不可用"));
+        event_detail_->set_thumbnail(thumbnail.isNull() ? QPixmap{}
+                                                        : QPixmap::fromImage(thumbnail));
     }
     const bool reviewable = has_detail && snapshot.detail->event.artifacts_available &&
                             snapshot.detail->event.review_state == "Unreviewed" &&
@@ -2923,9 +2913,9 @@ bool MainWindow::event_pages_ready() const noexcept
            event_retention_days_ && event_save_raw_ && event_preview_video_ &&
            event_upload_policy_ && event_filter_start_ && event_filter_end_ &&
            event_filter_state_ && event_filter_persistence_ && event_filter_review_ &&
-           event_filter_through_now_ && event_filter_camera_ && event_table_ && event_thumbnail_ &&
-           event_manifest_ && event_confirm_ && event_reject_ && event_export_ &&
-           event_open_directory_ && event_retry_upload_;
+           event_filter_through_now_ && event_filter_camera_ && event_table_ && event_detail_ &&
+           event_confirm_ && event_reject_ && event_export_ && event_open_directory_ &&
+           event_retry_upload_;
 }
 
 bool MainWindow::storage_page_ready() const noexcept

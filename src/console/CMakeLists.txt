@@ -1,3 +1,17 @@
+add_library(paperbreak_console_widgets STATIC
+    src/event_detail_view.cpp)
+target_link_libraries(paperbreak_console_widgets
+    PUBLIC
+        paperbreak_compiler_options
+        Qt6::Gui
+        Qt6::Widgets)
+target_include_directories(paperbreak_console_widgets
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+set_target_properties(paperbreak_console_widgets PROPERTIES
+    OUTPUT_NAME paperbreak_console_widgets
+    FOLDER "PaperBreak/Libraries")
+
 add_library(paperbreak_console_model STATIC
     src/algorithm_client.cpp
     src/camera_client.cpp
@@ -34,6 +48,7 @@ target_link_libraries(PaperBreakEdgeConsole
     PRIVATE
         paperbreak_common
         paperbreak_console_model
+        paperbreak_console_widgets
         paperbreak_logging
         paperbreak_windows_service_control
         paperbreak_compiler_options

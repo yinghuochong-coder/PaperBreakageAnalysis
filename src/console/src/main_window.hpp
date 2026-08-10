@@ -32,6 +32,8 @@ class QWidget;
 namespace paperbreak::console
 {
 
+class EventDetailView;
+
 struct CameraUiActions final
 {
     std::function<Result<void>()> discover;
@@ -259,8 +261,7 @@ class MainWindow final : public QMainWindow
     QCheckBox* event_filter_through_now_{};
     QLineEdit* event_filter_camera_{};
     QTableWidget* event_table_{};
-    QLabel* event_thumbnail_{};
-    QTextEdit* event_manifest_{};
+    EventDetailView* event_detail_{};
     QLabel* event_status_{};
     QPushButton* event_previous_{};
     QPushButton* event_next_{};
