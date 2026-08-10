@@ -541,6 +541,119 @@ Result<EventInspectionReport> EventInspector::inspect(
                              });
 }
 
+Result<EventInspectionSummary> EventInspector::inspect_summary(
+    const std::filesystem::path& committed_relative_directory) const
+{
+    auto manifest_text = impl_->verified_manifest(committed_relative_directory);
+    if (!manifest_text)
+        return Result<EventInspectionSummary>::failure(std::move(manifest_text).error());
+    auto manifest = parse_manifest(manifest_text.value());
+    if (!manifest)
+        return Result<EventInspectionSummary>::failure(std::move(manifest).error());
+    if (manifest.value()["rawBlocks"].size() + manifest.value()["keyFrames"].size() + 1U >
+        impl_->options.maximum_files)
+        return Result<EventInspectionSummary>::failure(
+            inspection_error("EVENT_RECOVERY_FAILED", Severity::critical, "事件文件数超过检查上限",
+                             "event.inspect.summary.files"));
+
+    struct RawRange final
+    {
+        std::string camera_id;
+        std::uint64_t first_sequence{};
+        std::uint64_t last_sequence{};
+        std::uint64_t first_camera_frame{};
+        std::uint64_t last_camera_frame{};
+    };
+    EventInspectionSummary summary{.event_id = manifest.value()["eventId"].get<std::string>(),
+                                   .committed_directory =
+                                       impl_->options.event_root / committed_relative_directory,
+                                   .manifest_bytes = manifest_text.value().size(),
+                                   .key_frame_count = manifest.value()["keyFrames"].size(),
+                                   .key_frames_traceable = true};
+    std::vector<RawRange> raw_ranges;
+    raw_ranges.reserve(manifest.value()["rawBlocks"].size());
+    std::map<std::string, std::uint64_t> previous_sequences;
+    try
+    {
+        for (const auto& raw : manifest.value()["rawBlocks"])
+        {
+            if (!raw.is_object() || !raw.at("path").is_string() ||
+                !raw.at("cameraId").is_string() ||
+                !raw.at("firstSequenceNumber").is_number_unsigned() ||
+                !raw.at("lastSequenceNumber").is_number_unsigned() ||
+                !raw.at("firstCameraFrameNumber").is_number_unsigned() ||
+                !raw.at("lastCameraFrameNumber").is_number_unsigned() ||
+                !raw.at("frameCount").is_number_unsigned())
+                throw std::invalid_argument{"shape"};
+            const std::filesystem::path relative{raw.at("path").get<std::string>()};
+            RawRange range{
+                .camera_id = raw.at("cameraId").get<std::string>(),
+                .first_sequence = raw.at("firstSequenceNumber").get<std::uint64_t>(),
+                .last_sequence = raw.at("lastSequenceNumber").get<std::uint64_t>(),
+                .first_camera_frame = raw.at("firstCameraFrameNumber").get<std::uint64_t>(),
+                .last_camera_frame = raw.at("lastCameraFrameNumber").get<std::uint64_t>()};
+            const auto frame_count = raw.at("frameCount").get<std::size_t>();
+            if (!safe_relative_path(relative) || range.camera_id.empty() || frame_count == 0U ||
+                frame_count > event_raw_block_maximum_frames ||
+                range.first_sequence > range.last_sequence ||
+                range.first_camera_frame > range.last_camera_frame ||
+                range.last_sequence - range.first_sequence < frame_count - 1U)
+                throw std::invalid_argument{"value"};
+            if (summary.raw_frame_count > (std::numeric_limits<std::size_t>::max)() - frame_count)
+                throw std::overflow_error{"frame-count"};
+            summary.raw_frame_count += frame_count;
+            const auto within_block_gaps =
+                range.last_sequence - range.first_sequence - (frame_count - 1U);
+            if (summary.observed_sequence_gaps >
+                (std::numeric_limits<std::uint64_t>::max)() - within_block_gaps)
+                throw std::overflow_error{"gap-count"};
+            summary.observed_sequence_gaps += within_block_gaps;
+            const auto previous = previous_sequences.find(range.camera_id);
+            if (previous != previous_sequences.end())
+            {
+                if (range.first_sequence <= previous->second)
+                    throw std::invalid_argument{"order"};
+                const auto between_block_gaps = range.first_sequence - previous->second - 1U;
+                if (summary.observed_sequence_gaps >
+                    (std::numeric_limits<std::uint64_t>::max)() - between_block_gaps)
+                    throw std::overflow_error{"gap-count"};
+                summary.observed_sequence_gaps += between_block_gaps;
+            }
+            previous_sequences[range.camera_id] = range.last_sequence;
+            raw_ranges.push_back(std::move(range));
+        }
+        for (const auto& value : manifest.value()["keyFrames"])
+        {
+            auto key = key_frame(value);
+            if (!key)
+                return Result<EventInspectionSummary>::failure(std::move(key).error());
+            const auto traceable = std::ranges::any_of(raw_ranges, [&key](const RawRange& range) {
+                return range.camera_id == key.value().camera_id &&
+                       range.first_sequence <= key.value().sequence_number &&
+                       key.value().sequence_number <= range.last_sequence &&
+                       range.first_camera_frame <= key.value().camera_frame_number &&
+                       key.value().camera_frame_number <= range.last_camera_frame;
+            });
+            summary.key_frames_traceable = summary.key_frames_traceable && traceable;
+            if (summary.thumbnail_jpeg.empty())
+            {
+                auto thumbnail = impl_->read_verified_file(
+                    manifest.value(), summary.committed_directory, key.value().relative_path);
+                if (!thumbnail)
+                    return Result<EventInspectionSummary>::failure(std::move(thumbnail).error());
+                summary.thumbnail_jpeg = std::move(thumbnail).value().contents;
+            }
+        }
+    }
+    catch (const std::exception&)
+    {
+        return Result<EventInspectionSummary>::failure(
+            inspection_error("EVENT_RECOVERY_FAILED", Severity::critical, "事件摘要索引无效",
+                             "event.inspect.summary"));
+    }
+    return Result<EventInspectionSummary>::success(std::move(summary));
+}
+
 Result<std::string> EventInspector::get_manifest(
     const std::filesystem::path& committed_relative_directory) const
 {

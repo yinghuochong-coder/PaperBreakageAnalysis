@@ -282,7 +282,7 @@ flowchart LR
 | `CameraClient` | `camera.list`、`camera.discover`、`camera.bind`、`camera.connect`、`camera.disconnect`、`camera.start`、`camera.stop`、`camera.getConfig`、`camera.updateConfig`、`camera.captureSnapshot`、`camera.softwareTrigger` | 无 | 相机拓扑、参数和控制 |
 | `OperationsClient` | `system.getMetrics`、`alarm.list`、`log.tail`、`alarm.acknowledge`、`system.exportDiagnostics` | 三种 `alarm.*` 推送 | 运维、报警、日志和诊断包 |
 | `AlgorithmClient` | `algorithm.getConfig`、`algorithm.updateConfig`、`algorithm.testCurrentFrame` | 无 | 算法配置、运行指标和隔离测试 |
-| `EventClient` | `event.getConfig`、`event.updateConfig`、`event.list`、`event.get`、`event.getManifest`、`event.manualTrigger`、`event.confirm`、`event.reject`、`event.export`、`event.retryUpload` | `event.committed` | 事件配置、查询、复核、导出和重传 |
+| `EventClient` | `event.getConfig`、`event.updateConfig`、`event.list`、`event.getSummary`、`event.getManifest`、`event.manualTrigger`、`event.confirm`、`event.reject`、`event.export`、`event.retryUpload` | `event.committed` | 事件配置、查询、复核、导出和重传 |
 | `StorageClient` | `storage.getConfig`、`storage.updateConfig` | 无 | 存储配置 |
 | `UplinkClient` | `uplink.getConfig`、`uplink.updateConfig` | 无 | 上位机配置 |
 
@@ -410,11 +410,12 @@ sequenceDiagram
     participant X as "EventClient::FileExporter"
 
     W->>E: get(eventId)
-    E->>S: event.get
-    S-->>E: 元数据 + thumbnail JPEG
-    E->>S: event.getManifest(eventId)
-    S-->>E: verified 元数据 + manifest bytes
-    E->>E: 校验 eventId/size/verified 并解析 JSON
+    E->>S: event.getSummary（60 秒截止）
+    S->>S: manifest 结构检查 + 仅校验首张关键帧
+    S-->>E: 元数据 + thumbnail JPEG（不读取原始块）
+    E->>S: event.getManifest(eventId，60 秒截止)
+    S-->>E: 完整性状态 + manifest bytes
+    E->>E: 校验 eventId/size/非 Failed 状态并解析 JSON
     E-->>W: apply_event_snapshot()
 
     W->>E: export_event(eventId, destination)

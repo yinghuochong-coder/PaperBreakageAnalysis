@@ -407,6 +407,10 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
   manifest 字节数、原始/关键帧数、序列缺口和追溯状态及首张关键帧 JPEG。列表和详情都
   包含 `decisionState`、`persistenceState`、`reviewState`、可空 `reviewDecision`、
   `artifactsAvailable`、`triggerCount`，以及兼容别名 `eventState`。
+- `event.getSummary`：payload 为 `{"eventId":"..."}`，供交互式详情选择使用。返回与
+  `event.get` 相同的目录、计数、序列缺口、结构追溯状态和首张关键帧 JPEG，但只解析并
+  结构检查 manifest，且只读取、校验实际返回的关键帧；不读取原始块或 `event.json`，也不把
+  `integrityState=Unverified` 提升为 `Verified`。结构或缩略图校验失败仍将事件标损。
 - `event.getManifest`：payload 为 `{"eventId":"..."}`。只解析 manifest 并检查路径、普通文件
   存在性和声明长度，不读取负载或计算 SHA；以不超过 8 MiB 的二进制 UTF-8 JSON 返回完整
   不可变 manifest。`verified` 反映数据库既有完整性状态，响应同时返回 `integrityState`。

@@ -8,7 +8,7 @@
   "algorithm": {
     "candidateThreshold": 0.6,
     "confirmationThreshold": 0.8,
-    "consecutiveFrames": 3,
+    "consecutiveFrames": 7,
     "cooldownMs": 1000,
     "debugOverlay": true,
     "device": "cpu",
@@ -44,9 +44,30 @@
       "triggerDelayUs": 0,
       "triggerMode": "Continuous",
       "triggerSource": ""
+    },
+    {
+      "enabled": true,
+      "exposureUs": 500.0,
+      "frameRate": 60.0,
+      "gainDb": 23.011899948120117,
+      "id": "CAM02",
+      "interPacketDelayNs": 400,
+      "location": "NoLed",
+      "packetSizeBytes": 8164,
+      "pixelFormat": "Mono8",
+      "roi": {
+        "height": 1240,
+        "offsetX": 0,
+        "offsetY": 0,
+        "width": 1624
+      },
+      "serialNumber": "DB2180723",
+      "triggerDelayUs": 0,
+      "triggerMode": "Continuous",
+      "triggerSource": ""
     }
   ],
-  "configRevision": 19,
+  "configRevision": 22,
   "configSchemaVersion": 2,
   "event": {
     "generatePreviewVideo": true,
@@ -74,7 +95,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-06T00:00:00.000Z",
+  "modifiedAt": "2026-08-10T03:03:49.952Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

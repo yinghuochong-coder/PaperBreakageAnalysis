@@ -21,6 +21,7 @@ namespace paperbreak::console
 namespace
 {
 using Json = nlohmann::json;
+constexpr auto event_detail_request_timeout = std::chrono::seconds{60};
 
 Error client_error(std::string code, std::string message, std::string operation,
                    const bool retryable = false)
@@ -372,10 +373,11 @@ Result<void> EventClient::get(std::string event_id)
 {
     if (detail_request_ || manifest_request_)
         return Result<void>::failure(
-            client_error("IPC_BUSY", "事件详情正在加载", "console.event.get", true));
+            client_error("IPC_BUSY", "事件详情正在加载", "console.event.getSummary", true));
     auto sent = client_->send_request(
-        "event.get", Json{{"eventId", std::move(event_id)}}.dump(), {},
-        [this](auto handle, auto result) { detail_completed(handle, std::move(result)); });
+        "event.getSummary", Json{{"eventId", std::move(event_id)}}.dump(), {},
+        [this](auto handle, auto result) { detail_completed(handle, std::move(result)); },
+        event_detail_request_timeout);
     if (!sent)
         return Result<void>::failure(sent.error());
     detail_request_ = sent.value();
@@ -517,7 +519,7 @@ void EventClient::detail_completed(ipc::ClientRequestHandle handle,
     if (!detail_request_ || *detail_request_ != handle)
         return;
     detail_request_.reset();
-    auto payload = response_payload(result, "console.event.get");
+    auto payload = response_payload(result, "console.event.getSummary");
     if (!payload)
         snapshot_.error = payload.error();
     else
@@ -544,7 +546,8 @@ void EventClient::detail_completed(ipc::ClientRequestHandle handle,
             "event.getManifest", Json{{"eventId", snapshot_.detail->event.event_id}}.dump(), {},
             [this](auto manifest_handle, auto manifest_result) {
                 manifest_completed(manifest_handle, std::move(manifest_result));
-            });
+            },
+            event_detail_request_timeout);
         if (!sent)
             snapshot_.error = sent.error();
         else
@@ -565,7 +568,8 @@ void EventClient::manifest_completed(ipc::ClientRequestHandle handle,
     auto payload = response_payload(result, "console.event.getManifest");
     if (!payload)
         snapshot_.error = payload.error();
-    else if (!snapshot_.detail || !payload.value().value("verified", false) ||
+    else if (!snapshot_.detail ||
+             payload.value().value("integrityState", std::string{}) == "Failed" ||
              payload.value().value("eventId", std::string{}) != snapshot_.detail->event.event_id ||
              payload.value().value("size", std::size_t{}) != result.value().binary.size())
         snapshot_.error = client_error("IPC_PROTOCOL_ERROR", "事件 manifest 响应不一致",

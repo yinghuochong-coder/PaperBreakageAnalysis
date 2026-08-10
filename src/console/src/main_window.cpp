@@ -26,6 +26,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStringList>
@@ -51,6 +52,7 @@ namespace
 
 constexpr int table_header_minimum_height = 32;
 constexpr int table_header_vertical_margin = 12;
+constexpr int event_table_visible_rows = 10;
 constexpr auto local_date_time_format = "yyyy-MM-dd HH:mm:ss.zzz ttt";
 constexpr auto local_clock_format = "yyyy-MM-dd HH:mm:ss ttt";
 
@@ -1288,6 +1290,13 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                                            QStringLiteral("触发相机"), QStringLiteral("置信度"),
                                            QStringLiteral("上传状态"), QStringLiteral("缩略图"),
                                            QStringLiteral("事件 ID")});
+            const int event_table_height =
+                event_table_->horizontalHeader()->minimumHeight() +
+                event_table_visible_rows * event_table_->verticalHeader()->defaultSectionSize() +
+                event_table_->horizontalScrollBar()->sizeHint().height() +
+                event_table_->frameWidth() * 2;
+            event_table_->setFixedHeight(event_table_height);
+            event_table_->setProperty("visibleRows", event_table_visible_rows);
             QObject::connect(event_table_, &QTableWidget::itemSelectionChanged, this, [this] {
                 const int row = event_table_->currentRow();
                 if (row >= 0 && event_actions_.get && event_table_->item(row, 8))
@@ -2908,14 +2917,19 @@ bool MainWindow::algorithm_page_ready() const noexcept
 
 bool MainWindow::event_pages_ready() const noexcept
 {
+    const bool event_table_has_ten_rows =
+        event_table_ && event_table_->property("visibleRows").toInt() == event_table_visible_rows &&
+        event_table_->minimumHeight() >=
+            event_table_visible_rows * event_table_->verticalHeader()->defaultSectionSize() &&
+        event_table_->maximumHeight() == event_table_->minimumHeight();
     return event_config_editor_ && event_config_save_ && event_pre_seconds_ &&
            event_post_seconds_ && event_max_seconds_ && event_merge_seconds_ && event_key_frames_ &&
            event_retention_days_ && event_save_raw_ && event_preview_video_ &&
            event_upload_policy_ && event_filter_start_ && event_filter_end_ &&
            event_filter_state_ && event_filter_persistence_ && event_filter_review_ &&
-           event_filter_through_now_ && event_filter_camera_ && event_table_ && event_detail_ &&
-           event_confirm_ && event_reject_ && event_export_ && event_open_directory_ &&
-           event_retry_upload_;
+           event_filter_through_now_ && event_filter_camera_ && event_table_has_ten_rows &&
+           event_detail_ && event_confirm_ && event_reject_ && event_export_ &&
+           event_open_directory_ && event_retry_upload_;
 }
 
 bool MainWindow::storage_page_ready() const noexcept

@@ -570,6 +570,19 @@ TEST(SystemCommand, ListsGetsReviewsExportsAndConfiguresCommittedEvents)
     EXPECT_EQ(listed["events"][0]["reviewRevision"], 1U);
     EXPECT_TRUE(listed["events"][0]["thumbnailAvailable"].get<bool>());
 
+    auto summary = commands.handle(
+        fixture.request("event.getSummary", Json{{"eventId", event_id}}.dump()), reader, {});
+    ASSERT_TRUE(summary) << summary.error().message;
+    const Json summary_json = Json::parse(summary.value().payload_json);
+    EXPECT_GT(summary_json["manifestBytes"].get<std::size_t>(), 0U);
+    EXPECT_TRUE(summary_json["keyFramesTraceable"].get<bool>());
+    EXPECT_EQ(summary_json["thumbnailBytes"], summary.value().binary.size());
+    EXPECT_EQ(summary_json["event"]["integrityState"], "Unverified");
+    EXPECT_FALSE(summary.value().binary.empty());
+    auto after_summary = database->get_event(event_id);
+    ASSERT_TRUE(after_summary);
+    EXPECT_EQ(after_summary.value().integrity_state, "Unverified");
+
     auto structural_manifest = commands.handle(
         fixture.request("event.getManifest", Json{{"eventId", event_id}}.dump()), reader, {});
     ASSERT_TRUE(structural_manifest);

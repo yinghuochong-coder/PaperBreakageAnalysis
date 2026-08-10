@@ -36,7 +36,7 @@ manifest v2 / `PBNVME1` 仅只读兼容检查与导出，不迁移、不重写�
 
 正常提交直接用内存中的 writer manifest 建立 SQLite 索引。启动事务恢复和目录对账只解析 manifest、验证路径约束、普通文件存在性与声明长度，不读取原始负载或计算 SHA。
 
-SQLite schema v6 增加 `integrity_state`（`Unverified | Verified | Failed`）、`integrity_checked_at_utc_ms` 和 `integrity_error_code`。新提交和 v5 迁移事件为 `Unverified`。列表与 `event.getManifest` 只做结构检查；详情、导出和在线上传进行单次顺序读取的完整校验。
+SQLite schema v6 增加 `integrity_state`（`Unverified | Verified | Failed`）、`integrity_checked_at_utc_ms` 和 `integrity_error_code`。新提交和 v5 迁移事件为 `Unverified`。列表与 `event.getManifest` 只做结构检查；交互式 `event.getSummary` 额外只校验实际返回的首张关键帧，不读取原始块且不提升完整性状态；`event.get`、导出和在线上传进行单次顺序读取的完整校验。
 
 完整校验失败不改变算法判定、人工复核或 `persistence_state=Committed`，但设置 `storage_state=Damaged`、`artifacts_available=false`、`integrity_state=Failed`，拒绝详情内容、导出和上传，将未完成上传任务转为 `ManualIntervention` 并登记 Critical 报警。文件不删除。
 

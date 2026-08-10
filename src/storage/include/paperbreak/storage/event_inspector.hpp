@@ -43,6 +43,18 @@ struct EventInspectionReport final
     bool key_frames_traceable{};
 };
 
+struct EventInspectionSummary final
+{
+    std::string event_id;
+    std::filesystem::path committed_directory;
+    std::size_t manifest_bytes{};
+    std::size_t raw_frame_count{};
+    std::size_t key_frame_count{};
+    std::vector<std::byte> thumbnail_jpeg;
+    std::uint64_t observed_sequence_gaps{};
+    bool key_frames_traceable{};
+};
+
 struct EventInspectorOptions final
 {
     std::filesystem::path event_root;
@@ -98,6 +110,10 @@ class EventInspector final
     EventInspector& operator=(EventInspector&&) = delete;
 
     [[nodiscard]] Result<EventInspectionReport> inspect(
+        const std::filesystem::path& committed_relative_directory) const;
+    /// Builds the detail-view summary from the structurally checked manifest and verifies only the
+    /// key-frame bytes returned as the thumbnail. Raw blocks and event.json are not read.
+    [[nodiscard]] Result<EventInspectionSummary> inspect_summary(
         const std::filesystem::path& committed_relative_directory) const;
     /// Parses the manifest and checks path constraints, file existence, and declared lengths.
     /// This structural check never reads an event payload.

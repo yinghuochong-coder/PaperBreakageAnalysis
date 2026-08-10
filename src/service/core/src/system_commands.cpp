@@ -2039,6 +2039,63 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                 {.payload_json = response.dump(),
                  .binary = std::move(inspected).value().thumbnail_jpeg});
         }
+        if (request.command == "event.getSummary")
+        {
+            auto event_id = required_event_id(payload.value(), "ipc.event.getSummary", false);
+            if (!event_id)
+                return Result<ipc::CommandResponse>::failure(event_id.error());
+            auto record = event_database_->get_event(event_id.value());
+            if (!record)
+                return Result<ipc::CommandResponse>::failure(record.error());
+            if (!record.value().artifacts_available)
+            {
+                if (record.value().integrity_state == "Failed")
+                    return Result<ipc::CommandResponse>::failure(command_error(
+                        "EVENT_INTEGRITY_FAILED", Severity::critical,
+                        "事件证据完整性校验已失败，详情内容不可用", "ipc.event.getSummary"));
+                Json response{{"event", event_record_json(record.value())},
+                              {"committedDirectory", nullptr},
+                              {"rawFrameCount", 0U},
+                              {"keyFrameCount", 0U},
+                              {"observedSequenceGaps", 0U},
+                              {"keyFramesTraceable", false},
+                              {"manifestBytes", 0U},
+                              {"thumbnailBytes", 0U}};
+                return Result<ipc::CommandResponse>::success(
+                    {.payload_json = response.dump(), .binary = {}});
+            }
+            if (!event_inspector_)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("SYS_NOT_SUPPORTED", Severity::warning, "事件检查器尚未装配",
+                                  "ipc.event.getSummary"));
+            auto inspected = event_inspector_->inspect_summary(record.value().relative_directory);
+            if (!inspected)
+            {
+                const auto failure = inspected.error();
+                static_cast<void>(event_database_->mark_event_integrity_failed(
+                    event_id.value(), failure.business_code, current_utc_milliseconds()));
+                if (alarms_)
+                    static_cast<void>(
+                        alarms_->raise_alarm({.code = "EVENT_INTEGRITY_FAILED",
+                                              .severity = Severity::critical,
+                                              .source = event_id.value(),
+                                              .message = "事件证据结构或缩略图校验失败",
+                                              .details = {{"errorCode", failure.business_code}}}));
+                return Result<ipc::CommandResponse>::failure(failure);
+            }
+            Json response{
+                {"event", event_record_json(record.value())},
+                {"committedDirectory", path_to_utf8(inspected.value().committed_directory)},
+                {"rawFrameCount", inspected.value().raw_frame_count},
+                {"keyFrameCount", inspected.value().key_frame_count},
+                {"observedSequenceGaps", inspected.value().observed_sequence_gaps},
+                {"keyFramesTraceable", inspected.value().key_frames_traceable},
+                {"manifestBytes", inspected.value().manifest_bytes},
+                {"thumbnailBytes", inspected.value().thumbnail_jpeg.size()}};
+            return Result<ipc::CommandResponse>::success(
+                {.payload_json = response.dump(),
+                 .binary = std::move(inspected).value().thumbnail_jpeg});
+        }
         if (request.command == "event.getManifest")
         {
             auto event_id = required_event_id(payload.value(), "ipc.event.getManifest", false);

@@ -256,7 +256,7 @@ class EventClientHandler final : public paperbreak::ipc::IRequestHandler
                      R"({"events":[{"eventId":"event-1","eventState":"Candidate","decisionState":"Candidate","persistenceState":"Committed","reviewState":"Unreviewed","reviewDecision":null,"artifactsAvailable":true,"triggerCount":2,"reviewRevision":1,"candidateTimeUtcMs":1785801600000,"triggerCameraId":"CAM01","confidence":0.875,"uploadState":"Pending","storageState":"Present","thumbnailAvailable":true}],"total":1,"offset":0,"limit":50,"summary":{"decisionCandidates":2,"decisionConfirmed":0,"persistenceCollecting":0,"persistenceEncoding":0,"persistenceQueued":0,"persistenceWriting":0,"persistenceCommitted":1,"reviewUnreviewed":1,"reviewConfirmed":0,"reviewRejected":0}})",
                  .binary = {}});
         }
-        if (request.command == "event.get")
+        if (request.command == "event.getSummary")
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json =
                      R"({"event":{"eventId":"event-1","eventState":"Candidate","decisionState":"Candidate","persistenceState":"Committed","reviewState":"Unreviewed","reviewDecision":null,"artifactsAvailable":true,"triggerCount":2,"reviewRevision":1,"candidateTimeUtcMs":1785801600000,"triggerCameraId":"CAM01","confidence":0.875,"uploadState":"Pending","storageState":"Present","thumbnailAvailable":true},"committedDirectory":"C:/事件 数据/2026/08/04/event-1","rawFrameCount":2,"keyFrameCount":1,"observedSequenceGaps":0,"keyFramesTraceable":true,"manifestBytes":21,"thumbnailBytes":4})",
@@ -269,7 +269,8 @@ class EventClientHandler final : public paperbreak::ipc::IRequestHandler
                 bytes.push_back(static_cast<std::byte>(byte));
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json = nlohmann::json{{"eventId", "event-1"},
-                                                {"verified", true},
+                                                {"verified", false},
+                                                {"integrityState", "Unverified"},
                                                 {"size", bytes.size()}}
                                      .dump(),
                  .binary = std::move(bytes)});

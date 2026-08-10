@@ -533,6 +533,28 @@ TEST(StorageEventInspector, ReadsManifestOrderTracesKeyFramesAndExportsVerifiedZ
     ASSERT_TRUE(inspector);
     const auto relative = persisted.value().committed_directory.lexically_relative(root);
 
+    const auto manifest = nlohmann::json::parse(persisted.value().manifest_json);
+    const auto raw_filename =
+        std::filesystem::path{manifest["rawBlocks"][0]["path"].get<std::string>()}
+            .filename()
+            .string();
+    const auto key_filename =
+        std::filesystem::path{manifest["keyFrames"][0]["path"].get<std::string>()}
+            .filename()
+            .string();
+    auto summary = inspector.value()->inspect_summary(relative);
+
+    ASSERT_TRUE(summary) << summary.error().message;
+    EXPECT_EQ(summary.value().event_id, "019f-m509-inspect-0001");
+    EXPECT_EQ(summary.value().raw_frame_count, 2U);
+    EXPECT_EQ(summary.value().key_frame_count, 1U);
+    EXPECT_EQ(summary.value().observed_sequence_gaps, 0U);
+    EXPECT_TRUE(summary.value().key_frames_traceable);
+    EXPECT_FALSE(summary.value().thumbnail_jpeg.empty());
+    EXPECT_EQ(file_system->read_occurrences[raw_filename], 0U);
+    EXPECT_EQ(file_system->read_occurrences["event.json"], 0U);
+    EXPECT_EQ(file_system->read_occurrences[key_filename], 1U);
+
     auto inspected = inspector.value()->inspect(relative);
 
     ASSERT_TRUE(inspected) << inspected.error().message;
