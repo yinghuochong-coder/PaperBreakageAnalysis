@@ -17,10 +17,12 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
 #include <QPixmap>
@@ -28,6 +30,7 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStringList>
@@ -301,21 +304,75 @@ void set_table_item(QTableWidget* table, const int row, const int column, const 
     table->setItem(row, column, item.release());
 }
 
+class PreviewTile final : public QWidget
+{
+  public:
+    PreviewTile() = default;
+
+    void set_double_click_handler(std::function<void()> handler)
+    {
+        double_click_handler_ = std::move(handler);
+    }
+
+  protected:
+    void mouseDoubleClickEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton && double_click_handler_)
+        {
+            double_click_handler_();
+            event->accept();
+            return;
+        }
+        QWidget::mouseDoubleClickEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (event->key() == Qt::Key_Escape && isFullScreen() && double_click_handler_)
+        {
+            double_click_handler_();
+            event->accept();
+            return;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
+    void closeEvent(QCloseEvent* event) override
+    {
+        if (isFullScreen() && double_click_handler_)
+        {
+            double_click_handler_();
+            event->ignore();
+            return;
+        }
+        QWidget::closeEvent(event);
+    }
+
+  private:
+    std::function<void()> double_click_handler_;
+};
+
 QWidget* make_preview_tile(QWidget* parent, const int index, QLabel*& image, QLabel*& overlay)
 {
-    QWidget* tile = make_child<QWidget>(parent);
+    QWidget* tile = make_child<PreviewTile>(parent);
+    tile->setObjectName(QStringLiteral("preview-tile-%1").arg(index + 1));
     tile->setProperty("role", "previewTile");
+    tile->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    tile->setFocusPolicy(Qt::StrongFocus);
     auto* layout = make_layout<QVBoxLayout>(tile);
     layout->setContentsMargins(6, 6, 6, 6);
     image = make_child<QLabel>(
         tile, QStringLiteral("等待 CAM%1 预览帧").arg(index + 1, 2, 10, QChar{'0'}));
     image->setAlignment(Qt::AlignCenter);
     image->setMinimumSize(240, 135);
+    image->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     image->setScaledContents(false);
     image->setProperty("role", "previewImage");
+    image->setAttribute(Qt::WA_TransparentForMouseEvents);
     overlay = make_child<QLabel>(
         tile, QStringLiteral("CAM%1 · 无数据").arg(index + 1, 2, 10, QChar{'0'}));
     overlay->setProperty("role", "previewOverlay");
+    overlay->setAttribute(Qt::WA_TransparentForMouseEvents);
     layout->addWidget(image, 1);
     layout->addWidget(overlay);
     return tile;
@@ -1790,10 +1847,11 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
         preview_layout->addWidget(heading);
         QWidget* controls = make_child<QWidget>(preview_page);
         auto* controls_layout = make_layout<QHBoxLayout>(controls);
-        auto* layout_choice = make_child<QComboBox>(controls);
-        layout_choice->addItems({QStringLiteral("四宫格"), QStringLiteral("CAM01"),
-                                 QStringLiteral("CAM02"), QStringLiteral("CAM03"),
-                                 QStringLiteral("CAM04")});
+        preview_layout_choice_ = make_child<QComboBox>(controls);
+        preview_layout_choice_->setObjectName(QStringLiteral("preview-layout-choice"));
+        preview_layout_choice_->addItems({QStringLiteral("四宫格"), QStringLiteral("CAM01"),
+                                          QStringLiteral("CAM02"), QStringLiteral("CAM03"),
+                                          QStringLiteral("CAM04")});
         auto* rate_choice = make_child<QComboBox>(controls);
         rate_choice->addItems(
             {QStringLiteral("2 fps"), QStringLiteral("3 fps"), QStringLiteral("5 fps")});
@@ -1803,32 +1861,41 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
         preview_pause_button_ = make_child<QPushButton>(controls, QStringLiteral("暂停显示"));
         auto* one_to_one = make_child<QPushButton>(controls, QStringLiteral("1:1"));
         auto* adaptive = make_child<QPushButton>(controls, QStringLiteral("自适应"));
-        auto* full_screen = make_child<QPushButton>(controls, QStringLiteral("全屏"));
+        preview_full_screen_button_ = make_child<QPushButton>(controls, QStringLiteral("全屏"));
+        preview_full_screen_button_->setObjectName(QStringLiteral("preview-full-screen"));
         auto* capture = make_child<QPushButton>(controls, QStringLiteral("抓图"));
-        controls_layout->addWidget(layout_choice);
+        controls_layout->addWidget(preview_layout_choice_);
         controls_layout->addWidget(rate_choice);
         controls_layout->addWidget(resolution_choice);
         controls_layout->addWidget(preview_pause_button_);
         controls_layout->addWidget(one_to_one);
         controls_layout->addWidget(adaptive);
-        controls_layout->addWidget(full_screen);
+        controls_layout->addWidget(preview_full_screen_button_);
         controls_layout->addWidget(capture);
         controls_layout->addStretch(1);
         preview_layout->addWidget(controls);
         preview_status_ = make_child<QLabel>(preview_page, QStringLiteral("预览正在连接后台服务"));
         preview_status_->setProperty("role", "muted");
         preview_layout->addWidget(preview_status_);
-        QWidget* grid = make_child<QWidget>(preview_page);
-        auto* grid_layout = make_layout<QGridLayout>(grid);
-        grid_layout->setSpacing(8);
-        std::array<QWidget*, 4U> preview_tiles{};
+        preview_grid_ = make_child<QWidget>(preview_page);
+        preview_grid_->setObjectName(QStringLiteral("preview-grid"));
+        preview_grid_layout_ = make_layout<QGridLayout>(preview_grid_);
+        preview_grid_layout_->setSpacing(8);
+        preview_grid_layout_->setRowStretch(0, 1);
+        preview_grid_layout_->setRowStretch(1, 1);
+        preview_grid_layout_->setColumnStretch(0, 1);
+        preview_grid_layout_->setColumnStretch(1, 1);
         for (int camera = 0; camera < 4; ++camera)
         {
-            preview_tiles[camera] =
-                make_preview_tile(grid, camera, preview_images_[camera], preview_overlays_[camera]);
-            grid_layout->addWidget(preview_tiles[camera], camera / 2, camera % 2);
+            preview_tiles_[camera] = make_preview_tile(
+                preview_grid_, camera, preview_images_[camera], preview_overlays_[camera]);
+            static_cast<PreviewTile*>(preview_tiles_[camera])
+                ->set_double_click_handler([this, camera] {
+                    handle_preview_tile_double_click(static_cast<std::size_t>(camera));
+                });
+            preview_grid_layout_->addWidget(preview_tiles_[camera], camera / 2, camera % 2);
         }
-        preview_layout->addWidget(grid, 1);
+        preview_layout->addWidget(preview_grid_, 1);
         QObject::connect(preview_pause_button_, &QPushButton::clicked, this, [this] {
             preview_paused_ = !preview_paused_;
             preview_pause_button_->setText(preview_paused_ ? QStringLiteral("恢复显示")
@@ -1836,11 +1903,12 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             if (preview_pause_changed_)
                 preview_pause_changed_(preview_paused_);
         });
-        QObject::connect(layout_choice, &QComboBox::currentIndexChanged, this,
-                         [preview_tiles](const int selection) {
-                             for (std::size_t tile = 0; tile < preview_tiles.size(); ++tile)
-                                 preview_tiles[tile]->setVisible(
-                                     selection == 0 || static_cast<int>(tile + 1U) == selection);
+        QObject::connect(preview_layout_choice_, &QComboBox::currentIndexChanged, this,
+                         [this](const int selection) {
+                             if (selection == 0)
+                                 restore_preview_tiles();
+                             else if (selection > 0 && selection <= 4)
+                                 set_preview_focus(static_cast<std::size_t>(selection - 1));
                          });
         QObject::connect(one_to_one, &QPushButton::clicked, this, [this] {
             for (QLabel* image : preview_images_)
@@ -1850,8 +1918,14 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             for (QLabel* image : preview_images_)
                 image->setScaledContents(true);
         });
-        QObject::connect(full_screen, &QPushButton::clicked, this,
-                         [this] { isFullScreen() ? showNormal() : showFullScreen(); });
+        QObject::connect(preview_full_screen_button_, &QPushButton::clicked, this, [this] {
+            if (preview_presentation_ == PreviewPresentation::full_screen)
+                restore_preview_tiles();
+            else
+                enter_preview_full_screen(preview_presentation_ == PreviewPresentation::focused
+                                              ? preview_selected_index_
+                                              : 0U);
+        });
         QObject::connect(capture, &QPushButton::clicked, this, [this] {
             const auto found =
                 std::find_if(preview_images_.begin(), preview_images_.end(),
@@ -1904,6 +1978,84 @@ void MainWindow::apply_preview_snapshot(const PreviewSnapshot& snapshot)
                                                 ? frame.camera_status
                                                 : frame.detection_result)));
     }
+}
+
+void MainWindow::handle_preview_tile_double_click(const std::size_t index)
+{
+    if (index >= preview_tiles_.size())
+        return;
+    switch (preview_presentation_)
+    {
+    case PreviewPresentation::tiled:
+        set_preview_focus(index);
+        break;
+    case PreviewPresentation::focused:
+        enter_preview_full_screen(index);
+        break;
+    case PreviewPresentation::full_screen:
+        restore_preview_tiles();
+        break;
+    }
+}
+
+void MainWindow::set_preview_focus(const std::size_t index)
+{
+    if (index >= preview_tiles_.size())
+        return;
+    if (preview_presentation_ == PreviewPresentation::full_screen)
+        restore_preview_tiles();
+    preview_selected_index_ = index;
+    preview_presentation_ = PreviewPresentation::focused;
+    if (preview_layout_choice_)
+    {
+        const QSignalBlocker blocker{preview_layout_choice_};
+        preview_layout_choice_->setCurrentIndex(static_cast<int>(index + 1U));
+    }
+    for (std::size_t tile = 0; tile < preview_tiles_.size(); ++tile)
+        preview_tiles_[tile]->setVisible(tile == index);
+    if (preview_full_screen_button_)
+        preview_full_screen_button_->setText(QStringLiteral("全屏"));
+}
+
+void MainWindow::enter_preview_full_screen(const std::size_t index)
+{
+    if (index >= preview_tiles_.size() || preview_presentation_ == PreviewPresentation::full_screen)
+        return;
+    set_preview_focus(index);
+    preview_presentation_ = PreviewPresentation::full_screen;
+    QWidget* tile = preview_tiles_[index];
+    tile->setWindowTitle(QStringLiteral("PaperBreakEdge %1 预览")
+                             .arg(preview_layout_choice_->itemText(static_cast<int>(index + 1U))));
+    tile->setWindowFlag(Qt::Window, true);
+    tile->showFullScreen();
+    tile->setFocus(Qt::OtherFocusReason);
+    if (preview_full_screen_button_)
+        preview_full_screen_button_->setText(QStringLiteral("退出全屏"));
+}
+
+void MainWindow::restore_preview_tiles()
+{
+    if (!preview_grid_ || !preview_grid_layout_)
+        return;
+    if (preview_presentation_ == PreviewPresentation::full_screen)
+    {
+        QWidget* tile = preview_tiles_[preview_selected_index_];
+        tile->showNormal();
+        tile->setWindowFlag(Qt::Window, false);
+        tile->setParent(preview_grid_);
+        preview_grid_layout_->addWidget(tile, static_cast<int>(preview_selected_index_ / 2U),
+                                        static_cast<int>(preview_selected_index_ % 2U));
+    }
+    preview_presentation_ = PreviewPresentation::tiled;
+    if (preview_layout_choice_)
+    {
+        const QSignalBlocker blocker{preview_layout_choice_};
+        preview_layout_choice_->setCurrentIndex(0);
+    }
+    for (QWidget* tile : preview_tiles_)
+        tile->show();
+    if (preview_full_screen_button_)
+        preview_full_screen_button_->setText(QStringLiteral("全屏"));
 }
 
 void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
@@ -3214,6 +3366,7 @@ bool MainWindow::uplink_page_ready() const noexcept
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    restore_preview_tiles();
     hide();
     event->ignore();
 }

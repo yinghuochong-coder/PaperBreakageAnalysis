@@ -26,6 +26,7 @@ class QLineEdit;
 class QTableWidget;
 class QCheckBox;
 class QDateTimeEdit;
+class QGridLayout;
 class QTextEdit;
 class QWidget;
 
@@ -125,7 +126,18 @@ class MainWindow final : public QMainWindow
     [[nodiscard]] bool uplink_page_ready() const noexcept;
 
   private:
+    enum class PreviewPresentation
+    {
+        tiled,
+        focused,
+        full_screen
+    };
+
     void closeEvent(QCloseEvent* event) override;
+    void handle_preview_tile_double_click(std::size_t index);
+    void set_preview_focus(std::size_t index);
+    void enter_preview_full_screen(std::size_t index);
+    void restore_preview_tiles();
     void populate_camera_editor();
     void populate_camera_editor(const CameraParameterValue& value);
     void configure_camera_roi_editor(const CameraClientItem& camera);
@@ -165,6 +177,13 @@ class MainWindow final : public QMainWindow
     QLabel* overview_upload_value_{};
     std::array<QLabel*, 4U> preview_images_{};
     std::array<QLabel*, 4U> preview_overlays_{};
+    std::array<QWidget*, 4U> preview_tiles_{};
+    QWidget* preview_grid_{};
+    QGridLayout* preview_grid_layout_{};
+    QComboBox* preview_layout_choice_{};
+    QPushButton* preview_full_screen_button_{};
+    PreviewPresentation preview_presentation_{PreviewPresentation::tiled};
+    std::size_t preview_selected_index_{};
     QLabel* preview_status_{};
     QLabel* camera_configuration_value_{};
     QLabel* camera_operation_value_{};

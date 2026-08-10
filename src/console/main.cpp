@@ -23,6 +23,7 @@
 #include <QLayout>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -33,6 +34,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -53,6 +55,82 @@ bool has_argument(const int argc, char* argv[], const std::string_view expected)
             return true;
     }
     return false;
+}
+
+void send_left_double_click(QWidget* widget)
+{
+    const QPointF center{widget->rect().center()};
+    const QPointF global{widget->mapToGlobal(widget->rect().center())};
+    QMouseEvent event{QEvent::MouseButtonDblClick,
+                      center,
+                      center,
+                      global,
+                      Qt::LeftButton,
+                      Qt::LeftButton,
+                      Qt::NoModifier};
+    static_cast<void>(QApplication::sendEvent(widget, &event));
+}
+
+bool preview_pane_smoke(paperbreak::console::MainWindow& main_window, QApplication& application)
+{
+    if (!main_window.select_page(1U))
+        return false;
+    application.processEvents();
+    std::array<QWidget*, 4U> tiles{};
+    std::array<QSize, 4U> initial_sizes{};
+    for (std::size_t index = 0; index < tiles.size(); ++index)
+    {
+        tiles[index] = main_window.findChild<QWidget*>(
+            QStringLiteral("preview-tile-%1").arg(static_cast<int>(index + 1U)));
+        if (!tiles[index])
+            return false;
+        initial_sizes[index] = tiles[index]->size();
+    }
+
+    paperbreak::console::PreviewSnapshot snapshot;
+    snapshot.connection.state = paperbreak::ipc::ClientConnectionState::connected;
+    snapshot.subscribed = true;
+    paperbreak::console::PreviewImage frame;
+    frame.camera_id = "CAM01";
+    frame.frame_number = 1U;
+    frame.image = QImage{320, 180, QImage::Format_RGB32};
+    frame.image.fill(Qt::red);
+    snapshot.images[0] = frame;
+    main_window.apply_preview_snapshot(snapshot);
+    application.processEvents();
+    const bool small_frame_kept_sizes = std::ranges::equal(
+        tiles, initial_sizes, {}, [](const QWidget* tile) { return tile->size(); },
+        [](const QSize& size) { return size; });
+
+    frame.frame_number = 2U;
+    frame.image = QImage{1600, 1200, QImage::Format_RGB32};
+    frame.image.fill(Qt::blue);
+    snapshot.images[0] = frame;
+    main_window.apply_preview_snapshot(snapshot);
+    application.processEvents();
+    const bool large_frame_kept_sizes = std::ranges::equal(
+        tiles, initial_sizes, {}, [](const QWidget* tile) { return tile->size(); },
+        [](const QSize& size) { return size; });
+
+    send_left_double_click(tiles[0]);
+    application.processEvents();
+    const bool focused =
+        tiles[0]->isVisible() && !tiles[0]->isWindow() &&
+        std::ranges::none_of(tiles.begin() + 1, tiles.end(),
+                             [](const QWidget* tile) { return tile->isVisible(); });
+    send_left_double_click(tiles[0]);
+    application.processEvents();
+    const bool full_screen = tiles[0]->isWindow() && tiles[0]->isFullScreen();
+    send_left_double_click(tiles[0]);
+    application.processEvents();
+    auto* const layout_choice =
+        main_window.findChild<QComboBox*>(QStringLiteral("preview-layout-choice"));
+    auto* const grid = main_window.findChild<QWidget*>(QStringLiteral("preview-grid"));
+    const bool restored =
+        !tiles[0]->isWindow() &&
+        std::ranges::all_of(tiles, [](const QWidget* tile) { return tile->isVisible(); }) &&
+        tiles[0]->parentWidget() == grid && layout_choice && layout_choice->currentIndex() == 0;
+    return small_frame_kept_sizes && large_frame_kept_sizes && focused && full_screen && restored;
 }
 
 } // namespace
@@ -733,6 +811,9 @@ int main(int argc, char* argv[])
         }
         main_window.resize(1280, 800);
         application.processEvents();
+        const bool preview_panes_stable_and_cycle = preview_pane_smoke(main_window, application);
+        if (!preview_panes_stable_and_cycle)
+            std::cerr << "preview pane sizing or double-click cycle smoke failed\n";
         static_cast<void>(main_window.select_page(0U));
         auto* const event_upload_policy =
             main_window.findChild<QComboBox*>(QStringLiteral("event-upload-policy"));
@@ -784,16 +865,16 @@ int main(int argc, char* argv[])
                    !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && camera_layout_responsive &&
-                   camera_banner_removed && camera_discover_above_list &&
-                   first_camera_status_only && selected_camera_status_only &&
-                   first_camera_mirroring_loaded && selected_camera_mirroring_loaded &&
-                   roi_capabilities_loaded && roi_offset_aligned &&
-                   empty_configuration_kept_discovery && restart_state_disabled_controls &&
-                   main_window.operations_pages_ready() && main_window.algorithm_page_ready() &&
-                   main_window.event_pages_ready() && main_window.storage_page_ready() &&
-                   main_window.uplink_page_ready() && event_configuration_editable &&
-                   local_time_displayed && diagnostic_enabled_when_connected &&
-                   diagnostic_disabled_when_disconnected &&
+                   preview_panes_stable_and_cycle && camera_banner_removed &&
+                   camera_discover_above_list && first_camera_status_only &&
+                   selected_camera_status_only && first_camera_mirroring_loaded &&
+                   selected_camera_mirroring_loaded && roi_capabilities_loaded &&
+                   roi_offset_aligned && empty_configuration_kept_discovery &&
+                   restart_state_disabled_controls && main_window.operations_pages_ready() &&
+                   main_window.algorithm_page_ready() && main_window.event_pages_ready() &&
+                   main_window.storage_page_ready() && main_window.uplink_page_ready() &&
+                   event_configuration_editable && local_time_displayed &&
+                   diagnostic_enabled_when_connected && diagnostic_disabled_when_disconnected &&
                    theme_controller.contrast_requirements_met() && invalid_theme_fell_back &&
                    selected_light && selected_dark && dark_theme_persisted && selected_system &&
                    main_window.select_page(11U) && main_window.select_page(0U);
