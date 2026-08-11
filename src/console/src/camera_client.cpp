@@ -56,6 +56,7 @@ Result<std::vector<CameraDiscoveredDevice>> parse_discovered_devices(const Json&
 
 void parse_parameters(const Json& source, CameraParameterValue& target)
 {
+    target.line_io_available = false;
     if (!source.is_object())
         return;
     if (source.contains("exposureUs") && source["exposureUs"].is_number())
@@ -91,6 +92,23 @@ void parse_parameters(const Json& source, CameraParameterValue& target)
         target.packet_size_bytes = source["packetSizeBytes"].get<std::uint32_t>();
     if (source.contains("interPacketDelayNs") && source["interPacketDelayNs"].is_number_unsigned())
         target.inter_packet_delay_ns = source["interPacketDelayNs"].get<std::uint32_t>();
+    if (source.contains("lineIo") && source["lineIo"].is_object())
+    {
+        target.line_io_available = true;
+        const auto& line = source["lineIo"];
+        if (line.contains("alarmInputEnabled") && line["alarmInputEnabled"].is_boolean())
+            target.line_io.alarm_input_enabled = line["alarmInputEnabled"].get<bool>();
+        if (line.contains("alarmActiveLevel") && line["alarmActiveLevel"].is_string())
+            target.line_io.alarm_active_level = line["alarmActiveLevel"].get<std::string>();
+        if (line.contains("strobeOutputEnabled") && line["strobeOutputEnabled"].is_boolean())
+            target.line_io.strobe_output_enabled = line["strobeOutputEnabled"].get<bool>();
+        if (line.contains("strobeDurationUs") && line["strobeDurationUs"].is_number_unsigned())
+            target.line_io.strobe_duration_us = line["strobeDurationUs"].get<std::uint32_t>();
+        if (line.contains("strobePreDelayUs") && line["strobePreDelayUs"].is_number_unsigned())
+            target.line_io.strobe_pre_delay_us = line["strobePreDelayUs"].get<std::uint32_t>();
+        if (line.contains("strobePostDelayUs") && line["strobePostDelayUs"].is_number_unsigned())
+            target.line_io.strobe_post_delay_us = line["strobePostDelayUs"].get<std::uint32_t>();
+    }
 }
 
 bool parse_integer_range(const Json& source, CameraIntegerRangeValue& target)
@@ -133,12 +151,44 @@ bool parse_capabilities(const Json& source, CameraClientItem& target)
 {
     if (!source.is_object())
         return false;
-    if (!source.contains("roi"))
-        return true;
-    CameraRoiCapabilitiesValue roi;
-    if (!parse_roi_capabilities(source["roi"], roi))
-        return false;
-    target.roi_capabilities = roi;
+    if (source.contains("roi"))
+    {
+        CameraRoiCapabilitiesValue roi;
+        if (!parse_roi_capabilities(source["roi"], roi))
+            return false;
+        target.roi_capabilities = roi;
+    }
+    if (source.contains("lineIo"))
+    {
+        const auto& line = source["lineIo"];
+        if (!line.is_object() || !line.contains("alarmInputSupported") ||
+            !line["alarmInputSupported"].is_boolean() || !line.contains("risingEdgeSupported") ||
+            !line["risingEdgeSupported"].is_boolean() || !line.contains("fallingEdgeSupported") ||
+            !line["fallingEdgeSupported"].is_boolean() || !line.contains("strobeOutputSupported") ||
+            !line["strobeOutputSupported"].is_boolean() || !line.contains("unsupportedReason") ||
+            !line["unsupportedReason"].is_string())
+            return false;
+        CameraLineIoCapabilitiesValue parsed{
+            .alarm_input_supported = line["alarmInputSupported"].get<bool>(),
+            .rising_edge_supported = line["risingEdgeSupported"].get<bool>(),
+            .falling_edge_supported = line["fallingEdgeSupported"].get<bool>(),
+            .strobe_output_supported = line["strobeOutputSupported"].get<bool>(),
+            .unsupported_reason = line["unsupportedReason"].get<std::string>()};
+        const auto range = [&](const char* name, std::optional<CameraIntegerRangeValue>& output) {
+            if (!line.contains(name))
+                return true;
+            CameraIntegerRangeValue value;
+            if (!parse_integer_range(line[name], value))
+                return false;
+            output = value;
+            return true;
+        };
+        if (!range("strobeDurationUs", parsed.strobe_duration_us) ||
+            !range("strobePreDelayUs", parsed.strobe_pre_delay_us) ||
+            !range("strobePostDelayUs", parsed.strobe_post_delay_us))
+            return false;
+        target.line_io_capabilities = std::move(parsed);
+    }
     return true;
 }
 
@@ -169,6 +219,12 @@ Json parameter_json(const CameraParameterValue& value)
         result["packetSizeBytes"] = *value.packet_size_bytes;
     if (value.inter_packet_delay_ns)
         result["interPacketDelayNs"] = *value.inter_packet_delay_ns;
+    result["lineIo"] = {{"alarmInputEnabled", value.line_io.alarm_input_enabled},
+                        {"alarmActiveLevel", value.line_io.alarm_active_level},
+                        {"strobeOutputEnabled", value.line_io.strobe_output_enabled},
+                        {"strobeDurationUs", value.line_io.strobe_duration_us},
+                        {"strobePreDelayUs", value.line_io.strobe_pre_delay_us},
+                        {"strobePostDelayUs", value.line_io.strobe_post_delay_us}};
     return result;
 }
 
@@ -197,12 +253,49 @@ bool confirms_operation(const CameraOperationResult& operation,
 }
 } // namespace
 
+CameraLineInputAggregateState aggregate_line_input_state(
+    const std::vector<CameraClientItem>& cameras) noexcept
+{
+    bool any_enabled{};
+    bool any_active{};
+    bool active_stale{};
+    bool any_unknown{};
+    for (const auto& camera : cameras)
+    {
+        if (!camera.saved.line_io.alarm_input_enabled)
+            continue;
+        any_enabled = true;
+        if (!camera.line_input)
+        {
+            any_unknown = true;
+            continue;
+        }
+        if (camera.line_input->alarm_active)
+        {
+            any_active = true;
+            active_stale = active_stale || camera.line_input->stale;
+        }
+        else if (camera.line_input->stale)
+            any_unknown = true;
+    }
+    if (!any_enabled)
+        return CameraLineInputAggregateState::all_disabled;
+    if (any_active)
+        return active_stale ? CameraLineInputAggregateState::active_stale
+                            : CameraLineInputAggregateState::active;
+    if (any_unknown)
+        return CameraLineInputAggregateState::partially_unknown;
+    return CameraLineInputAggregateState::all_known_inactive;
+}
+
 CameraClient::CameraClient(CameraClientObserver observer, ipc::IpcClientOptions options,
                            const std::chrono::milliseconds control_operation_timeout)
     : observer_(std::move(observer)),
       client_(std::make_unique<ipc::IpcClient>(
           ipc::IpcClientCallbacks{
-              .connection_changed = [this](const auto& value) { connection_changed(value); }},
+              .connection_changed = [this](const auto& value) { connection_changed(value); },
+              .push_received = [this](const std::uint64_t generation,
+                                      const auto& push) { push_received(generation, push); }},
           std::move(options))),
       reconciliation_timer_(std::make_unique<QTimer>()),
       control_operation_timeout_(control_operation_timeout > std::chrono::milliseconds::zero()
@@ -233,6 +326,9 @@ void CameraClient::stop() noexcept
     list_request_.reset();
     operation_request_.reset();
     snapshot_.stale = true;
+    for (auto& camera : snapshot_.cameras)
+        if (camera.line_input)
+            camera.line_input->stale = true;
     notify();
 }
 
@@ -245,6 +341,9 @@ void CameraClient::connection_changed(const ipc::ClientConnectionSnapshot& conne
 {
     snapshot_.connection = connection;
     snapshot_.stale = true;
+    for (auto& camera : snapshot_.cameras)
+        if (camera.line_input)
+            camera.line_input->stale = true;
     if (connection.state != ipc::ClientConnectionState::connected)
     {
         reconciliation_timer_->stop();
@@ -262,6 +361,38 @@ void CameraClient::connection_changed(const ipc::ClientConnectionSnapshot& conne
         refresh();
         static_cast<void>(discover());
     }
+    notify();
+}
+
+void CameraClient::push_received(const std::uint64_t generation, const ipc::PushMessage& push)
+{
+    if (generation != snapshot_.connection.generation ||
+        snapshot_.connection.state != ipc::ClientConnectionState::connected ||
+        push.event_name != "camera.lineInputChanged")
+        return;
+    const Json value = Json::parse(push.payload_json, nullptr, false);
+    if (value.is_discarded() || !value.is_object() || value.size() != 5U ||
+        !value.contains("cameraId") || !value["cameraId"].is_string() ||
+        !value.contains("rawLevel") || !value["rawLevel"].is_boolean() ||
+        !value.contains("alarmActive") || !value["alarmActive"].is_boolean() ||
+        !value.contains("revision") || !value["revision"].is_number_unsigned() ||
+        !value.contains("timestampUtcMs") || !value["timestampUtcMs"].is_number_integer())
+        return;
+    const auto camera_id = value["cameraId"].get<std::string>();
+    const auto camera = std::ranges::find_if(
+        snapshot_.cameras, [&](const auto& item) { return item.id == camera_id; });
+    if (camera == snapshot_.cameras.end())
+        return;
+    const auto revision = value["revision"].get<std::uint64_t>();
+    if (camera->line_input && revision <= camera->line_input->revision)
+        return;
+    camera->line_input = {.enabled = true,
+                          .raw_level = value["rawLevel"].get<bool>(),
+                          .alarm_active = value["alarmActive"].get<bool>(),
+                          .revision = revision,
+                          .timestamp_utc_ms = value["timestampUtcMs"].get<std::int64_t>(),
+                          .stale = false,
+                          .connection_generation = generation};
     notify();
 }
 
@@ -348,6 +479,48 @@ void CameraClient::list_completed(ipc::ClientRequestHandle handle,
             snapshot_.stale = true;
             notify();
             return;
+        }
+        if (item.contains("lineInput"))
+        {
+            const auto& line = item["lineInput"];
+            if (!line.is_object() || !line.contains("enabled") || !line["enabled"].is_boolean() ||
+                !line.contains("rawLevel") || !line["rawLevel"].is_boolean() ||
+                !line.contains("alarmActive") || !line["alarmActive"].is_boolean() ||
+                !line.contains("revision") || !line["revision"].is_number_unsigned() ||
+                !line.contains("timestampUtcMs") || !line["timestampUtcMs"].is_number_integer() ||
+                !line.contains("stale") || !line["stale"].is_boolean())
+            {
+                snapshot_.error = protocol_error("camera.list Line 0 状态结构无效");
+                snapshot_.stale = true;
+                notify();
+                return;
+            }
+            CameraLineInputValue parsed{.enabled = line["enabled"].get<bool>(),
+                                        .raw_level = line["rawLevel"].get<bool>(),
+                                        .alarm_active = line["alarmActive"].get<bool>(),
+                                        .revision = line["revision"].get<std::uint64_t>(),
+                                        .timestamp_utc_ms =
+                                            line["timestampUtcMs"].get<std::int64_t>(),
+                                        .stale = line["stale"].get<bool>(),
+                                        .connection_generation = handle.generation};
+            const auto previous = std::ranges::find_if(
+                snapshot_.cameras, [&](const auto& existing) { return existing.id == value.id; });
+            if (previous != snapshot_.cameras.end() && previous->line_input &&
+                previous->line_input->connection_generation == handle.generation &&
+                previous->line_input->revision > parsed.revision)
+                value.line_input = previous->line_input;
+            else
+                value.line_input = parsed;
+        }
+        else
+        {
+            const auto previous = std::ranges::find_if(
+                snapshot_.cameras, [&](const auto& existing) { return existing.id == value.id; });
+            if (previous != snapshot_.cameras.end() && previous->line_input)
+            {
+                value.line_input = previous->line_input;
+                value.line_input->stale = true;
+            }
         }
         items.push_back(std::move(value));
     }

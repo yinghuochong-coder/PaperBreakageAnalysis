@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace
@@ -257,7 +258,7 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json status_json = Json::parse(status.value().payload_json);
     EXPECT_EQ(status_json.at("serviceState"), "running");
     EXPECT_TRUE(status_json.at("acceptingWrites").get<bool>());
-    EXPECT_EQ(status_json.at("configSchemaVersion"), 2);
+    EXPECT_EQ(status_json.at("configSchemaVersion"), 3);
     EXPECT_EQ(status_json.at("storedConfigRevision"), 1);
     EXPECT_FALSE(status_json.at("machineId").get<std::string>().empty());
     EXPECT_EQ(status_json.at("loggingLevel"), "info");
@@ -382,7 +383,14 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
                       {"triggerSource", "Off"},
                       {"triggerDelayUs", 0},
                       {"packetSizeBytes", 1500},
-                      {"interPacketDelayNs", 0}}});
+                      {"interPacketDelayNs", 0},
+                      {"lineIo",
+                       {{"alarmInputEnabled", false},
+                        {"alarmActiveLevel", "High"},
+                        {"strobeOutputEnabled", false},
+                        {"strobeDurationUs", 0},
+                        {"strobePreDelayUs", 0},
+                        {"strobePostDelayUs", 0}}}}});
     document["acquisition"]["framePoolCapacity"] = 128U;
     document["preview"]["enabled"] = false;
     document["event"]["preEventSeconds"] = 1U;
@@ -818,7 +826,14 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
                       {"triggerSource", ""},
                       {"triggerDelayUs", 0},
                       {"packetSizeBytes", 1500},
-                      {"interPacketDelayNs", 0}}});
+                      {"interPacketDelayNs", 0},
+                      {"lineIo",
+                       {{"alarmInputEnabled", false},
+                        {"alarmActiveLevel", "High"},
+                        {"strobeOutputEnabled", false},
+                        {"strobeDurationUs", 0},
+                        {"strobePreDelayUs", 0},
+                        {"strobePostDelayUs", 0}}}}});
     ASSERT_TRUE(
         fixture.repository.update(document.dump(), 1U,
                                   {.source = paperbreak::config::ConfigChangeSource::local_ipc,
@@ -834,8 +849,10 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
           .height = 48U,
           .frame_rate = 30.0}});
     ASSERT_TRUE(provider);
-    std::shared_ptr<paperbreak::camera::ICameraProvider> shared_provider{
-        std::move(provider).value()};
+    auto mock_provider = std::move(provider).value();
+    auto mock_control = mock_provider->control("MOCK-01");
+    ASSERT_TRUE(mock_control);
+    std::shared_ptr<paperbreak::camera::ICameraProvider> shared_provider{std::move(mock_provider)};
     auto runtime = std::make_shared<paperbreak::camera::CameraControlRuntime>(shared_provider);
     paperbreak::service::SystemCommandService commands{fixture.repository,
                                                        fixture.status,
@@ -885,6 +902,10 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     EXPECT_EQ(connected_json["capabilities"]["roi"]["sensorWidth"], 64U);
     EXPECT_EQ(connected_json["capabilities"]["roi"]["sensorHeight"], 48U);
     EXPECT_EQ(connected_json["capabilities"]["roi"]["offsetY"]["increment"], 1U);
+    EXPECT_TRUE(connected_json["capabilities"]["lineIo"]["alarmInputSupported"].get<bool>());
+    EXPECT_TRUE(connected_json["capabilities"]["lineIo"]["risingEdgeSupported"].get<bool>());
+    EXPECT_TRUE(connected_json["capabilities"]["lineIo"]["fallingEdgeSupported"].get<bool>());
+    EXPECT_EQ(connected_json["capabilities"]["lineIo"]["strobeDurationUs"]["minimum"], 1U);
     auto readback =
         commands.handle(fixture.request("camera.getConfig", R"({"cameraId":"CAM01"})"), reader, {});
     ASSERT_TRUE(readback);
@@ -926,6 +947,48 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     ASSERT_TRUE(unchanged);
     EXPECT_EQ(Json::parse(unchanged.value().payload_json)["actual"]["roi"]["width"], 64U);
 
+    auto line_io = commands.handle(
+        fixture.request(
+            "camera.updateConfig",
+            R"({"cameraId":"CAM01","expectedConfigRevision":4,"parameters":{"lineIo":{"alarmInputEnabled":true,"alarmActiveLevel":"Low","strobeOutputEnabled":true,"strobeDurationUs":100,"strobePreDelayUs":10,"strobePostDelayUs":20}}})"),
+        reader, {});
+    ASSERT_TRUE(line_io) << line_io.error().message;
+    const Json line_io_json = Json::parse(line_io.value().payload_json);
+    EXPECT_TRUE(line_io_json["actual"]["lineIo"]["alarmInputEnabled"].get<bool>());
+    EXPECT_EQ(line_io_json["actual"]["lineIo"]["strobeDurationUs"], 100U);
+    ASSERT_TRUE(mock_control.value().set_line_input(false));
+    Json low_active;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    do
+    {
+        const auto polled = commands.handle(fixture.request("camera.list"), reader, {});
+        ASSERT_TRUE(polled);
+        low_active = Json::parse(polled.value().payload_json)["cameras"][0];
+        if (low_active.contains("lineInput") && low_active["lineInput"]["revision"] == 1U)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    } while (std::chrono::steady_clock::now() < deadline);
+    ASSERT_TRUE(low_active.contains("lineInput"));
+    EXPECT_FALSE(low_active["lineInput"]["rawLevel"].get<bool>());
+    EXPECT_TRUE(low_active["lineInput"]["alarmActive"].get<bool>());
+    EXPECT_FALSE(low_active["lineInput"]["stale"].get<bool>());
+
+    ASSERT_TRUE(mock_control.value().set_line_input(true));
+    const auto high_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    Json high_inactive;
+    do
+    {
+        const auto polled = commands.handle(fixture.request("camera.list"), reader, {});
+        ASSERT_TRUE(polled);
+        high_inactive = Json::parse(polled.value().payload_json)["cameras"][0];
+        if (high_inactive.contains("lineInput") && high_inactive["lineInput"]["revision"] == 2U)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    } while (std::chrono::steady_clock::now() < high_deadline);
+    ASSERT_TRUE(high_inactive.contains("lineInput"));
+    EXPECT_TRUE(high_inactive["lineInput"]["rawLevel"].get<bool>());
+    EXPECT_FALSE(high_inactive["lineInput"]["alarmActive"].get<bool>());
+
     ASSERT_TRUE(
         commands.handle(fixture.request("camera.start", R"({"cameraId":"CAM01"})"), reader, {}));
     ASSERT_TRUE(commands.handle(
@@ -946,12 +1009,12 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     auto invalid_update = commands.handle(
         fixture.request(
             "camera.updateConfig",
-            R"({"cameraId":"CAM01","expectedConfigRevision":4,"parameters":{"frameRate":0.0}})"),
+            R"({"cameraId":"CAM01","expectedConfigRevision":5,"parameters":{"frameRate":0.0}})"),
         reader, {});
     ASSERT_FALSE(invalid_update);
     EXPECT_EQ(invalid_update.error().business_code, "SYS_CONFIG_INVALID");
     ASSERT_TRUE(fixture.repository.snapshot());
-    EXPECT_EQ(fixture.repository.snapshot().value().stored_config_revision, 4U);
+    EXPECT_EQ(fixture.repository.snapshot().value().stored_config_revision, 5U);
     std::stop_source stopped;
     stopped.request_stop();
     auto stopping = commands.handle(fixture.request("camera.connect", R"({"cameraId":"CAM01"})"),
@@ -980,7 +1043,14 @@ TEST(SystemCommand, KeepsCameraConnectedWhenSavedParametersDoNotMatchDeviceCapab
                       {"triggerSource", ""},
                       {"triggerDelayUs", 0},
                       {"packetSizeBytes", 1500},
-                      {"interPacketDelayNs", 0}}});
+                      {"interPacketDelayNs", 0},
+                      {"lineIo",
+                       {{"alarmInputEnabled", false},
+                        {"alarmActiveLevel", "High"},
+                        {"strobeOutputEnabled", false},
+                        {"strobeDurationUs", 0},
+                        {"strobePreDelayUs", 0},
+                        {"strobePostDelayUs", 0}}}}});
     ASSERT_TRUE(
         fixture.repository.update(document.dump(), 1U,
                                   {.source = paperbreak::config::ConfigChangeSource::local_ipc,

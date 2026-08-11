@@ -3,7 +3,9 @@
 #include "paperbreak/camera/acquisition.hpp"
 #include "paperbreak/camera/camera.hpp"
 
+#include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -11,11 +13,13 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace paperbreak::camera
 {
 using CameraFrameObserver = std::function<void(FrameView)>;
+using CameraLineInputObserver = std::function<void(std::string_view, const LineInputEvent&)>;
 
 struct CameraFrameDeliveryOptions final
 {
@@ -48,7 +52,8 @@ class CameraControlRuntime final
   public:
     explicit CameraControlRuntime(std::shared_ptr<ICameraProvider> provider = {},
                                   CameraFrameObserver frame_observer = {},
-                                  CameraFrameDeliveryOptions delivery_options = {});
+                                  CameraFrameDeliveryOptions delivery_options = {},
+                                  CameraLineInputObserver line_input_observer = {});
     ~CameraControlRuntime();
     CameraControlRuntime(const CameraControlRuntime&) = delete;
     [[nodiscard]] Result<std::vector<CameraDeviceDescriptor>> discover();
@@ -72,9 +77,19 @@ class CameraControlRuntime final
     [[nodiscard]] Result<void> start_frame_delivery(Session& session);
     [[nodiscard]] Result<void> stop_frame_delivery(Session& session);
     void forward_frames(Session& session, std::stop_token stop_token) noexcept;
+    void enqueue_line_input(std::size_t slot, bool raw_level,
+                            std::int64_t timestamp_utc_ms) noexcept;
+    void dispatch_line_inputs(std::stop_token stop_token) noexcept;
     std::shared_ptr<ICameraProvider> provider_;
     CameraFrameObserver frame_observer_;
     CameraFrameDeliveryOptions delivery_options_;
+    CameraLineInputObserver line_input_observer_;
+    std::mutex line_input_mutex_;
+    std::condition_variable_any line_input_condition_;
+    std::array<std::optional<LineInputEvent>, 4U> line_input_slots_{};
+    std::array<std::uint64_t, 4U> line_input_revisions_{};
+    std::array<std::string, 4U> line_input_camera_ids_{};
+    std::jthread line_input_dispatcher_;
     std::mutex mutex_;
     std::vector<std::unique_ptr<Session>> sessions_;
 };

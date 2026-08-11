@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace paperbreak::camera::hikrobot::detail
@@ -53,10 +54,12 @@ struct FakeContext final
     MV_FRAME_OUT_INFO_EX frame_info{};
     std::vector<unsigned char> frame_payload;
     std::vector<std::string> calls;
+    std::vector<std::pair<std::string, unsigned int>> enum_writes;
     std::unordered_map<std::string, FloatNode> floats;
     std::unordered_map<std::string, IntegerNode> integers;
     std::unordered_map<std::string, EnumNode> enumerations;
     std::unordered_map<std::string, bool> booleans;
+    std::unordered_map<std::string, std::pair<MvEventCallback, void*>> event_callbacks;
     std::unordered_map<std::string, float> forced_float_readback;
     std::string fail_get_node;
     int fail_get_code{MV_OK};
@@ -252,6 +255,7 @@ int __stdcall fake_set_enum(void*, const char* node, const unsigned int value)
 {
     auto& state = context();
     state.calls.emplace_back("sete:" + std::string{node});
+    state.enum_writes.emplace_back(node, value);
     if (const int code = maybe_fail_set(node); code != MV_OK)
         return code;
     const auto found = state.enumerations.find(node);
@@ -259,6 +263,13 @@ int __stdcall fake_set_enum(void*, const char* node, const unsigned int value)
         return MV_E_SUPPORT;
     found->second.current = value;
     return MV_OK;
+}
+
+int __stdcall fake_set_enum_by_string(void*, const char* node, const char* value)
+{
+    auto& state = context();
+    state.calls.emplace_back("setes:" + std::string{node} + "=" + value);
+    return maybe_fail_set(node);
 }
 
 int __stdcall fake_get_bool(void*, const char* node, bool* value)
@@ -294,6 +305,30 @@ int __stdcall fake_set_command(void*, const char* node)
     return state.command_code;
 }
 
+int __stdcall fake_register_event(void*, const char* event, MvEventCallback callback, void* user)
+{
+    auto& state = context();
+    state.calls.emplace_back("register:" + std::string{event});
+    if (const int code = maybe_fail_set(event); code != MV_OK)
+        return code;
+    state.event_callbacks[event] = {callback, user};
+    return MV_OK;
+}
+
+int __stdcall fake_event_on(void*, const char* event)
+{
+    auto& state = context();
+    state.calls.emplace_back("event-on:" + std::string{event});
+    return maybe_fail_set(event);
+}
+
+int __stdcall fake_event_off(void*, const char* event)
+{
+    auto& state = context();
+    state.calls.emplace_back("event-off:" + std::string{event});
+    return maybe_fail_set(event);
+}
+
 const MvsApi fake_api{.get_sdk_version = &fake_sdk_version,
                       .enumerate_devices = &fake_enumerate,
                       .is_device_accessible = &fake_is_accessible,
@@ -310,9 +345,13 @@ const MvsApi fake_api{.get_sdk_version = &fake_sdk_version,
                       .set_int_value = &fake_set_int,
                       .get_enum_value = &fake_get_enum,
                       .set_enum_value = &fake_set_enum,
+                      .set_enum_value_by_string = &fake_set_enum_by_string,
                       .get_bool_value = &fake_get_bool,
                       .set_bool_value = &fake_set_bool,
-                      .set_command_value = &fake_set_command};
+                      .set_command_value = &fake_set_command,
+                      .register_event_callback = &fake_register_event,
+                      .event_notification_on = &fake_event_on,
+                      .event_notification_off = &fake_event_off};
 
 class MvsLifecycleTest : public testing::Test
 {
@@ -372,6 +411,17 @@ void configure_parameter_nodes(FakeContext& state)
         {"TriggerSource", {0U, {0U, 7U}}}};
     state.booleans = {
         {"ReverseX", false}, {"ReverseY", true}, {"AcquisitionFrameRateEnable", false}};
+}
+
+void configure_line_io_nodes(FakeContext& state)
+{
+    state.enumerations["LineSelector"] = {0U, {0U, 1U}};
+    state.enumerations["LineMode"] = {0U, {0U, 8U}};
+    state.floats["StrobeLineDuration"] = {0.0F, 1.0F, 1000000.0F};
+    state.floats["StrobeLinePreDelay"] = {0.0F, 0.0F, 100000.0F};
+    state.floats["StrobeLineDelay"] = {0.0F, 0.0F, 100000.0F};
+    state.booleans["LineStatus"] = false;
+    state.booleans["StrobeEnable"] = false;
 }
 
 TEST_F(MvsLifecycleTest, DeviceListOwnsBoundedSdkListValue)
@@ -756,6 +806,155 @@ TEST_F(MvsLifecycleTest, MapsAndReadsWritableDigitalOutput)
     EXPECT_EQ(applied.value().digital_io.front(), (DigitalIoState{"Line1", true}));
 }
 
+TEST_F(MvsLifecycleTest, MapsLineZeroEventsAndLineOneStrobeRangesAndReadback)
+{
+    configure_parameter_nodes(context_);
+    configure_line_io_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+
+    const auto capabilities = handle.capabilities();
+    ASSERT_TRUE(capabilities) << capabilities.error().message;
+    EXPECT_TRUE(capabilities.value().line_io.alarm_input_supported);
+    EXPECT_TRUE(capabilities.value().line_io.line0_rising_edge_supported);
+    EXPECT_TRUE(capabilities.value().line_io.line0_falling_edge_supported);
+    EXPECT_TRUE(capabilities.value().line_io.strobe_output_supported);
+    ASSERT_TRUE(capabilities.value().line_io.strobe_duration_us);
+    EXPECT_EQ(capabilities.value().line_io.strobe_duration_us->minimum, 1U);
+    EXPECT_EQ(capabilities.value().line_io.strobe_duration_us->maximum, 1000000U);
+    ASSERT_TRUE(capabilities.value().line_io.strobe_pre_delay_us);
+    EXPECT_EQ(capabilities.value().line_io.strobe_pre_delay_us->minimum, 0U);
+
+    std::vector<bool> levels;
+    handle.set_line_input_observer(
+        [&](const LineInputEvent& event) { levels.push_back(event.raw_level); });
+    context_.calls.clear();
+    const auto applied =
+        handle.apply_parameters({.line_io = LineIoParameters{.alarm_input_enabled = true,
+                                                             .strobe_output_enabled = true,
+                                                             .strobe_duration_us = 250U,
+                                                             .strobe_pre_delay_us = 10U,
+                                                             .strobe_post_delay_us = 20U}});
+
+    ASSERT_TRUE(applied) << applied.error().message;
+    ASSERT_TRUE(applied.value().line_io);
+    EXPECT_TRUE(applied.value().line_io->alarm_input_enabled);
+    EXPECT_TRUE(applied.value().line_io->strobe_output_enabled);
+    EXPECT_EQ(applied.value().line_io->strobe_duration_us, 250U);
+    EXPECT_EQ(applied.value().line_io->strobe_pre_delay_us, 10U);
+    EXPECT_EQ(applied.value().line_io->strobe_post_delay_us, 20U);
+    EXPECT_NE(
+        std::find(context_.calls.begin(), context_.calls.end(), "register:EventLine0RisingEdge"),
+        context_.calls.end());
+    EXPECT_NE(
+        std::find(context_.calls.begin(), context_.calls.end(), "event-on:EventLine0FallingEdge"),
+        context_.calls.end());
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(),
+                        "setes:LineSource=ExposureStartActive"),
+              context_.calls.end());
+    EXPECT_NE(std::find(context_.enum_writes.begin(), context_.enum_writes.end(),
+                        std::pair<std::string, unsigned int>{"LineMode", 8U}),
+              context_.enum_writes.end());
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "setf:StrobeLineDuration"),
+              context_.calls.end());
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "setf:StrobeLinePreDelay"),
+              context_.calls.end());
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "setf:StrobeLineDelay"),
+              context_.calls.end());
+
+    MV_EVENT_OUT_INFO rising{};
+    constexpr char rising_name[] = "EventLine0RisingEdge";
+    std::memcpy(rising.EventName, rising_name, sizeof(rising_name));
+    const auto rising_callback = context_.event_callbacks.at("EventLine0RisingEdge");
+    EXPECT_NO_THROW(rising_callback.first(&rising, rising_callback.second));
+    MV_EVENT_OUT_INFO falling{};
+    constexpr char falling_name[] = "EventLine0FallingEdge";
+    std::memcpy(falling.EventName, falling_name, sizeof(falling_name));
+    const auto falling_callback = context_.event_callbacks.at("EventLine0FallingEdge");
+    EXPECT_NO_THROW(falling_callback.first(&falling, falling_callback.second));
+    EXPECT_EQ(levels, (std::vector<bool>{true, false}));
+}
+
+TEST_F(MvsLifecycleTest, LineIoFailureRollsBackEventsAndStrobeState)
+{
+    configure_parameter_nodes(context_);
+    configure_line_io_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.fail_set_node = "StrobeLineDuration";
+    context_.fail_set_code = MV_E_PARAMETER_RANGE;
+    context_.fail_set_remaining = 1U;
+
+    const auto applied =
+        handle.apply_parameters({.line_io = LineIoParameters{.alarm_input_enabled = true,
+                                                             .strobe_output_enabled = true,
+                                                             .strobe_duration_us = 250U}});
+
+    ASSERT_FALSE(applied);
+    EXPECT_EQ(applied.error().business_code, "CAMERA_PARAMETER_WRITE_FAILED");
+    const auto restored = handle.read_parameters();
+    ASSERT_TRUE(restored) << restored.error().message;
+    ASSERT_TRUE(restored.value().line_io);
+    EXPECT_FALSE(restored.value().line_io->alarm_input_enabled);
+    EXPECT_FALSE(restored.value().line_io->strobe_output_enabled);
+    EXPECT_FLOAT_EQ(context_.floats.at("StrobeLineDuration").current, 0.0F);
+    EXPECT_NE(
+        std::find(context_.calls.begin(), context_.calls.end(), "event-off:EventLine0RisingEdge"),
+        context_.calls.end());
+}
+
+TEST_F(MvsLifecycleTest, LineEventRegistrationFailureReturnsStableCameraError)
+{
+    configure_parameter_nodes(context_);
+    configure_line_io_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.fail_set_node = "EventLine0RisingEdge";
+    context_.fail_set_code = MV_E_GC_ACCESS;
+    context_.fail_set_remaining = 1U;
+
+    const auto applied =
+        handle.apply_parameters({.line_io = LineIoParameters{.alarm_input_enabled = true}});
+
+    ASSERT_FALSE(applied);
+    EXPECT_EQ(applied.error().business_code, "CAMERA_PARAMETER_WRITE_FAILED");
+    EXPECT_EQ(applied.error().native_domain, "hikrobot-mvs");
+    EXPECT_EQ(applied.error().native_code, "0x80000106");
+    const auto restored = handle.read_parameters();
+    ASSERT_TRUE(restored);
+    ASSERT_TRUE(restored.value().line_io);
+    EXPECT_FALSE(restored.value().line_io->alarm_input_enabled);
+}
+
+TEST_F(MvsLifecycleTest, CloseDisablesLineEventsBeforeStoppingAndClosingDevice)
+{
+    configure_parameter_nodes(context_);
+    configure_line_io_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    ASSERT_TRUE(
+        handle.apply_parameters({.line_io = LineIoParameters{.alarm_input_enabled = true}}));
+    auto streaming = handle.start_streaming();
+    ASSERT_TRUE(streaming);
+    context_.calls.clear();
+
+    ASSERT_TRUE(handle.close());
+
+    const auto event_off =
+        std::find(context_.calls.begin(), context_.calls.end(), "event-off:EventLine0FallingEdge");
+    const auto stop = std::find(context_.calls.begin(), context_.calls.end(), "stop");
+    const auto close = std::find(context_.calls.begin(), context_.calls.end(), "close");
+    ASSERT_NE(event_off, context_.calls.end());
+    ASSERT_NE(stop, context_.calls.end());
+    ASSERT_NE(close, context_.calls.end());
+    EXPECT_LT(event_off, stop);
+    EXPECT_LT(stop, close);
+}
+
 TEST_F(MvsLifecycleTest, SoftwareTriggerChecksActualModeAndExecutesCommand)
 {
     configure_parameter_nodes(context_);
@@ -1008,6 +1207,28 @@ TEST(MvsCallbackBoundaryTest, CatchesStandardAndUnknownExceptions)
 
     EXPECT_EQ(standard_boundary.diagnostics().last_failure, CallbackFailure::standard_exception);
     EXPECT_EQ(unknown_boundary.diagnostics().last_failure, CallbackFailure::unknown_exception);
+}
+
+TEST(MvsCallbackBoundaryTest, LineEventBoundaryParsesEdgesAndContainsExceptions)
+{
+    std::vector<bool> levels;
+    LineEventCallbackBoundary boundary{[&](const bool level) { levels.push_back(level); }};
+    MV_EVENT_OUT_INFO rising{};
+    constexpr char rising_name[] = "EventLine0RisingEdge";
+    std::memcpy(rising.EventName, rising_name, sizeof(rising_name));
+    MV_EVENT_OUT_INFO falling{};
+    constexpr char falling_name[] = "EventLine0FallingEdge";
+    std::memcpy(falling.EventName, falling_name, sizeof(falling_name));
+    EXPECT_NO_THROW(line_event_callback_trampoline(&rising, &boundary));
+    EXPECT_NO_THROW(line_event_callback_trampoline(&falling, &boundary));
+    EXPECT_EQ(levels, (std::vector<bool>{true, false}));
+    EXPECT_EQ(boundary.diagnostics().failures, 0U);
+
+    LineEventCallbackBoundary throwing{[](const bool) { throw std::runtime_error{"test"}; }};
+    EXPECT_NO_THROW(line_event_callback_trampoline(&rising, &throwing));
+    EXPECT_EQ(throwing.diagnostics().last_failure, CallbackFailure::standard_exception);
+    EXPECT_NO_THROW(line_event_callback_trampoline(nullptr, &throwing));
+    EXPECT_EQ(throwing.diagnostics().failures, 2U);
 }
 
 TEST(MvsSdkSmokeTest, ApprovedRuntimeVersionIsLoaded)

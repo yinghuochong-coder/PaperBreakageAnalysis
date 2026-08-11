@@ -171,7 +171,7 @@ TEST(BasicConfig, AcceptsCompleteVersionTwoAtUnicodeAndSpacePath)
     const auto path = directory.write("纸机 配置.json", valid_config());
     const auto result = paperbreak::config::validate_basic_config(path);
     ASSERT_TRUE(result) << result.error().message;
-    EXPECT_EQ(result.value().schema_version, 2U);
+    EXPECT_EQ(result.value().schema_version, 3U);
     EXPECT_EQ(result.value().config_revision, 1U);
 }
 
@@ -198,6 +198,61 @@ TEST(BasicConfig, DefaultsLegacyCameraMirroringOffAndSerializesExplicitValues)
     EXPECT_NE(serialized.find("\"reverseY\": true"), std::string::npos);
 }
 
+TEST(BasicConfig, MigratesVersionTwoCameraLineIoToSafeVersionThreeDefaults)
+{
+    const TemporaryDirectory directory;
+    const auto contents = replace_once(
+        valid_config(), "\"cameras\": []",
+        R"("cameras": [{"id":"CAM01","enabled":true,"serialNumber":"MOCK-01","location":"入口","exposureUs":321.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}])");
+    const auto parsed = paperbreak::config::parse_config(contents, directory.path());
+    ASSERT_TRUE(parsed) << parsed.error().message;
+    ASSERT_EQ(parsed.value().cameras.size(), 1U);
+    const auto& camera = parsed.value().cameras.front();
+    EXPECT_EQ(parsed.value().config_schema_version, 3U);
+    EXPECT_DOUBLE_EQ(camera.exposure_us, 321.0);
+    EXPECT_FALSE(camera.line_io.alarm_input_enabled);
+    EXPECT_EQ(camera.line_io.alarm_active_level, paperbreak::config::AlarmActiveLevel::high);
+    EXPECT_FALSE(camera.line_io.strobe_output_enabled);
+    EXPECT_EQ(camera.line_io.strobe_duration_us, 0U);
+    EXPECT_EQ(camera.line_io.strobe_pre_delay_us, 0U);
+    EXPECT_EQ(camera.line_io.strobe_post_delay_us, 0U);
+
+    const auto serialized = paperbreak::config::serialize_config(parsed.value());
+    EXPECT_NE(serialized.find("\"configSchemaVersion\": 3"), std::string::npos);
+    EXPECT_NE(serialized.find("\"lineIo\""), std::string::npos);
+}
+
+TEST(BasicConfig, StrictlyValidatesVersionThreeLineIoAndDependencies)
+{
+    const TemporaryDirectory directory;
+    const auto legacy = replace_once(
+        valid_config(), "\"cameras\": []",
+        R"("cameras": [{"id":"CAM01","enabled":true,"serialNumber":"MOCK-01","location":"入口","exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}])");
+    const auto migrated = paperbreak::config::parse_config(legacy, directory.path());
+    ASSERT_TRUE(migrated);
+    const auto version_three = paperbreak::config::serialize_config(migrated.value());
+
+    const auto low = replace_once(version_three, "\"alarmActiveLevel\": \"High\"",
+                                  "\"alarmActiveLevel\": \"Low\"");
+    const auto low_result = paperbreak::config::parse_config(low, directory.path());
+    ASSERT_TRUE(low_result) << low_result.error().message;
+    EXPECT_EQ(low_result.value().cameras.front().line_io.alarm_active_level,
+              paperbreak::config::AlarmActiveLevel::low);
+
+    const auto missing = replace_once(version_three, "\"alarmInputEnabled\": false,\n", "");
+    EXPECT_FALSE(paperbreak::config::parse_config(missing, directory.path()));
+    const auto unknown = replace_once(version_three, "\"alarmInputEnabled\": false,",
+                                      "\"alarmInputEnabled\": false, \"extra\": 1,");
+    EXPECT_FALSE(paperbreak::config::parse_config(unknown, directory.path()));
+    const auto disabled_camera =
+        replace_once(replace_once(version_three, "\"enabled\": true", "\"enabled\": false"),
+                     "\"alarmInputEnabled\": false", "\"alarmInputEnabled\": true");
+    EXPECT_FALSE(paperbreak::config::parse_config(disabled_camera, directory.path()));
+    const auto zero_duration = replace_once(version_three, "\"strobeOutputEnabled\": false",
+                                            "\"strobeOutputEnabled\": true");
+    EXPECT_FALSE(paperbreak::config::parse_config(zero_duration, directory.path()));
+}
+
 TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
 {
     const TemporaryDirectory directory;
@@ -210,7 +265,7 @@ TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
     const auto malformed = directory.write("truncated.json", R"({"configSchemaVersion":1)");
     const auto future =
         directory.write("future.json", replace_once(valid_config(), "\"configSchemaVersion\": 2",
-                                                    "\"configSchemaVersion\": 3"));
+                                                    "\"configSchemaVersion\": 4"));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(unknown));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(sensitive));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(malformed));

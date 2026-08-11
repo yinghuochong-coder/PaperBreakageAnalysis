@@ -41,6 +41,39 @@ struct CameraRoiCapabilitiesValue final
     CameraIntegerRangeValue offset_y;
 };
 
+struct CameraLineIoValue final
+{
+    bool alarm_input_enabled{};
+    std::string alarm_active_level{"High"};
+    bool strobe_output_enabled{};
+    std::uint32_t strobe_duration_us{};
+    std::uint32_t strobe_pre_delay_us{};
+    std::uint32_t strobe_post_delay_us{};
+};
+
+struct CameraLineIoCapabilitiesValue final
+{
+    bool alarm_input_supported{};
+    bool rising_edge_supported{};
+    bool falling_edge_supported{};
+    bool strobe_output_supported{};
+    std::optional<CameraIntegerRangeValue> strobe_duration_us;
+    std::optional<CameraIntegerRangeValue> strobe_pre_delay_us;
+    std::optional<CameraIntegerRangeValue> strobe_post_delay_us;
+    std::string unsupported_reason;
+};
+
+struct CameraLineInputValue final
+{
+    bool enabled{};
+    bool raw_level{};
+    bool alarm_active{};
+    std::uint64_t revision{};
+    std::int64_t timestamp_utc_ms{};
+    bool stale{true};
+    std::uint64_t connection_generation{};
+};
+
 struct CameraParameterValue final
 {
     std::optional<double> exposure_us;
@@ -55,6 +88,8 @@ struct CameraParameterValue final
     std::optional<std::uint32_t> trigger_delay_us;
     std::optional<std::uint32_t> packet_size_bytes;
     std::optional<std::uint32_t> inter_packet_delay_ns;
+    CameraLineIoValue line_io;
+    bool line_io_available{};
 };
 
 struct CameraClientItem final
@@ -70,6 +105,8 @@ struct CameraClientItem final
     CameraParameterValue saved;
     CameraParameterValue actual;
     std::optional<CameraRoiCapabilitiesValue> roi_capabilities;
+    std::optional<CameraLineIoCapabilitiesValue> line_io_capabilities;
+    std::optional<CameraLineInputValue> line_input;
 };
 
 struct CameraDiscoveredDevice final
@@ -108,6 +145,18 @@ struct CameraClientSnapshot final
     std::optional<CameraOperationResult> operation;
 };
 
+enum class CameraLineInputAggregateState
+{
+    all_disabled,
+    all_known_inactive,
+    partially_unknown,
+    active,
+    active_stale,
+};
+
+[[nodiscard]] CameraLineInputAggregateState aggregate_line_input_state(
+    const std::vector<CameraClientItem>& cameras) noexcept;
+
 using CameraClientObserver = std::function<void(const CameraClientSnapshot&)>;
 
 class CameraClient final
@@ -133,6 +182,7 @@ class CameraClient final
 
   private:
     void connection_changed(const ipc::ClientConnectionSnapshot& connection);
+    void push_received(std::uint64_t generation, const ipc::PushMessage& push);
     void list_completed(ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result);
     [[nodiscard]] Result<void> send_operation(std::string command, std::string camera_id,
                                               std::string payload_json);

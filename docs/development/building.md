@@ -80,7 +80,7 @@ PaperBreakEdgeService.exe --install --config '<config.json>'
 PaperBreakEdgeService.exe --uninstall
 ```
 
-`--validate-config` 执行完整 schema v2 校验：配置文件必须不超过 1 MiB，必须是合法 UTF-8 JSON 对象，并通过强类型、有限范围、未知/敏感字段、跨字段依赖和路径安全校验。根版本字段为 `configSchemaVersion`、`configRevision` 和 `modifiedAt`；完整格式、热应用/待重启分类及默认值见 `docs/config-schema.md`。配置路径必须显式传入，尚未固化生产环境默认路径。
+`--validate-config` 执行完整 schema v3 校验并支持 v2 安全迁移：配置文件必须不超过 1 MiB，必须是合法 UTF-8 JSON 对象，并通过强类型、有限范围、未知/敏感字段、跨字段依赖和路径安全校验。根版本字段为 `configSchemaVersion`、`configRevision` 和 `modifiedAt`；完整格式、热应用/待重启分类及默认值见 `docs/config-schema.md`。配置路径必须显式传入，尚未固化生产环境默认路径。
 
 console/SCM 启动通过 `ConfigRepository` 加载配置。主文件损坏时会从同目录 `.history` 中恢复最新有效快照；残留 `.paperbreak.tmp.*` 文件不会被当作配置加载。后续更新使用期望修订、同目录临时文件、刷新和原子替换，并默认保留最近 5 个有效历史快照。
 

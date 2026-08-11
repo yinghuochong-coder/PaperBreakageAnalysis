@@ -221,6 +221,7 @@ struct MockSharedState final
                         .trigger_delay_us = SteppedRange<std::uint32_t>{0U, 60000000U, 1U},
                         .packet_size_bytes = SteppedRange<std::uint32_t>{576U, 9000U, 1U},
                         .inter_packet_delay_ns = SteppedRange<std::uint32_t>{0U, 1000000U, 1U},
+                        .line_io = config.line_io_capabilities,
                         .maximum_payload_bytes = config.maximum_payload_bytes};
         parameters = {.exposure_us = 1000.0,
                       .gain_db = 0.0,
@@ -235,7 +236,10 @@ struct MockSharedState final
                                             : std::nullopt,
                       .trigger_delay_us = 0U,
                       .packet_size_bytes = 1500U,
-                      .inter_packet_delay_ns = 0U};
+                      .inter_packet_delay_ns = 0U,
+                      .line_io = LineIoParameters{},
+                      .line_input = LineInputState{.enabled = false,
+                                                   .raw_level = config.initial_line0_level}};
         defaults = parameters;
     }
 
@@ -254,6 +258,7 @@ struct MockSharedState final
     bool connected{};
     bool streaming{};
     bool device_created{};
+    LineInputObserver line_input_observer;
     std::uint64_t capture_attempts{};
     std::uint64_t frames_generated{};
     std::uint64_t camera_frame_number{};
@@ -437,6 +442,12 @@ class MockCameraDevice final : public ICameraDevice
         return Result<void>::success();
     }
 
+    void set_line_input_observer(LineInputObserver observer) override
+    {
+        std::lock_guard lock{state_->mutex};
+        state_->line_input_observer = std::move(observer);
+    }
+
     [[nodiscard]] Result<CameraCapabilities> capabilities() override
     {
         std::lock_guard lock{state_->mutex};
@@ -508,6 +519,16 @@ class MockCameraDevice final : public ICameraDevice
             candidate.inter_packet_delay_ns = parameters.inter_packet_delay_ns;
         if (!parameters.digital_io.empty())
             candidate.digital_io = parameters.digital_io;
+        if (parameters.line_io)
+        {
+            candidate.line_io = parameters.line_io;
+            candidate.line_input = LineInputState{
+                .enabled = parameters.line_io->alarm_input_enabled,
+                .raw_level = candidate.line_input ? candidate.line_input->raw_level : false,
+                .revision = candidate.line_input ? candidate.line_input->revision : 0U,
+                .timestamp_utc_ms =
+                    candidate.line_input ? candidate.line_input->timestamp_utc_ms : 0};
+        }
 
         if (auto validation = validate_parameters(state_->capabilities, candidate); !validation)
         {
@@ -815,6 +836,36 @@ Result<void> MockCameraControl::hardware_trigger(const std::size_t count) const
     }
     state->pending_hardware_triggers += count;
     state->condition.notify_all();
+    return Result<void>::success();
+}
+
+Result<void> MockCameraControl::set_line_input(const bool raw_level) const
+{
+    auto state = state_.lock();
+    if (!state)
+        return Result<void>::failure(invalid_config({}, "control-expired"));
+    LineInputObserver observer;
+    {
+        std::lock_guard lock{state->mutex};
+        if (!state->connected || !state->parameters.line_io ||
+            !state->parameters.line_io->alarm_input_enabled)
+            return Result<void>::failure(invalid_state(state->config.descriptor.serial_number,
+                                                       "camera.mock.lineInput",
+                                                       "line-input-not-enabled"));
+        if (!state->parameters.line_input)
+            state->parameters.line_input = LineInputState{.enabled = true};
+        state->parameters.line_input->raw_level = raw_level;
+        state->parameters.line_input->timestamp_utc_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        observer = state->line_input_observer;
+    }
+    if (observer)
+        observer({.raw_level = raw_level,
+                  .timestamp_utc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::system_clock::now().time_since_epoch())
+                                          .count()});
     return Result<void>::success();
 }
 

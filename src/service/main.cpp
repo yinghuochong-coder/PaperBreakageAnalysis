@@ -1979,6 +1979,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     const std::weak_ptr<paperbreak::uplink::PersistentUploadScheduler> weak_upload_scheduler =
         upload_scheduler;
     auto event_ipc_target = std::make_shared<std::weak_ptr<paperbreak::ipc::IpcServer>>();
+    auto camera_ipc_target = std::make_shared<std::weak_ptr<paperbreak::ipc::IpcServer>>();
     const auto publish_event_lifecycle = [event_ipc_target](
                                              const paperbreak::storage::EventMetadataRecord& event,
                                              const std::string_view event_name) {
@@ -2155,7 +2156,37 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                         " nvmeAccepted=" + (nvme_accepted ? "true" : "false") +
                         " previewAccepted=" + (preview_accepted ? "true" : "false")));
         },
-        delivery_options);
+        delivery_options,
+        [camera_ipc_target, configuration](const std::string_view camera_id,
+                                           const paperbreak::camera::LineInputEvent& event) {
+            auto snapshot = configuration->repository.snapshot();
+            if (!snapshot)
+                return;
+            const auto configured = std::ranges::find_if(
+                snapshot.value().effective->cameras,
+                [camera_id](const auto& item) { return item.id == camera_id; });
+            if (configured == snapshot.value().effective->cameras.end())
+                return;
+            const bool alarm_active =
+                configured->line_io.alarm_active_level == paperbreak::config::AlarmActiveLevel::high
+                    ? event.raw_level
+                    : !event.raw_level;
+            if (auto server = camera_ipc_target->lock())
+            {
+                static_cast<void>(server->try_publish(
+                    {.event_name = "camera.lineInputChanged",
+                     .timestamp = paperbreak::current_utc_timestamp(),
+                     .payload_json = nlohmann::json{{"cameraId", camera_id},
+                                                    {"rawLevel", event.raw_level},
+                                                    {"alarmActive", alarm_active},
+                                                    {"revision", event.revision},
+                                                    {"timestampUtcMs", event.timestamp_utc_ms}}
+                                         .dump(),
+                     .binary = {},
+                     .coalescing_key = "camera.lineInputChanged:" + std::string{camera_id}},
+                    paperbreak::ipc::PushPolicy::coalesce_latest));
+            }
+        });
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
         configuration->repository, status, metrics, alarms, logging, config_path.parent_path(),
         preview, cameras, event_runtime, event_database, event_inspector, on_event_reviewed);
@@ -2213,6 +2244,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     auto ipc_server = std::make_shared<paperbreak::ipc::IpcServer>(
         commands, paperbreak::ipc::make_windows_peer_authorizer(), std::move(ipc_options));
     *event_ipc_target = ipc_server;
+    *camera_ipc_target = ipc_server;
     if (preview_publisher)
         preview_publisher->set_server(ipc_server);
 

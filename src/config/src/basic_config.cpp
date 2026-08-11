@@ -297,6 +297,11 @@ std::string_view trigger_mode_name(const TriggerMode value)
     return "Continuous";
 }
 
+std::string_view alarm_active_level_name(const AlarmActiveLevel value) noexcept
+{
+    return value == AlarmActiveLevel::high ? "High" : "Low";
+}
+
 std::string_view log_level_name(const LogLevel value)
 {
     switch (value)
@@ -331,13 +336,14 @@ Result<EdgeConfig> parse_metadata(const Json& root)
                                                 (std::numeric_limits<std::uint32_t>::max)());
     if (!schema)
         return Result<EdgeConfig>::failure(schema.error());
-    if (schema.value() != config_schema_version)
+    constexpr std::uint32_t migratable_schema_version = 2U;
+    if (schema.value() != config_schema_version && schema.value() != migratable_schema_version)
     {
         Error error =
             make_error("SYS_CONFIG_SCHEMA_UNSUPPORTED", Severity::error, "不支持该配置 schema 版本",
                        "config", "config.validateSchemaVersion");
         error.details.push_back({"received", std::to_string(schema.value())});
-        error.details.push_back({"supported", std::to_string(config_schema_version)});
+        error.details.push_back({"supported", "2,3"});
         return Result<EdgeConfig>::failure(std::move(error));
     }
     auto revision = unsigned_field<std::uint64_t>(root, "configRevision", "", 1U,
@@ -355,7 +361,7 @@ Result<EdgeConfig> parse_metadata(const Json& root)
     }
 
     EdgeConfig result;
-    result.config_schema_version = schema.value();
+    result.config_schema_version = config_schema_version;
     result.config_revision = revision.value();
     result.modified_at = std::move(modified).value();
     return Result<EdgeConfig>::success(std::move(result));
@@ -395,6 +401,7 @@ Result<EdgeConfig> parse_system(const Json& root, EdgeConfig result)
 Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
 {
     const Json& cameras = root.at("cameras");
+    const bool migrating_v2 = root.at("configSchemaVersion").get<std::uint32_t>() == 2U;
     if (!cameras.is_array() || cameras.size() > maximum_camera_count)
     {
         return Result<EdgeConfig>::failure(invalid_config(
@@ -412,13 +419,16 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
                 camera["reverseX"] = false;
             if (!camera.contains("reverseY"))
                 camera["reverseY"] = false;
+            if (migrating_v2 && !camera.contains("lineIo"))
+                camera["lineIo"] = {{"alarmInputEnabled", false},   {"alarmActiveLevel", "High"},
+                                    {"strobeOutputEnabled", false}, {"strobeDurationUs", 0U},
+                                    {"strobePreDelayUs", 0U},       {"strobePostDelayUs", 0U}};
         }
-        if (auto fields =
-                exact_fields(camera, pointer,
-                             {"id", "enabled", "serialNumber", "location", "exposureUs", "gainDb",
-                              "frameRate", "roi", "pixelFormat", "triggerMode", "triggerSource",
-                              "triggerDelayUs", "packetSizeBytes", "interPacketDelayNs", "reverseX",
-                              "reverseY"});
+        if (auto fields = exact_fields(camera, pointer,
+                                       {"id", "enabled", "serialNumber", "location", "exposureUs",
+                                        "gainDb", "frameRate", "roi", "pixelFormat", "triggerMode",
+                                        "triggerSource", "triggerDelayUs", "packetSizeBytes",
+                                        "interPacketDelayNs", "reverseX", "reverseY", "lineIo"});
             !fields)
             return Result<EdgeConfig>::failure(fields.error());
         auto id = string_field(camera, "id", pointer, 5U);
@@ -440,6 +450,23 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
             unsigned_field<std::uint32_t>(camera, "packetSizeBytes", pointer, 576U, 9000U);
         auto inter_packet =
             unsigned_field<std::uint32_t>(camera, "interPacketDelayNs", pointer, 0U, 1000000000U);
+        const Json& line_io = camera.at("lineIo");
+        if (auto fields =
+                exact_fields(line_io, pointer + "/lineIo",
+                             {"alarmInputEnabled", "alarmActiveLevel", "strobeOutputEnabled",
+                              "strobeDurationUs", "strobePreDelayUs", "strobePostDelayUs"});
+            !fields)
+            return Result<EdgeConfig>::failure(fields.error());
+        auto alarm_input_enabled = bool_field(line_io, "alarmInputEnabled", pointer + "/lineIo");
+        auto active_level_text = string_field(line_io, "alarmActiveLevel", pointer + "/lineIo", 8U);
+        auto strobe_output_enabled =
+            bool_field(line_io, "strobeOutputEnabled", pointer + "/lineIo");
+        auto strobe_duration = unsigned_field<std::uint32_t>(line_io, "strobeDurationUs",
+                                                             pointer + "/lineIo", 0U, 60000000U);
+        auto strobe_pre_delay = unsigned_field<std::uint32_t>(line_io, "strobePreDelayUs",
+                                                              pointer + "/lineIo", 0U, 60000000U);
+        auto strobe_post_delay = unsigned_field<std::uint32_t>(line_io, "strobePostDelayUs",
+                                                               pointer + "/lineIo", 0U, 60000000U);
         if (!id)
             return Result<EdgeConfig>::failure(id.error());
         if (!enabled)
@@ -472,6 +499,18 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
             return Result<EdgeConfig>::failure(packet.error());
         if (!inter_packet)
             return Result<EdgeConfig>::failure(inter_packet.error());
+        if (!alarm_input_enabled)
+            return Result<EdgeConfig>::failure(alarm_input_enabled.error());
+        if (!active_level_text)
+            return Result<EdgeConfig>::failure(active_level_text.error());
+        if (!strobe_output_enabled)
+            return Result<EdgeConfig>::failure(strobe_output_enabled.error());
+        if (!strobe_duration)
+            return Result<EdgeConfig>::failure(strobe_duration.error());
+        if (!strobe_pre_delay)
+            return Result<EdgeConfig>::failure(strobe_pre_delay.error());
+        if (!strobe_post_delay)
+            return Result<EdgeConfig>::failure(strobe_post_delay.error());
         if (!std::regex_match(id.value(), std::regex{R"(CAM0[1-4])"}) ||
             !camera_ids.emplace(id.value()).second)
         {
@@ -499,28 +538,52 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
             return Result<EdgeConfig>::failure(pixel.error());
         if (!mode)
             return Result<EdgeConfig>::failure(mode.error());
+        auto active_level = enum_value<AlarmActiveLevel>(
+            active_level_text.value(), pointer + "/lineIo/alarmActiveLevel",
+            {{"High", AlarmActiveLevel::high}, {"Low", AlarmActiveLevel::low}});
+        if (!active_level)
+            return Result<EdgeConfig>::failure(active_level.error());
         if (mode.value() == TriggerMode::hardware && trigger_source.value().empty())
         {
             return Result<EdgeConfig>::failure(
                 invalid_config("硬件触发必须指定 triggerSource", "config.validateDependency",
                                pointer + "/triggerSource", "trigger-source-required"));
         }
-        result.cameras.push_back({.id = std::move(id).value(),
-                                  .enabled = enabled.value(),
-                                  .serial_number = std::move(serial).value(),
-                                  .location = std::move(location).value(),
-                                  .exposure_us = exposure.value(),
-                                  .gain_db = gain.value(),
-                                  .frame_rate = rate.value(),
-                                  .roi = roi.value(),
-                                  .reverse_x = reverse_x.value(),
-                                  .reverse_y = reverse_y.value(),
-                                  .pixel_format = pixel.value(),
-                                  .trigger_mode = mode.value(),
-                                  .trigger_source = std::move(trigger_source).value(),
-                                  .trigger_delay_us = delay.value(),
-                                  .packet_size_bytes = packet.value(),
-                                  .inter_packet_delay_ns = inter_packet.value()});
+        if (!enabled.value() && (alarm_input_enabled.value() || strobe_output_enabled.value()))
+        {
+            return Result<EdgeConfig>::failure(
+                invalid_config("未启用相机不能启用线路 I/O", "config.validateDependency",
+                               pointer + "/lineIo", "line-io-requires-enabled-camera"));
+        }
+        if (strobe_output_enabled.value() && strobe_duration.value() == 0U)
+        {
+            return Result<EdgeConfig>::failure(invalid_config(
+                "启用频闪输出时 strobeDurationUs 必须大于 0", "config.validateDependency",
+                pointer + "/lineIo/strobeDurationUs", "strobe-duration-required"));
+        }
+        result.cameras.push_back(
+            {.id = std::move(id).value(),
+             .enabled = enabled.value(),
+             .serial_number = std::move(serial).value(),
+             .location = std::move(location).value(),
+             .exposure_us = exposure.value(),
+             .gain_db = gain.value(),
+             .frame_rate = rate.value(),
+             .roi = roi.value(),
+             .reverse_x = reverse_x.value(),
+             .reverse_y = reverse_y.value(),
+             .pixel_format = pixel.value(),
+             .trigger_mode = mode.value(),
+             .trigger_source = std::move(trigger_source).value(),
+             .trigger_delay_us = delay.value(),
+             .packet_size_bytes = packet.value(),
+             .inter_packet_delay_ns = inter_packet.value(),
+             .line_io = {.alarm_input_enabled = alarm_input_enabled.value(),
+                         .alarm_active_level = active_level.value(),
+                         .strobe_output_enabled = strobe_output_enabled.value(),
+                         .strobe_duration_us = strobe_duration.value(),
+                         .strobe_pre_delay_us = strobe_pre_delay.value(),
+                         .strobe_post_delay_us = strobe_post_delay.value()}});
     }
 
     return Result<EdgeConfig>::success(std::move(result));
@@ -1052,22 +1115,30 @@ std::string serialize_config(const EdgeConfig& config)
     Json cameras = Json::array();
     for (const auto& camera : config.cameras)
     {
-        cameras.push_back({{"id", camera.id},
-                           {"enabled", camera.enabled},
-                           {"serialNumber", camera.serial_number},
-                           {"location", camera.location},
-                           {"exposureUs", camera.exposure_us},
-                           {"gainDb", camera.gain_db},
-                           {"frameRate", camera.frame_rate},
-                           {"roi", roi_json(camera.roi)},
-                           {"reverseX", camera.reverse_x},
-                           {"reverseY", camera.reverse_y},
-                           {"pixelFormat", pixel_format_name(camera.pixel_format)},
-                           {"triggerMode", trigger_mode_name(camera.trigger_mode)},
-                           {"triggerSource", camera.trigger_source},
-                           {"triggerDelayUs", camera.trigger_delay_us},
-                           {"packetSizeBytes", camera.packet_size_bytes},
-                           {"interPacketDelayNs", camera.inter_packet_delay_ns}});
+        cameras.push_back(
+            {{"id", camera.id},
+             {"enabled", camera.enabled},
+             {"serialNumber", camera.serial_number},
+             {"location", camera.location},
+             {"exposureUs", camera.exposure_us},
+             {"gainDb", camera.gain_db},
+             {"frameRate", camera.frame_rate},
+             {"roi", roi_json(camera.roi)},
+             {"reverseX", camera.reverse_x},
+             {"reverseY", camera.reverse_y},
+             {"pixelFormat", pixel_format_name(camera.pixel_format)},
+             {"triggerMode", trigger_mode_name(camera.trigger_mode)},
+             {"triggerSource", camera.trigger_source},
+             {"triggerDelayUs", camera.trigger_delay_us},
+             {"packetSizeBytes", camera.packet_size_bytes},
+             {"interPacketDelayNs", camera.inter_packet_delay_ns},
+             {"lineIo",
+              {{"alarmInputEnabled", camera.line_io.alarm_input_enabled},
+               {"alarmActiveLevel", alarm_active_level_name(camera.line_io.alarm_active_level)},
+               {"strobeOutputEnabled", camera.line_io.strobe_output_enabled},
+               {"strobeDurationUs", camera.line_io.strobe_duration_us},
+               {"strobePreDelayUs", camera.line_io.strobe_pre_delay_us},
+               {"strobePostDelayUs", camera.line_io.strobe_post_delay_us}}}});
     }
     Json root = {{"configSchemaVersion", config.config_schema_version},
                  {"configRevision", config.config_revision},

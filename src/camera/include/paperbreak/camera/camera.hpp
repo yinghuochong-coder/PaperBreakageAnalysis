@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -88,6 +89,48 @@ struct DigitalIoState final
     bool operator==(const DigitalIoState&) const = default;
 };
 
+struct LineIoCapabilities final
+{
+    bool alarm_input_supported{};
+    bool line0_rising_edge_supported{};
+    bool line0_falling_edge_supported{};
+    bool strobe_output_supported{};
+    std::optional<SteppedRange<std::uint32_t>> strobe_duration_us;
+    std::optional<SteppedRange<std::uint32_t>> strobe_pre_delay_us;
+    std::optional<SteppedRange<std::uint32_t>> strobe_post_delay_us;
+    std::string unsupported_reason;
+    bool operator==(const LineIoCapabilities&) const = default;
+};
+
+struct LineIoParameters final
+{
+    bool alarm_input_enabled{};
+    bool strobe_output_enabled{};
+    std::uint32_t strobe_duration_us{};
+    std::uint32_t strobe_pre_delay_us{};
+    std::uint32_t strobe_post_delay_us{};
+    bool operator==(const LineIoParameters&) const = default;
+};
+
+struct LineInputState final
+{
+    bool enabled{};
+    bool raw_level{};
+    std::uint64_t revision{};
+    std::int64_t timestamp_utc_ms{};
+    bool operator==(const LineInputState&) const = default;
+};
+
+struct LineInputEvent final
+{
+    bool raw_level{};
+    std::uint64_t revision{};
+    std::int64_t timestamp_utc_ms{};
+    bool operator==(const LineInputEvent&) const = default;
+};
+
+using LineInputObserver = std::function<void(const LineInputEvent&)>;
+
 struct CameraDeviceDescriptor final
 {
     std::string model_name;
@@ -143,6 +186,7 @@ struct CameraCapabilities final
     std::optional<SteppedRange<std::uint32_t>> packet_size_bytes;
     std::optional<SteppedRange<std::uint32_t>> inter_packet_delay_ns;
     std::vector<DigitalIoCapability> digital_io;
+    LineIoCapabilities line_io;
     bool supports_user_sets{};
     bool supports_restore_defaults{};
     std::size_t maximum_payload_bytes{};
@@ -164,6 +208,8 @@ struct CameraParameterSnapshot final
     std::optional<std::uint32_t> packet_size_bytes;
     std::optional<std::uint32_t> inter_packet_delay_ns;
     std::vector<DigitalIoState> digital_io;
+    std::optional<LineIoParameters> line_io;
+    std::optional<LineInputState> line_input;
     bool operator==(const CameraParameterSnapshot&) const = default;
 };
 
@@ -185,6 +231,7 @@ class ICameraDevice
     [[nodiscard]] virtual const CameraDeviceDescriptor& descriptor() const noexcept = 0;
     [[nodiscard]] virtual Result<void> connect() = 0;
     [[nodiscard]] virtual Result<void> disconnect() = 0;
+    virtual void set_line_input_observer(LineInputObserver) {}
     [[nodiscard]] virtual Result<CameraCapabilities> capabilities() = 0;
     [[nodiscard]] virtual Result<CameraParameterSnapshot> read_parameters() = 0;
     [[nodiscard]] virtual Result<CameraParameterSnapshot> apply_parameters(

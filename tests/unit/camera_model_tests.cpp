@@ -601,6 +601,65 @@ TEST(CameraControlRuntime, ControlsMockDeviceAndReadsBackActualValues)
     ASSERT_TRUE(runtime.disconnect("CAM01"));
 }
 
+TEST(CameraControlRuntime, CoalescesLineInputPerCameraAndKeepsFinalRevisionAccurate)
+{
+    auto provider_result = paperbreak::camera::mock::MockCameraProvider::create(
+        {{.descriptor = {.model_name = "Mock",
+                         .serial_number = "MOCK-LINE-01",
+                         .ip_address = "127.0.0.1",
+                         .network_interface = "loopback"},
+          .initial_line0_level = true}});
+    ASSERT_TRUE(provider_result);
+    auto provider = std::move(provider_result).value();
+    auto control = provider->control("MOCK-LINE-01");
+    ASSERT_TRUE(control);
+    std::shared_ptr<ICameraProvider> shared{std::move(provider)};
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::vector<LineInputEvent> delivered;
+    CameraControlRuntime runtime{
+        shared, {}, {}, [&](const std::string_view camera_id, const LineInputEvent& event) {
+            EXPECT_EQ(camera_id, "CAM01");
+            {
+                std::scoped_lock lock{mutex};
+                delivered.push_back(event);
+            }
+            condition.notify_all();
+        }};
+
+    ASSERT_TRUE(runtime.connect("CAM01", "MOCK-LINE-01"));
+    auto enabled =
+        runtime.update("CAM01", {.line_io = LineIoParameters{.alarm_input_enabled = true}});
+    ASSERT_TRUE(enabled) << enabled.error().message;
+    ASSERT_TRUE(enabled.value().actual);
+    ASSERT_TRUE(enabled.value().actual->line_input);
+    EXPECT_TRUE(enabled.value().actual->line_input->enabled);
+    EXPECT_TRUE(enabled.value().actual->line_input->raw_level);
+
+    ASSERT_TRUE(control.value().set_line_input(false));
+    ASSERT_TRUE(control.value().set_line_input(true));
+    ASSERT_TRUE(control.value().set_line_input(false));
+    {
+        std::unique_lock lock{mutex};
+        ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds{1}, [&] {
+            return !delivered.empty() && delivered.back().revision == 3U;
+        }));
+        EXPECT_FALSE(delivered.back().raw_level);
+        EXPECT_LE(delivered.size(), 3U);
+    }
+    const auto snapshot = runtime.get("CAM01", "MOCK-LINE-01");
+    ASSERT_TRUE(snapshot);
+    ASSERT_TRUE(snapshot.value().actual);
+    ASSERT_TRUE(snapshot.value().actual->line_input);
+    EXPECT_EQ(snapshot.value().actual->line_input->revision, 3U);
+    EXPECT_FALSE(snapshot.value().actual->line_input->raw_level);
+
+    ASSERT_TRUE(runtime.disconnect("CAM01"));
+    const auto after_disconnect = control.value().set_line_input(true);
+    ASSERT_FALSE(after_disconnect);
+    EXPECT_EQ(after_disconnect.error().business_code, "CAMERA_INVALID_STATE_TRANSITION");
+}
+
 TEST(CameraControlRuntime, AcquiringQueriesUseCachedDeviceStateWithoutReadingDeviceNodes)
 {
     auto state = std::make_shared<CachedReadState>();

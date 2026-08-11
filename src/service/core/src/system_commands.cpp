@@ -1005,6 +1005,22 @@ Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
                                          {"offsetX", stepped_range_json(roi.offset_x)},
                                          {"offsetY", stepped_range_json(roi.offset_y)}};
     }
+    if (value.capabilities)
+    {
+        const auto& line = value.capabilities->line_io;
+        Json line_io{{"alarmInputSupported", line.alarm_input_supported},
+                     {"risingEdgeSupported", line.line0_rising_edge_supported},
+                     {"fallingEdgeSupported", line.line0_falling_edge_supported},
+                     {"strobeOutputSupported", line.strobe_output_supported},
+                     {"unsupportedReason", line.unsupported_reason}};
+        if (line.strobe_duration_us)
+            line_io["strobeDurationUs"] = stepped_range_json(*line.strobe_duration_us);
+        if (line.strobe_pre_delay_us)
+            line_io["strobePreDelayUs"] = stepped_range_json(*line.strobe_pre_delay_us);
+        if (line.strobe_post_delay_us)
+            line_io["strobePostDelayUs"] = stepped_range_json(*line.strobe_post_delay_us);
+        result["capabilities"]["lineIo"] = std::move(line_io);
+    }
     if (value.actual)
     {
         const auto& p = *value.actual;
@@ -1065,6 +1081,19 @@ Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
             actual["packetSizeBytes"] = *p.packet_size_bytes;
         if (p.inter_packet_delay_ns)
             actual["interPacketDelayNs"] = *p.inter_packet_delay_ns;
+        if (p.line_io)
+            actual["lineIo"] = {{"alarmInputEnabled", p.line_io->alarm_input_enabled},
+                                {"strobeOutputEnabled", p.line_io->strobe_output_enabled},
+                                {"strobeDurationUs", p.line_io->strobe_duration_us},
+                                {"strobePreDelayUs", p.line_io->strobe_pre_delay_us},
+                                {"strobePostDelayUs", p.line_io->strobe_post_delay_us}};
+        if (p.line_input)
+            result["lineInput"] = {
+                {"enabled", p.line_input->enabled},
+                {"rawLevel", p.line_input->raw_level},
+                {"revision", p.line_input->revision},
+                {"timestampUtcMs", p.line_input->timestamp_utc_ms},
+                {"stale", value.state == camera::CameraControlState::disconnected}};
         result["actual"] = std::move(actual);
     }
     if (value.last_error)
@@ -1075,20 +1104,29 @@ Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
 
 Json saved_camera_json(const config::CameraConfig& value)
 {
-    Json result{{"exposureUs", value.exposure_us},
-                {"gainDb", value.gain_db},
-                {"frameRate", value.frame_rate},
-                {"roi",
-                 {{"width", value.roi.width},
-                  {"height", value.roi.height},
-                  {"offsetX", value.roi.offset_x},
-                  {"offsetY", value.roi.offset_y}}},
-                {"reverseX", value.reverse_x},
-                {"reverseY", value.reverse_y},
-                {"triggerSource", value.trigger_source},
-                {"triggerDelayUs", value.trigger_delay_us},
-                {"packetSizeBytes", value.packet_size_bytes},
-                {"interPacketDelayNs", value.inter_packet_delay_ns}};
+    Json result{
+        {"exposureUs", value.exposure_us},
+        {"gainDb", value.gain_db},
+        {"frameRate", value.frame_rate},
+        {"roi",
+         {{"width", value.roi.width},
+          {"height", value.roi.height},
+          {"offsetX", value.roi.offset_x},
+          {"offsetY", value.roi.offset_y}}},
+        {"reverseX", value.reverse_x},
+        {"reverseY", value.reverse_y},
+        {"triggerSource", value.trigger_source},
+        {"triggerDelayUs", value.trigger_delay_us},
+        {"packetSizeBytes", value.packet_size_bytes},
+        {"interPacketDelayNs", value.inter_packet_delay_ns},
+        {"lineIo",
+         {{"alarmInputEnabled", value.line_io.alarm_input_enabled},
+          {"alarmActiveLevel",
+           value.line_io.alarm_active_level == config::AlarmActiveLevel::high ? "High" : "Low"},
+          {"strobeOutputEnabled", value.line_io.strobe_output_enabled},
+          {"strobeDurationUs", value.line_io.strobe_duration_us},
+          {"strobePreDelayUs", value.line_io.strobe_pre_delay_us},
+          {"strobePostDelayUs", value.line_io.strobe_post_delay_us}}}};
     switch (value.pixel_format)
     {
     case config::PixelFormat::mono8:
@@ -1117,6 +1155,16 @@ Json saved_camera_json(const config::CameraConfig& value)
         break;
     }
     return result;
+}
+
+void add_alarm_active(Json& value, const config::CameraConfig& configuration)
+{
+    if (!value.contains("lineInput") || !value["lineInput"].is_object() ||
+        !value["lineInput"].contains("rawLevel") || !value["lineInput"]["rawLevel"].is_boolean())
+        return;
+    const bool raw = value["lineInput"]["rawLevel"].get<bool>();
+    value["lineInput"]["alarmActive"] =
+        configuration.line_io.alarm_active_level == config::AlarmActiveLevel::high ? raw : !raw;
 }
 
 camera::CameraParameterSnapshot camera_parameters(const config::CameraConfig& value)
@@ -1162,7 +1210,13 @@ camera::CameraParameterSnapshot camera_parameters(const config::CameraConfig& va
         .trigger_mode = trigger,
         .trigger_delay_us = value.trigger_delay_us,
         .packet_size_bytes = value.packet_size_bytes,
-        .inter_packet_delay_ns = value.inter_packet_delay_ns};
+        .inter_packet_delay_ns = value.inter_packet_delay_ns,
+        .line_io =
+            camera::LineIoParameters{.alarm_input_enabled = value.line_io.alarm_input_enabled,
+                                     .strobe_output_enabled = value.line_io.strobe_output_enabled,
+                                     .strobe_duration_us = value.line_io.strobe_duration_us,
+                                     .strobe_pre_delay_us = value.line_io.strobe_pre_delay_us,
+                                     .strobe_post_delay_us = value.line_io.strobe_post_delay_us}};
     if (trigger == camera::TriggerMode::hardware)
         result.trigger_source = value.trigger_source;
     return result;
@@ -1239,7 +1293,14 @@ Result<Json> bound_camera_json(const std::string& id, const std::string& serial,
                                   {"triggerSource", actual.trigger_source.value_or("")},
                                   {"triggerDelayUs", *actual.trigger_delay_us},
                                   {"packetSizeBytes", *actual.packet_size_bytes},
-                                  {"interPacketDelayNs", *actual.inter_packet_delay_ns}});
+                                  {"interPacketDelayNs", *actual.inter_packet_delay_ns},
+                                  {"lineIo",
+                                   {{"alarmInputEnabled", false},
+                                    {"alarmActiveLevel", "High"},
+                                    {"strobeOutputEnabled", false},
+                                    {"strobeDurationUs", 0U},
+                                    {"strobePreDelayUs", 0U},
+                                    {"strobePostDelayUs", 0U}}}});
 }
 
 Result<ipc::CommandResponse> diagnostics_response(
@@ -2343,6 +2404,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                 if (!current)
                     return Result<ipc::CommandResponse>::failure(current.error());
                 auto json = camera_snapshot_json(current.value());
+                add_alarm_active(json, item);
                 json["enabled"] = item.enabled;
                 json["location"] = item.location;
                 json["savedConfigRevision"] = config.value().stored_config_revision;
@@ -2536,13 +2598,14 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                     "camera.updateConfig 需要 expectedConfigRevision 和 parameters 对象",
                     "ipc.camera.updateConfig"));
             const Json& parameters = payload.value()["parameters"];
-            static constexpr std::array<std::string_view, 12U> allowed{
+            static constexpr std::array<std::string_view, 13U> allowed{
                 "exposureUs",      "gainDb",
                 "frameRate",       "roi",
                 "pixelFormat",     "triggerMode",
                 "triggerSource",   "triggerDelayUs",
                 "packetSizeBytes", "interPacketDelayNs",
-                "reverseX",        "reverseY"};
+                "reverseX",        "reverseY",
+                "lineIo"};
             for (auto it = parameters.begin(); it != parameters.end(); ++it)
                 if (std::find(allowed.begin(), allowed.end(), it.key()) == allowed.end())
                     return Result<ipc::CommandResponse>::failure(command_error(
@@ -2618,6 +2681,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             if (!result)
                 return Result<ipc::CommandResponse>::failure(result.error());
             Json response = camera_snapshot_json(result.value());
+            add_alarm_active(response, *updated);
             response["saved"] = true;
             response["dispatched"] = true;
             response["applied"] = true;
@@ -2648,8 +2712,10 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
         }
         if (!result)
             return Result<ipc::CommandResponse>::failure(result.error());
+        Json response = camera_snapshot_json(result.value());
+        add_alarm_active(response, *found);
         return Result<ipc::CommandResponse>::success(
-            {.payload_json = camera_snapshot_json(result.value()).dump(), .binary = {}});
+            {.payload_json = response.dump(), .binary = {}});
     }
 
     if (request.command == "system.getStatus")

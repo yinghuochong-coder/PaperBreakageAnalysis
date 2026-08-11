@@ -35,6 +35,23 @@
 namespace
 {
 
+std::string dynamic_line_payload(std::string payload, const bool raw_level,
+                                 const std::uint64_t revision)
+{
+    constexpr std::string_view original = R"("rawLevel":false,"alarmActive":false,"revision":3)";
+    const auto position = payload.find(original);
+    EXPECT_NE(position, std::string::npos);
+    if (position != std::string::npos)
+    {
+        const std::string replacement = std::string{"\"rawLevel\":"} +
+                                        (raw_level ? "true" : "false") +
+                                        ",\"alarmActive\":" + (raw_level ? "true" : "false") +
+                                        ",\"revision\":" + std::to_string(revision);
+        payload.replace(position, original.size(), replacement);
+    }
+    return payload;
+}
+
 class StateAuthorizer final : public paperbreak::ipc::IPeerAuthorizer
 {
   public:
@@ -149,8 +166,10 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
         {
             ++list_requests;
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
-                {.payload_json =
-                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"capabilities":{"roi":{"sensorWidth":1624,"sensorHeight":1240,"width":{"minimum":32,"maximum":1624,"increment":4},"height":{"minimum":4,"maximum":1240,"increment":4},"offsetX":{"minimum":0,"maximum":1592,"increment":2},"offsetY":{"minimum":0,"maximum":1232,"increment":16}}},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous"}}],"storedConfigRevision":7,"topologyRestartRequired":false})",
+                {.payload_json = dynamic_line_payload(
+                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"capabilities":{"roi":{"sensorWidth":1624,"sensorHeight":1240,"width":{"minimum":32,"maximum":1624,"increment":4},"height":{"minimum":4,"maximum":1240,"increment":4},"offsetX":{"minimum":0,"maximum":1592,"increment":2},"offsetY":{"minimum":0,"maximum":1232,"increment":16}},"lineIo":{"alarmInputSupported":true,"risingEdgeSupported":true,"fallingEdgeSupported":true,"strobeOutputSupported":true,"strobeDurationUs":{"minimum":1,"maximum":1000000,"increment":1},"strobePreDelayUs":{"minimum":0,"maximum":100000,"increment":1},"strobePostDelayUs":{"minimum":0,"maximum":100000,"increment":1},"unsupportedReason":""}},"lineInput":{"enabled":true,"rawLevel":false,"alarmActive":false,"revision":3,"timestampUtcMs":1000,"stale":false},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0,"lineIo":{"alarmInputEnabled":true,"alarmActiveLevel":"High","strobeOutputEnabled":true,"strobeDurationUs":100,"strobePreDelayUs":10,"strobePostDelayUs":20}},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","lineIo":{"alarmInputEnabled":true,"strobeOutputEnabled":true,"strobeDurationUs":100,"strobePreDelayUs":10,"strobePostDelayUs":20}}}],"storedConfigRevision":7,"topologyRestartRequired":false})",
+                     line_raw_level.load(std::memory_order_acquire),
+                     line_revision.load(std::memory_order_acquire)),
                  .binary = {}});
         }
         ++operation_requests;
@@ -172,6 +191,8 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
 
     std::atomic_uint64_t list_requests{};
     std::atomic_uint64_t operation_requests{};
+    std::atomic_bool line_raw_level{};
+    std::atomic_uint64_t line_revision{3U};
     std::string last_command;
     std::string last_payload_json;
 };
@@ -910,6 +931,12 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
                latest.discovered_devices.size() == 1U && latest.operation.has_value() &&
                !latest.operation->pending;
     }));
+    ASSERT_TRUE(wait_until([&] { return handler->list_requests.load() >= 2U; }));
+    for (int iteration = 0; iteration < 10; ++iteration)
+    {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
     const auto& camera = latest.cameras.front();
     EXPECT_EQ(camera.id, "CAM01");
     EXPECT_EQ(camera.saved_config_revision, 7U);
@@ -923,10 +950,67 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     EXPECT_EQ(camera.roi_capabilities->sensor_height, 1240U);
     EXPECT_EQ(camera.roi_capabilities->offset_y.maximum, 1232U);
     EXPECT_EQ(camera.roi_capabilities->offset_y.increment, 16U);
+    ASSERT_TRUE(camera.line_io_capabilities.has_value());
+    EXPECT_TRUE(camera.line_io_capabilities->alarm_input_supported);
+    EXPECT_TRUE(camera.line_io_capabilities->rising_edge_supported);
+    EXPECT_TRUE(camera.line_io_capabilities->falling_edge_supported);
+    ASSERT_TRUE(camera.line_io_capabilities->strobe_duration_us.has_value());
+    EXPECT_EQ(camera.line_io_capabilities->strobe_duration_us->minimum, 1U);
+    ASSERT_TRUE(camera.line_input.has_value());
+    EXPECT_EQ(camera.line_input->revision, 3U);
+    EXPECT_FALSE(camera.line_input->raw_level);
+    EXPECT_FALSE(camera.line_input->alarm_active);
+    EXPECT_FALSE(camera.line_input->stale);
     EXPECT_EQ(latest.stored_config_revision, 7U);
     EXPECT_FALSE(latest.topology_restart_required);
     EXPECT_EQ(latest.discovered_devices.front().network_interface, "mock0");
     EXPECT_TRUE(latest.discovered_devices.front().exclusive_access_available);
+
+    ASSERT_TRUE(server.try_publish(
+        {.event_name = "camera.lineInputChanged",
+         .timestamp = "2026-08-10T01:00:00.000Z",
+         .payload_json =
+             R"({"cameraId":"CAM01","rawLevel":true,"alarmActive":true,"revision":4,"timestampUtcMs":2000})",
+         .binary = {},
+         .coalescing_key = "camera.lineInputChanged:CAM01"},
+        paperbreak::ipc::PushPolicy::coalesce_latest));
+    ASSERT_TRUE(wait_until([&] {
+        return !latest.cameras.empty() && latest.cameras.front().line_input &&
+               latest.cameras.front().line_input->revision == 4U;
+    })) << "current revision="
+        << (latest.cameras.empty() || !latest.cameras.front().line_input
+                ? 0U
+                : latest.cameras.front().line_input->revision)
+        << ", outbound=" << server.metrics_snapshot().outbound_messages
+        << ", dropped=" << server.metrics_snapshot().pushes_dropped_total;
+    EXPECT_TRUE(latest.cameras.front().line_input->raw_level);
+    EXPECT_TRUE(latest.cameras.front().line_input->alarm_active);
+
+    handler->line_raw_level.store(false, std::memory_order_release);
+    handler->line_revision.store(3U, std::memory_order_release);
+    const auto requests_before_stale_snapshot = handler->list_requests.load();
+    client.refresh();
+    ASSERT_TRUE(
+        wait_until([&] { return handler->list_requests.load() > requests_before_stale_snapshot; }));
+    for (int iteration = 0; iteration < 10; ++iteration)
+    {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    EXPECT_EQ(latest.cameras.front().line_input->revision, 4U);
+    EXPECT_TRUE(latest.cameras.front().line_input->raw_level);
+    EXPECT_TRUE(latest.cameras.front().line_input->alarm_active);
+
+    handler->line_revision.store(5U, std::memory_order_release);
+    const auto requests_before_recovery = handler->list_requests.load();
+    client.refresh();
+    ASSERT_TRUE(wait_until([&] {
+        return handler->list_requests.load() > requests_before_recovery &&
+               latest.cameras.front().line_input &&
+               latest.cameras.front().line_input->revision == 5U;
+    }));
+    EXPECT_FALSE(latest.cameras.front().line_input->raw_level);
+    EXPECT_FALSE(latest.cameras.front().line_input->alarm_active);
 
     ASSERT_TRUE(client.control("camera.connect", "CAM01"));
     auto busy = client.control("camera.start", "CAM01");
@@ -973,6 +1057,9 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     const auto update_payload = nlohmann::json::parse(handler->last_payload_json);
     EXPECT_FALSE(update_payload["parameters"]["reverseX"].get<bool>());
     EXPECT_TRUE(update_payload["parameters"]["reverseY"].get<bool>());
+    EXPECT_TRUE(update_payload["parameters"]["lineIo"]["alarmInputEnabled"].get<bool>());
+    EXPECT_EQ(update_payload["parameters"]["lineIo"]["alarmActiveLevel"], "High");
+    EXPECT_EQ(update_payload["parameters"]["lineIo"]["strobeDurationUs"], 100U);
 
     ASSERT_TRUE(client.bind("CAM02", "MOCK-02", "出口", 7U));
     ASSERT_TRUE(wait_until([&] {
@@ -984,6 +1071,9 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
 
     client.stop();
     EXPECT_TRUE(latest.stale);
+    ASSERT_FALSE(latest.cameras.empty());
+    ASSERT_TRUE(latest.cameras.front().line_input.has_value());
+    EXPECT_TRUE(latest.cameras.front().line_input->stale);
     stop_server(server);
 }
 
@@ -1032,6 +1122,35 @@ TEST(CameraClient, TimeoutBecomesUnknownAndIsConfirmedByLaterListSnapshot)
 
     client.stop();
     stop_server(server);
+}
+
+TEST(CameraClient, AggregatesFourLineInputsWithDisabledUnknownAndStalePrecedence)
+{
+    using paperbreak::console::aggregate_line_input_state;
+    using paperbreak::console::CameraClientItem;
+    using paperbreak::console::CameraLineInputAggregateState;
+    using paperbreak::console::CameraLineInputValue;
+    std::vector<CameraClientItem> cameras(4U);
+    EXPECT_EQ(aggregate_line_input_state(cameras), CameraLineInputAggregateState::all_disabled);
+
+    cameras[0].saved.line_io.alarm_input_enabled = true;
+    EXPECT_EQ(aggregate_line_input_state(cameras),
+              CameraLineInputAggregateState::partially_unknown);
+    cameras[0].line_input = CameraLineInputValue{
+        .enabled = true, .raw_level = false, .alarm_active = false, .revision = 1U, .stale = false};
+    EXPECT_EQ(aggregate_line_input_state(cameras),
+              CameraLineInputAggregateState::all_known_inactive);
+
+    cameras[1].saved.line_io.alarm_input_enabled = true;
+    cameras[1].line_input = CameraLineInputValue{
+        .enabled = true, .raw_level = true, .alarm_active = true, .revision = 2U, .stale = false};
+    EXPECT_EQ(aggregate_line_input_state(cameras), CameraLineInputAggregateState::active);
+    cameras[1].line_input->stale = true;
+    EXPECT_EQ(aggregate_line_input_state(cameras), CameraLineInputAggregateState::active_stale);
+
+    cameras[1].line_input->alarm_active = false;
+    EXPECT_EQ(aggregate_line_input_state(cameras),
+              CameraLineInputAggregateState::partially_unknown);
 }
 
 TEST(OperationsClient, QueriesFiltersAcknowledgesAndExportsThroughBoundedWorker)

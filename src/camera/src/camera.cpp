@@ -78,8 +78,8 @@ bool valid_external_text(const std::string_view value, const std::size_t maximum
 Error invalid_parameter(std::string parameter, std::string reason)
 {
     const auto message = "相机参数不符合设备能力（参数：" + parameter + "，原因：" + reason + "）";
-    return make_camera_error(CameraErrorKind::config_failed, message,
-                             "camera.validateParameters", std::nullopt,
+    return make_camera_error(CameraErrorKind::config_failed, message, "camera.validateParameters",
+                             std::nullopt,
                              {{"parameter", std::move(parameter)}, {"reason", std::move(reason)}});
 }
 
@@ -232,6 +232,49 @@ Result<void> validate_digital_io(const CameraCapabilities& capabilities,
         {
             return Result<void>::failure(invalid_parameter("digitalIo", "duplicate-line"));
         }
+    }
+    return Result<void>::success();
+}
+
+Result<void> validate_line_io(const CameraCapabilities& capabilities,
+                              const CameraParameterSnapshot& parameters)
+{
+    if (!parameters.line_io)
+        return Result<void>::success();
+    const auto& requested = *parameters.line_io;
+    const auto& available = capabilities.line_io;
+    if (requested.alarm_input_enabled &&
+        (!available.alarm_input_supported || !available.line0_rising_edge_supported ||
+         !available.line0_falling_edge_supported))
+        return Result<void>::failure(invalid_parameter("lineIo.alarmInputEnabled", "unsupported"));
+    if (requested.strobe_output_enabled && !available.strobe_output_supported)
+        return Result<void>::failure(
+            invalid_parameter("lineIo.strobeOutputEnabled", "unsupported"));
+    if (requested.strobe_output_enabled && requested.strobe_duration_us == 0U)
+        return Result<void>::failure(
+            invalid_parameter("lineIo.strobeDurationUs", "required-when-enabled"));
+    const auto validate_range = [](const std::uint32_t value,
+                                   const std::optional<SteppedRange<std::uint32_t>>& range,
+                                   const char* name) {
+        if (!range || !contains_integral(*range, value))
+            return Result<void>::failure(invalid_parameter(name, "outside-capability"));
+        return Result<void>::success();
+    };
+    if (available.strobe_output_supported && requested.strobe_output_enabled)
+    {
+        if (auto result = validate_range(requested.strobe_duration_us, available.strobe_duration_us,
+                                         "lineIo.strobeDurationUs");
+            !result)
+            return result;
+        if (auto result = validate_range(requested.strobe_pre_delay_us,
+                                         available.strobe_pre_delay_us, "lineIo.strobePreDelayUs");
+            !result)
+            return result;
+        if (auto result =
+                validate_range(requested.strobe_post_delay_us, available.strobe_post_delay_us,
+                               "lineIo.strobePostDelayUs");
+            !result)
+            return result;
     }
     return Result<void>::success();
 }
@@ -396,16 +439,14 @@ Result<void> validate_parameters(const CameraCapabilities& capabilities,
     {
         return result;
     }
-    if (auto result =
-            validate_optional_feature(parameters.reverse_x, capabilities.supports_reverse_x,
-                                      "reverseX");
+    if (auto result = validate_optional_feature(parameters.reverse_x,
+                                                capabilities.supports_reverse_x, "reverseX");
         !result)
     {
         return result;
     }
-    if (auto result =
-            validate_optional_feature(parameters.reverse_y, capabilities.supports_reverse_y,
-                                      "reverseY");
+    if (auto result = validate_optional_feature(parameters.reverse_y,
+                                                capabilities.supports_reverse_y, "reverseY");
         !result)
     {
         return result;
@@ -434,7 +475,9 @@ Result<void> validate_parameters(const CameraCapabilities& capabilities,
     {
         return result;
     }
-    return validate_digital_io(capabilities, parameters);
+    if (auto result = validate_digital_io(capabilities, parameters); !result)
+        return result;
+    return validate_line_io(capabilities, parameters);
 }
 
 Result<CameraParameterSnapshot> apply_validated_parameters(

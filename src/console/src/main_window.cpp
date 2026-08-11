@@ -556,6 +556,9 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                            6);
     status_grid->addWidget(make_status_item(header, QStringLiteral("软件版本"), version_value_), 0,
                            7);
+    status_grid->addWidget(make_status_item(header, QStringLiteral("断纸输入"), line_input_value_),
+                           0, 8);
+    line_input_value_->setObjectName(QStringLiteral("aggregate-line-input-status"));
     header_layout->addWidget(status_container);
     root->addWidget(header);
 
@@ -890,6 +893,50 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             transport_form->addRow(QStringLiteral("包大小 (bytes)"), camera_packet_size_);
             transport_form->addRow(QStringLiteral("包间延迟 (ns)"), camera_packet_delay_);
             editor_grid->add_widget(transport_panel);
+
+            auto* line_io_panel = make_child<QGroupBox>(camera_editor_, QStringLiteral("线路 I/O"));
+            line_io_panel->setObjectName(QStringLiteral("camera-line-io-panel"));
+            line_io_panel->setProperty("role", "cameraPanel");
+            auto* line_io_form = make_layout<QFormLayout>(line_io_panel);
+            line_io_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            line_io_form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            camera_alarm_input_enabled_ = make_child<QCheckBox>(line_io_panel);
+            camera_alarm_input_enabled_->setObjectName(
+                QStringLiteral("camera-alarm-input-enabled"));
+            camera_alarm_active_level_ = make_child<QComboBox>(line_io_panel);
+            camera_alarm_active_level_->setObjectName(QStringLiteral("camera-alarm-active-level"));
+            camera_alarm_active_level_->addItems({QStringLiteral("High"), QStringLiteral("Low")});
+            camera_line0_raw_ = make_child<QLabel>(line_io_panel, QStringLiteral("未知"));
+            camera_line0_raw_->setObjectName(QStringLiteral("camera-line0-raw-status"));
+            camera_line0_alarm_ = make_child<QLabel>(line_io_panel, QStringLiteral("未知"));
+            camera_line0_alarm_->setObjectName(QStringLiteral("camera-line0-alarm-status"));
+            camera_strobe_output_enabled_ = make_child<QCheckBox>(line_io_panel);
+            camera_strobe_output_enabled_->setObjectName(
+                QStringLiteral("camera-strobe-output-enabled"));
+            camera_strobe_source_ =
+                make_child<QLabel>(line_io_panel, QStringLiteral("ExposureStartActive（固定）"));
+            camera_strobe_duration_ = make_child<QSpinBox>(line_io_panel);
+            camera_strobe_pre_delay_ = make_child<QSpinBox>(line_io_panel);
+            camera_strobe_post_delay_ = make_child<QSpinBox>(line_io_panel);
+            for (auto* input :
+                 {camera_strobe_duration_, camera_strobe_pre_delay_, camera_strobe_post_delay_})
+                input->setRange(0, 60000000);
+            camera_line_io_actual_ =
+                make_child<QLabel>(line_io_panel, QStringLiteral("设备实际值：未连接/不可用"));
+            camera_line_io_actual_->setWordWrap(true);
+            camera_line_io_actual_->setProperty("role", "muted");
+            line_io_form->addRow(QStringLiteral("Line 0 报警输入启用"),
+                                 camera_alarm_input_enabled_);
+            line_io_form->addRow(QStringLiteral("报警有效电平"), camera_alarm_active_level_);
+            line_io_form->addRow(QStringLiteral("Line 0 原始电平"), camera_line0_raw_);
+            line_io_form->addRow(QStringLiteral("断纸报警状态"), camera_line0_alarm_);
+            line_io_form->addRow(QStringLiteral("Line 1 频闪启用"), camera_strobe_output_enabled_);
+            line_io_form->addRow(QStringLiteral("线路源"), camera_strobe_source_);
+            line_io_form->addRow(QStringLiteral("持续时间 (us)"), camera_strobe_duration_);
+            line_io_form->addRow(QStringLiteral("前置时间 (us)"), camera_strobe_pre_delay_);
+            line_io_form->addRow(QStringLiteral("后置时间 (us)"), camera_strobe_post_delay_);
+            line_io_form->addRow(QStringLiteral("设备回读"), camera_line_io_actual_);
+            editor_grid->add_widget(line_io_panel);
             main_layout->addWidget(camera_editor_);
 
             auto* footer = make_child<QWidget>(camera_control_actions_);
@@ -930,7 +977,17 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                     .trigger_delay_us = static_cast<std::uint32_t>(camera_trigger_delay_->value()),
                     .packet_size_bytes = static_cast<std::uint32_t>(camera_packet_size_->value()),
                     .inter_packet_delay_ns =
-                        static_cast<std::uint32_t>(camera_packet_delay_->value())};
+                        static_cast<std::uint32_t>(camera_packet_delay_->value()),
+                    .line_io = {.alarm_input_enabled = camera_alarm_input_enabled_->isChecked(),
+                                .alarm_active_level =
+                                    camera_alarm_active_level_->currentText().toStdString(),
+                                .strobe_output_enabled = camera_strobe_output_enabled_->isChecked(),
+                                .strobe_duration_us =
+                                    static_cast<std::uint32_t>(camera_strobe_duration_->value()),
+                                .strobe_pre_delay_us =
+                                    static_cast<std::uint32_t>(camera_strobe_pre_delay_->value()),
+                                .strobe_post_delay_us = static_cast<std::uint32_t>(
+                                    camera_strobe_post_delay_->value())}};
                 show_camera_result(camera_actions_.update_config(
                     camera_snapshot_.cameras[index].id,
                     camera_snapshot_.cameras[index].saved_config_revision, value));
@@ -2109,6 +2166,7 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
         selected_serial = QString::fromStdString(
             camera_snapshot_.discovered_devices[discovered_devices_->currentRow()].serial);
     camera_snapshot_ = snapshot;
+    update_line_input_indicators();
     for (std::size_t index = 0; index < overview_camera_states_.size(); ++index)
     {
         const std::string id = "CAM0" + std::to_string(index + 1U);
@@ -2246,6 +2304,69 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
     update_camera_controls();
 }
 
+void MainWindow::update_line_input_indicators()
+{
+    const auto set_indicator = [](QLabel* label, const QString& text, const char* color) {
+        if (!label)
+            return;
+        label->setText(text);
+        label->setStyleSheet(
+            QStringLiteral("font-weight: 700; color: %1;").arg(QString::fromLatin1(color)));
+    };
+    switch (aggregate_line_input_state(camera_snapshot_.cameras))
+    {
+    case CameraLineInputAggregateState::all_disabled:
+        set_indicator(line_input_value_, QStringLiteral("● 全部禁用"), "#8a949e");
+        break;
+    case CameraLineInputAggregateState::active:
+        set_indicator(line_input_value_, QStringLiteral("● 有效"), "#e03131");
+        break;
+    case CameraLineInputAggregateState::active_stale:
+        set_indicator(line_input_value_, QStringLiteral("● 有效（已过期）"), "#e03131");
+        break;
+    case CameraLineInputAggregateState::partially_unknown:
+        set_indicator(line_input_value_, QStringLiteral("● 部分未知"), "#d99000");
+        break;
+    case CameraLineInputAggregateState::all_known_inactive:
+        set_indicator(line_input_value_, QStringLiteral("● 无效"), "#2b8a3e");
+        break;
+    }
+
+    if (!camera_selector_ || camera_selector_->currentIndex() < 0 || !camera_line0_raw_ ||
+        !camera_line0_alarm_)
+        return;
+    const auto index = static_cast<std::size_t>(camera_selector_->currentIndex());
+    if (index >= camera_snapshot_.cameras.size())
+        return;
+    const auto& camera = camera_snapshot_.cameras[index];
+    if (!camera.saved.line_io.alarm_input_enabled)
+    {
+        set_indicator(camera_line0_raw_, QStringLiteral("● 已禁用"), "#8a949e");
+        set_indicator(camera_line0_alarm_, QStringLiteral("● 已禁用"), "#8a949e");
+    }
+    else if (!camera.line_input)
+    {
+        set_indicator(camera_line0_raw_, QStringLiteral("● 未知"), "#d99000");
+        set_indicator(camera_line0_alarm_, QStringLiteral("● 未知"), "#d99000");
+    }
+    else
+    {
+        const QString stale = camera.line_input->stale ? QStringLiteral("（已过期）") : QString{};
+        set_indicator(
+            camera_line0_raw_,
+            QStringLiteral("● %1%2").arg(
+                camera.line_input->raw_level ? QStringLiteral("高") : QStringLiteral("低"), stale),
+            camera.line_input->stale ? "#d99000" : "#2f6fdd");
+        set_indicator(
+            camera_line0_alarm_,
+            QStringLiteral("● %1%2").arg(camera.line_input->alarm_active ? QStringLiteral("有效")
+                                                                         : QStringLiteral("无效"),
+                                         stale),
+            camera.line_input->alarm_active ? "#e03131"
+                                            : (camera.line_input->stale ? "#d99000" : "#2b8a3e"));
+    }
+}
+
 void MainWindow::update_camera_configuration_summary()
 {
     if (!camera_configuration_value_ || !camera_selector_)
@@ -2317,6 +2438,30 @@ void MainWindow::configure_camera_roi_editor(const CameraClientItem& camera)
                               .arg(increment));
     };
 
+    const auto configure_strobe = [](QSpinBox* input,
+                                     const std::optional<CameraIntegerRangeValue>& range) {
+        if (!range)
+            return;
+        const auto bounded = [](const std::uint32_t value) {
+            return static_cast<int>(std::min<std::uint32_t>(
+                value, static_cast<std::uint32_t>(std::numeric_limits<int>::max())));
+        };
+        input->setRange(bounded(range->minimum), bounded(range->maximum));
+        input->setSingleStep(std::max(1, bounded(range->increment)));
+        input->setToolTip(QStringLiteral("设备实际范围：%1～%2；步进：%3")
+                              .arg(input->minimum())
+                              .arg(input->maximum())
+                              .arg(input->singleStep()));
+    };
+    if (camera.line_io_capabilities)
+    {
+        configure_strobe(camera_strobe_duration_, camera.line_io_capabilities->strobe_duration_us);
+        configure_strobe(camera_strobe_pre_delay_,
+                         camera.line_io_capabilities->strobe_pre_delay_us);
+        configure_strobe(camera_strobe_post_delay_,
+                         camera.line_io_capabilities->strobe_post_delay_us);
+    }
+
     if (!camera.roi_capabilities)
     {
         camera_roi_width_->setRange(1, 16384);
@@ -2360,6 +2505,37 @@ void MainWindow::populate_camera_editor(const CameraParameterValue& value)
     camera_trigger_delay_->setValue(static_cast<int>(value.trigger_delay_us.value_or(0U)));
     camera_packet_size_->setValue(static_cast<int>(value.packet_size_bytes.value_or(1500U)));
     camera_packet_delay_->setValue(static_cast<int>(value.inter_packet_delay_ns.value_or(0U)));
+    camera_alarm_input_enabled_->setChecked(value.line_io.alarm_input_enabled);
+    camera_alarm_active_level_->setCurrentText(
+        QString::fromStdString(value.line_io.alarm_active_level));
+    camera_strobe_output_enabled_->setChecked(value.line_io.strobe_output_enabled);
+    camera_strobe_duration_->setValue(static_cast<int>(value.line_io.strobe_duration_us));
+    camera_strobe_pre_delay_->setValue(static_cast<int>(value.line_io.strobe_pre_delay_us));
+    camera_strobe_post_delay_->setValue(static_cast<int>(value.line_io.strobe_post_delay_us));
+
+    const auto selected = camera_selector_ && camera_selector_->currentIndex() >= 0
+                              ? static_cast<std::size_t>(camera_selector_->currentIndex())
+                              : camera_snapshot_.cameras.size();
+    if (selected < camera_snapshot_.cameras.size())
+    {
+        const auto& actual_parameters = camera_snapshot_.cameras[selected].actual;
+        if (actual_parameters.line_io_available)
+        {
+            const auto& actual = actual_parameters.line_io;
+            camera_line_io_actual_->setText(
+                QStringLiteral("Line 0 启用=%1；Line 1 启用=%2；持续/前置/后置=%3/%4/%5 us")
+                    .arg(actual.alarm_input_enabled ? QStringLiteral("是") : QStringLiteral("否"),
+                         actual.strobe_output_enabled ? QStringLiteral("是") : QStringLiteral("否"))
+                    .arg(actual.strobe_duration_us)
+                    .arg(actual.strobe_pre_delay_us)
+                    .arg(actual.strobe_post_delay_us));
+        }
+        else
+        {
+            camera_line_io_actual_->setText(QStringLiteral("设备实际值：未连接/不可用"));
+        }
+    }
+    update_line_input_indicators();
 }
 
 void MainWindow::update_camera_controls()
@@ -2380,6 +2556,46 @@ void MainWindow::update_camera_controls()
                      camera_snapshot_.cameras[index].state == "acquiring");
     }
     camera_read_parameters_button_->setEnabled(connected);
+    bool alarm_supported = false;
+    bool strobe_supported = false;
+    QString unsupported_reason = QStringLiteral("连接相机后读取 Line I/O 能力");
+    if (configured)
+    {
+        const auto index = static_cast<std::size_t>(camera_selector_->currentIndex());
+        if (index < camera_snapshot_.cameras.size() &&
+            camera_snapshot_.cameras[index].line_io_capabilities)
+        {
+            const auto& capability = *camera_snapshot_.cameras[index].line_io_capabilities;
+            alarm_supported = capability.alarm_input_supported &&
+                              capability.rising_edge_supported && capability.falling_edge_supported;
+            strobe_supported = capability.strobe_output_supported;
+            if (!capability.unsupported_reason.empty())
+                unsupported_reason = QString::fromStdString(capability.unsupported_reason);
+        }
+    }
+    camera_alarm_input_enabled_->setEnabled(configured && alarm_supported);
+    camera_alarm_active_level_->setEnabled(configured && alarm_supported);
+    camera_strobe_output_enabled_->setEnabled(configured && strobe_supported);
+    camera_strobe_duration_->setEnabled(configured && strobe_supported);
+    camera_strobe_pre_delay_->setEnabled(configured && strobe_supported);
+    camera_strobe_post_delay_->setEnabled(configured && strobe_supported);
+    const QString alarm_reason =
+        alarm_supported
+            ? QString{}
+            : (unsupported_reason.isEmpty() ? QStringLiteral("设备不支持 Line 0 双边沿输入")
+                                            : unsupported_reason);
+    const QString strobe_reason =
+        strobe_supported ? QString{}
+                         : (unsupported_reason.isEmpty() ? QStringLiteral("设备不支持 Line 1 频闪")
+                                                         : unsupported_reason);
+    camera_alarm_input_enabled_->setToolTip(alarm_reason);
+    camera_alarm_active_level_->setToolTip(alarm_reason);
+    for (auto* widget : {static_cast<QWidget*>(camera_strobe_output_enabled_),
+                         static_cast<QWidget*>(camera_strobe_duration_),
+                         static_cast<QWidget*>(camera_strobe_pre_delay_),
+                         static_cast<QWidget*>(camera_strobe_post_delay_)})
+        if (!strobe_supported)
+            widget->setToolTip(strobe_reason);
 
     const int row = discovered_devices_ ? discovered_devices_->currentRow() : -1;
     const bool valid_row =

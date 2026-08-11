@@ -12,7 +12,7 @@ namespace paperbreak::config
 {
 
 inline constexpr std::size_t config_max_bytes = 1024U * 1024U;
-inline constexpr std::uint32_t config_schema_version = 2U;
+inline constexpr std::uint32_t config_schema_version = 3U;
 inline constexpr std::size_t maximum_camera_count = 4U;
 
 enum class PixelFormat
@@ -57,6 +57,23 @@ struct SystemConfig final
     bool operator==(const SystemConfig&) const = default;
 };
 
+enum class AlarmActiveLevel
+{
+    high,
+    low,
+};
+
+struct CameraLineIoConfig final
+{
+    bool alarm_input_enabled{};
+    AlarmActiveLevel alarm_active_level{AlarmActiveLevel::high};
+    bool strobe_output_enabled{};
+    std::uint32_t strobe_duration_us{};
+    std::uint32_t strobe_pre_delay_us{};
+    std::uint32_t strobe_post_delay_us{};
+    bool operator==(const CameraLineIoConfig&) const = default;
+};
+
 struct CameraConfig final
 {
     std::string id;
@@ -75,6 +92,7 @@ struct CameraConfig final
     std::uint32_t trigger_delay_us{};
     std::uint32_t packet_size_bytes{1500U};
     std::uint32_t inter_packet_delay_ns{};
+    CameraLineIoConfig line_io;
     bool operator==(const CameraConfig&) const = default;
 };
 
@@ -212,7 +230,7 @@ struct BasicConfigInfo final
     std::size_t file_size_bytes{};
 };
 
-/// Parses strict schema v2 and resolves/validates paths against config_directory.
+/// Parses strict schema v3 or migrates schema v2 with safe Line I/O defaults.
 [[nodiscard]] Result<EdgeConfig> parse_config(
     std::string_view contents, const std::filesystem::path& config_directory) noexcept;
 [[nodiscard]] std::string serialize_config(const EdgeConfig& config);

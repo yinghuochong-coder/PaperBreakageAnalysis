@@ -92,9 +92,13 @@ const MvsApi& production_mvs_api() noexcept
                             .set_int_value = &MV_CC_SetIntValueEx,
                             .get_enum_value = &MV_CC_GetEnumValue,
                             .set_enum_value = &MV_CC_SetEnumValue,
+                            .set_enum_value_by_string = &MV_CC_SetEnumValueByString,
                             .get_bool_value = &MV_CC_GetBoolValue,
                             .set_bool_value = &MV_CC_SetBoolValue,
-                            .set_command_value = &MV_CC_SetCommandValue};
+                            .set_command_value = &MV_CC_SetCommandValue,
+                            .register_event_callback = &MV_CC_RegisterEventCallBackEx,
+                            .event_notification_on = &MV_CC_EventNotificationOn,
+                            .event_notification_off = &MV_CC_EventNotificationOff};
     return api;
 }
 
@@ -214,6 +218,7 @@ class HikrobotCameraDevice final : public ICameraDevice
             return Result<void>::failure(opened.error());
         }
         handle_.emplace(std::move(opened).value());
+        handle_->set_line_input_observer(line_input_observer_);
         return Result<void>::success();
     }
 
@@ -238,6 +243,13 @@ class HikrobotCameraDevice final : public ICameraDevice
             handle_.reset();
         }
         return closed;
+    }
+
+    void set_line_input_observer(LineInputObserver observer) override
+    {
+        line_input_observer_ = std::move(observer);
+        if (handle_)
+            handle_->set_line_input_observer(line_input_observer_);
     }
 
     [[nodiscard]] Result<CameraCapabilities> capabilities() override
@@ -343,6 +355,7 @@ class HikrobotCameraDevice final : public ICameraDevice
     CameraDeviceDescriptor descriptor_;
     std::optional<DeviceHandle> handle_;
     std::optional<StreamSession> stream_;
+    LineInputObserver line_input_observer_;
 };
 } // namespace
 
@@ -779,17 +792,71 @@ Result<CameraCapabilities> read_capabilities_locked(const MvsApi& api, void* han
             if (!name || api.set_enum_value(handle, "LineSelector", selector) != MV_OK)
                 continue;
             MVCC_ENUMVALUE mode{};
-            if (api.get_enum_value(handle, "LineMode", &mode) == MV_OK && mode.nCurValue <= 1U)
-                result.digital_io.push_back(
-                    {*name,
-                     mode.nCurValue == 0U ? DigitalIoDirection::input : DigitalIoDirection::output,
-                     mode.nCurValue == 1U});
+            if (api.get_enum_value(handle, "LineMode", &mode) == MV_OK)
+            {
+                if (mode.nCurValue <= 1U)
+                    result.digital_io.push_back({*name,
+                                                 mode.nCurValue == 0U ? DigitalIoDirection::input
+                                                                      : DigitalIoDirection::output,
+                                                 mode.nCurValue == 1U});
+                if (selector == 0U && supports(mode, 0U))
+                {
+                    result.line_io.alarm_input_supported = true;
+                    result.line_io.line0_rising_edge_supported = true;
+                    result.line_io.line0_falling_edge_supported = true;
+                }
+                if (selector == 1U && supports(mode, 8U))
+                    result.line_io.strobe_output_supported = true;
+            }
         }
-        if (api.set_enum_value(handle, "LineSelector", original) != MV_OK)
+        if (result.line_io.strobe_output_supported)
+        {
+            const int select_strobe = api.set_enum_value(handle, "LineSelector", 1U);
+            if (select_strobe != MV_OK)
+            {
+                static_cast<void>(api.set_enum_value(handle, "LineSelector", original));
+                return Result<CameraCapabilities>::failure(parameter_error(
+                    CameraErrorKind::parameter_read_failed, select_strobe,
+                    "camera.hikrobot.capabilities", "LineSelector", "strobe-selector-failed"));
+            }
+            const auto duration = optional_float(api, handle, "StrobeLineDuration");
+            const auto pre_delay = optional_float(api, handle, "StrobeLinePreDelay");
+            const auto post_delay = optional_float(api, handle, "StrobeLineDelay");
+            const int restore_code = api.set_enum_value(handle, "LineSelector", original);
+            if (restore_code != MV_OK)
+                return Result<CameraCapabilities>::failure(parameter_error(
+                    CameraErrorKind::parameter_read_failed, restore_code,
+                    "camera.hikrobot.capabilities", "LineSelector", "restore-selector-failed"));
+            if (!duration || !pre_delay || !post_delay)
+                return Result<CameraCapabilities>::failure(
+                    !duration ? duration.error()
+                              : (!pre_delay ? pre_delay.error() : post_delay.error()));
+            const auto convert = [](const std::optional<MVCC_FLOATVALUE>& value)
+                -> std::optional<SteppedRange<std::uint32_t>> {
+                if (!value || value->fMin < 0.0F || value->fMax < value->fMin ||
+                    value->fMax > static_cast<float>(std::numeric_limits<std::uint32_t>::max()))
+                    return std::nullopt;
+                return SteppedRange<std::uint32_t>{static_cast<std::uint32_t>(value->fMin),
+                                                   static_cast<std::uint32_t>(value->fMax), 1U};
+            };
+            result.line_io.strobe_duration_us = convert(duration.value());
+            result.line_io.strobe_pre_delay_us = convert(pre_delay.value());
+            result.line_io.strobe_post_delay_us = convert(post_delay.value());
+            if (!result.line_io.strobe_duration_us || !result.line_io.strobe_pre_delay_us ||
+                !result.line_io.strobe_post_delay_us)
+            {
+                result.line_io.strobe_output_supported = false;
+                result.line_io.unsupported_reason = "频闪时序节点范围无效或不可读";
+            }
+        }
+        else if (api.set_enum_value(handle, "LineSelector", original) != MV_OK)
             return Result<CameraCapabilities>::failure(parameter_error(
                 CameraErrorKind::parameter_read_failed, MV_E_GC_ACCESS,
                 "camera.hikrobot.capabilities", "LineSelector", "restore-selector-failed"));
     }
+    if (!result.line_io.alarm_input_supported && !result.line_io.strobe_output_supported &&
+        result.line_io.unsupported_reason.empty())
+        result.line_io.unsupported_reason = "设备不支持固定的 Line 0 输入或 Line 1 频闪模式";
     return Result<CameraCapabilities>::success(std::move(result));
 }
 
@@ -803,7 +870,8 @@ template <typename T> Result<T> required_node(const int code, T value, const std
 }
 
 Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* handle,
-                                                       const CameraCapabilities& capabilities)
+                                                       const CameraCapabilities& capabilities,
+                                                       const bool alarm_events_enabled = false)
 {
     CameraParameterSnapshot result;
     auto read_float = [&](const char* node) -> Result<double> {
@@ -954,6 +1022,46 @@ Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* 
                                 "camera.hikrobot.readParameters", value_node, "read-failed"));
         result.digital_io.push_back({line.line_id, value});
     }
+    LineIoParameters line_io{.alarm_input_enabled = alarm_events_enabled};
+    if (capabilities.line_io.alarm_input_supported)
+    {
+        int code = api.set_enum_value(handle, "LineSelector", 0U);
+        bool raw_level{};
+        if (code == MV_OK)
+            code = api.get_bool_value(handle, "LineStatus", &raw_level);
+        if (code != MV_OK)
+            return Result<CameraParameterSnapshot>::failure(parameter_error(
+                CameraErrorKind::parameter_read_failed, code, "camera.hikrobot.readParameters",
+                "LineStatus", "line0-read-failed"));
+        result.line_input = LineInputState{.enabled = alarm_events_enabled,
+                                           .raw_level = raw_level,
+                                           // A device read is a snapshot, not a new edge event.
+                                           // Keep this stable so rollback equality is meaningful.
+                                           .timestamp_utc_ms = 0};
+    }
+    if (capabilities.line_io.strobe_output_supported)
+    {
+        int code = api.set_enum_value(handle, "LineSelector", 1U);
+        bool enabled{};
+        if (code == MV_OK)
+            code = api.get_bool_value(handle, "StrobeEnable", &enabled);
+        if (code != MV_OK)
+            return Result<CameraParameterSnapshot>::failure(
+                parameter_error(CameraErrorKind::parameter_read_failed, code,
+                                "camera.hikrobot.readParameters", "StrobeEnable", "read-failed"));
+        auto duration = read_float("StrobeLineDuration");
+        auto pre_delay = read_float("StrobeLinePreDelay");
+        auto post_delay = read_float("StrobeLineDelay");
+        if (!duration || !pre_delay || !post_delay)
+            return Result<CameraParameterSnapshot>::failure(
+                !duration ? duration.error()
+                          : (!pre_delay ? pre_delay.error() : post_delay.error()));
+        line_io.strobe_output_enabled = enabled;
+        line_io.strobe_duration_us = static_cast<std::uint32_t>(duration.value());
+        line_io.strobe_pre_delay_us = static_cast<std::uint32_t>(pre_delay.value());
+        line_io.strobe_post_delay_us = static_cast<std::uint32_t>(post_delay.value());
+    }
+    result.line_io = line_io;
     return Result<CameraParameterSnapshot>::success(std::move(result));
 }
 
@@ -961,7 +1069,9 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
                                      const CameraParameterSnapshot& parameters,
                                      const CameraCapabilities& capabilities,
                                      const CameraErrorKind error_kind,
-                                     const std::optional<bool> frame_rate_enable)
+                                     const std::optional<bool> frame_rate_enable,
+                                     LineEventCallbackBoundary* line_callback,
+                                     bool& alarm_events_enabled)
 {
     auto check = [&](const int code, const char* node) -> Result<void> {
         if (code == MV_OK)
@@ -1089,6 +1199,120 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
             !r)
             return r;
     }
+    if (parameters.line_io)
+    {
+        constexpr const char* rising_event = "EventLine0RisingEdge";
+        constexpr const char* falling_event = "EventLine0FallingEdge";
+        const auto event_error = [&](const int code, const char* event, const char* reason) {
+            return Result<void>::failure(parameter_error(
+                error_kind, code, "camera.hikrobot.applyParameters", event, reason));
+        };
+        const auto disable_events = [&]() -> Result<void> {
+            if (!alarm_events_enabled)
+                return Result<void>::success();
+            const int falling = api.event_notification_off(handle, falling_event);
+            const int rising = api.event_notification_off(handle, rising_event);
+            if (falling != MV_OK)
+                return event_error(falling, falling_event, "notification-off-failed");
+            if (rising != MV_OK)
+                return event_error(rising, rising_event, "notification-off-failed");
+            alarm_events_enabled = false;
+            return Result<void>::success();
+        };
+
+        if (!parameters.line_io->alarm_input_enabled)
+        {
+            if (auto disabled = disable_events(); !disabled)
+                return disabled;
+        }
+        else if (capabilities.line_io.alarm_input_supported)
+        {
+            if (auto selected =
+                    check(api.set_enum_value(handle, "LineSelector", 0U), "LineSelector");
+                !selected)
+                return selected;
+            if (auto input = check(api.set_enum_value(handle, "LineMode", 0U), "LineMode"); !input)
+                return input;
+            bool initial{};
+            const int initial_code = api.get_bool_value(handle, "LineStatus", &initial);
+            if (initial_code != MV_OK)
+                return event_error(initial_code, "LineStatus", "initial-read-failed");
+            if (!alarm_events_enabled)
+            {
+                if (line_callback == nullptr)
+                    return event_error(MV_E_PARAMETER, "Line0", "missing-callback-boundary");
+                int code = api.register_event_callback(
+                    handle, rising_event, &line_event_callback_trampoline, line_callback);
+                if (code != MV_OK)
+                    return event_error(code, rising_event, "register-failed");
+                code = api.register_event_callback(handle, falling_event,
+                                                   &line_event_callback_trampoline, line_callback);
+                if (code != MV_OK)
+                    return event_error(code, falling_event, "register-failed");
+                code = api.event_notification_on(handle, rising_event);
+                if (code != MV_OK)
+                    return event_error(code, rising_event, "notification-on-failed");
+                code = api.event_notification_on(handle, falling_event);
+                if (code != MV_OK)
+                {
+                    static_cast<void>(api.event_notification_off(handle, rising_event));
+                    return event_error(code, falling_event, "notification-on-failed");
+                }
+                alarm_events_enabled = true;
+            }
+        }
+
+        if (capabilities.line_io.strobe_output_supported)
+        {
+            if (auto selected =
+                    check(api.set_enum_value(handle, "LineSelector", 1U), "LineSelector");
+                !selected)
+                return selected;
+            if (!parameters.line_io->strobe_output_enabled)
+            {
+                if (auto disabled =
+                        check(api.set_bool_value(handle, "StrobeEnable", false), "StrobeEnable");
+                    !disabled)
+                    return disabled;
+            }
+            else
+            {
+                if (auto mode = check(api.set_enum_value(handle, "LineMode", 8U), "LineMode");
+                    !mode)
+                    return mode;
+                if (auto source = check(
+                        api.set_enum_value_by_string(handle, "LineSource", "ExposureStartActive"),
+                        "LineSource");
+                    !source)
+                    return source;
+                if (auto duration =
+                        check(api.set_float_value(
+                                  handle, "StrobeLineDuration",
+                                  static_cast<float>(parameters.line_io->strobe_duration_us)),
+                              "StrobeLineDuration");
+                    !duration)
+                    return duration;
+                if (auto pre =
+                        check(api.set_float_value(
+                                  handle, "StrobeLinePreDelay",
+                                  static_cast<float>(parameters.line_io->strobe_pre_delay_us)),
+                              "StrobeLinePreDelay");
+                    !pre)
+                    return pre;
+                if (auto post =
+                        check(api.set_float_value(
+                                  handle, "StrobeLineDelay",
+                                  static_cast<float>(parameters.line_io->strobe_post_delay_us)),
+                              "StrobeLineDelay");
+                    !post)
+                    return post;
+                if (auto enabled =
+                        check(api.set_bool_value(handle, "StrobeEnable", true), "StrobeEnable");
+                    !enabled)
+                    return enabled;
+            }
+        }
+    }
     return Result<void>::success();
 }
 } // namespace
@@ -1096,7 +1320,19 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
 struct DeviceHandle::State final
 {
     State(const MvsApi& api_value, void* handle_value) noexcept
-        : api(api_value), handle(handle_value)
+        : api(api_value), handle(handle_value), line_callback([this](const bool raw_level) {
+              LineInputObserver observer;
+              {
+                  std::scoped_lock lock{observer_mutex};
+                  observer = line_input_observer;
+              }
+              if (observer)
+                  observer(
+                      {.raw_level = raw_level,
+                       .timestamp_utc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::system_clock::now().time_since_epoch())
+                                               .count()});
+          })
     {
     }
 
@@ -1146,7 +1382,7 @@ struct DeviceHandle::State final
         auto capabilities = read_capabilities_locked(api, handle);
         if (!capabilities)
             return Result<CameraParameterSnapshot>::failure(capabilities.error());
-        return read_parameters_locked(api, handle, capabilities.value());
+        return read_parameters_locked(api, handle, capabilities.value(), alarm_events_enabled);
     }
 
     Result<CameraParameterSnapshot> apply_locked(const CameraParameterSnapshot& parameters)
@@ -1159,7 +1395,7 @@ struct DeviceHandle::State final
             return Result<CameraParameterSnapshot>::failure(capabilities.error());
         if (auto validation = validate_parameters(capabilities.value(), parameters); !validation)
             return Result<CameraParameterSnapshot>::failure(validation.error());
-        auto old = read_parameters_locked(api, handle, capabilities.value());
+        auto old = read_parameters_locked(api, handle, capabilities.value(), alarm_events_enabled);
         if (!old)
             return Result<CameraParameterSnapshot>::failure(old.error());
         std::optional<bool> old_frame_rate_enable;
@@ -1185,12 +1421,13 @@ struct DeviceHandle::State final
         }
 
         auto restore_or_fault = [&](Error original) -> Result<CameraParameterSnapshot> {
-            auto restored =
-                write_parameters_locked(api, handle, old.value(), capabilities.value(),
-                                        CameraErrorKind::parameter_faulted, old_frame_rate_enable);
+            auto restored = write_parameters_locked(
+                api, handle, old.value(), capabilities.value(), CameraErrorKind::parameter_faulted,
+                old_frame_rate_enable, &line_callback, alarm_events_enabled);
             if (restored)
             {
-                auto confirmed = read_parameters_locked(api, handle, capabilities.value());
+                auto confirmed =
+                    read_parameters_locked(api, handle, capabilities.value(), alarm_events_enabled);
                 if (!confirmed || confirmed.value() != old.value())
                     restored =
                         Result<void>::failure(faulted_error("camera.hikrobot.rollbackParameters"));
@@ -1224,12 +1461,13 @@ struct DeviceHandle::State final
             return Result<CameraParameterSnapshot>::failure(std::move(original));
         };
 
-        auto written = write_parameters_locked(api, handle, parameters, capabilities.value(),
-                                               CameraErrorKind::parameter_write_failed,
-                                               requested_frame_rate_enable);
+        auto written = write_parameters_locked(
+            api, handle, parameters, capabilities.value(), CameraErrorKind::parameter_write_failed,
+            requested_frame_rate_enable, &line_callback, alarm_events_enabled);
         if (!written)
             return restore_or_fault(written.error());
-        auto actual = read_parameters_locked(api, handle, capabilities.value());
+        auto actual =
+            read_parameters_locked(api, handle, capabilities.value(), alarm_events_enabled);
         if (!actual)
             return restore_or_fault(actual.error());
         if (parameters.frame_rate && requested_frame_rate_enable)
@@ -1299,6 +1537,16 @@ struct DeviceHandle::State final
         {
             return Result<void>::success();
         }
+        if (alarm_events_enabled)
+        {
+            const int falling = api.event_notification_off(handle, "EventLine0FallingEdge");
+            const int rising = api.event_notification_off(handle, "EventLine0RisingEdge");
+            if (falling != MV_OK || rising != MV_OK)
+                return Result<void>::failure(parameter_error(
+                    CameraErrorKind::parameter_write_failed, falling != MV_OK ? falling : rising,
+                    "camera.hikrobot.closeDevice", "Line0", "notification-off-failed"));
+            alarm_events_enabled = false;
+        }
         if (const auto stopped = stop_locked(); !stopped)
         {
             return stopped;
@@ -1331,6 +1579,12 @@ struct DeviceHandle::State final
         {
             return;
         }
+        if (alarm_events_enabled)
+        {
+            static_cast<void>(api.event_notification_off(handle, "EventLine0FallingEdge"));
+            static_cast<void>(api.event_notification_off(handle, "EventLine0RisingEdge"));
+            alarm_events_enabled = false;
+        }
         if (streaming)
         {
             static_cast<void>(api.stop_grabbing(handle));
@@ -1350,9 +1604,13 @@ struct DeviceHandle::State final
     bool opened{};
     bool streaming{};
     bool parameter_faulted{};
+    bool alarm_events_enabled{};
     std::optional<std::uint64_t> timestamp_frequency_hz;
     bool timestamp_frequency_checked{};
     std::mutex mutex;
+    std::mutex observer_mutex;
+    LineInputObserver line_input_observer;
+    LineEventCallbackBoundary line_callback;
 };
 
 Result<DeviceHandle> DeviceHandle::open(const MvsApi& api, const MV_CC_DEVICE_INFO& device_info)
@@ -1591,6 +1849,14 @@ Result<CameraParameterSnapshot> DeviceHandle::apply_parameters(
     return state_->apply_locked(parameters);
 }
 
+void DeviceHandle::set_line_input_observer(LineInputObserver observer)
+{
+    if (!state_)
+        return;
+    std::scoped_lock lock{state_->observer_mutex};
+    state_->line_input_observer = std::move(observer);
+}
+
 Result<void> DeviceHandle::close() noexcept
 {
     if (!state_)
@@ -1651,6 +1917,60 @@ bool StreamSession::active() const noexcept
     }
     std::scoped_lock lock{state_->mutex};
     return state_->streaming;
+}
+
+LineEventCallbackBoundary::LineEventCallbackBoundary(Handler handler) : handler_(std::move(handler))
+{
+    if (!handler_)
+        throw std::invalid_argument{"line event callback handler must not be empty"};
+}
+
+CallbackDiagnostics LineEventCallbackBoundary::diagnostics() const noexcept
+{
+    return {.invocations = invocations_.load(std::memory_order_relaxed),
+            .failures = failures_.load(std::memory_order_relaxed),
+            .last_failure = last_failure_.load(std::memory_order_relaxed)};
+}
+
+void LineEventCallbackBoundary::invoke(MV_EVENT_OUT_INFO* event_info) noexcept
+{
+    invocations_.fetch_add(1U, std::memory_order_relaxed);
+    if (event_info == nullptr)
+    {
+        failures_.fetch_add(1U, std::memory_order_relaxed);
+        last_failure_.store(CallbackFailure::unknown_exception, std::memory_order_relaxed);
+        return;
+    }
+    try
+    {
+        const auto end =
+            std::find(std::begin(event_info->EventName), std::end(event_info->EventName), '\0');
+        const std::string_view name{
+            event_info->EventName,
+            static_cast<std::size_t>(end - std::begin(event_info->EventName))};
+        if (name == "EventLine0RisingEdge")
+            handler_(true);
+        else if (name == "EventLine0FallingEdge")
+            handler_(false);
+        else
+            throw std::invalid_argument{"unexpected line event"};
+    }
+    catch (const std::exception&)
+    {
+        failures_.fetch_add(1U, std::memory_order_relaxed);
+        last_failure_.store(CallbackFailure::standard_exception, std::memory_order_relaxed);
+    }
+    catch (...)
+    {
+        failures_.fetch_add(1U, std::memory_order_relaxed);
+        last_failure_.store(CallbackFailure::unknown_exception, std::memory_order_relaxed);
+    }
+}
+
+void __stdcall line_event_callback_trampoline(MV_EVENT_OUT_INFO* event_info, void* user) noexcept
+{
+    if (user != nullptr)
+        static_cast<LineEventCallbackBoundary*>(user)->invoke(event_info);
 }
 
 ImageCallbackBoundary::ImageCallbackBoundary(Handler handler) : handler_(std::move(handler))

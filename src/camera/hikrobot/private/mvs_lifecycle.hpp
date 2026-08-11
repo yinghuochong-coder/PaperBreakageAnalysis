@@ -34,9 +34,13 @@ struct MvsApi final
     int(__stdcall* set_int_value)(void*, const char*, std::int64_t);
     int(__stdcall* get_enum_value)(void*, const char*, MVCC_ENUMVALUE*);
     int(__stdcall* set_enum_value)(void*, const char*, unsigned int);
+    int(__stdcall* set_enum_value_by_string)(void*, const char*, const char*);
     int(__stdcall* get_bool_value)(void*, const char*, bool*);
     int(__stdcall* set_bool_value)(void*, const char*, bool);
     int(__stdcall* set_command_value)(void*, const char*);
+    int(__stdcall* register_event_callback)(void*, const char*, MvEventCallback, void*);
+    int(__stdcall* event_notification_on)(void*, const char*);
+    int(__stdcall* event_notification_off)(void*, const char*);
 };
 
 [[nodiscard]] const MvsApi& production_mvs_api() noexcept;
@@ -98,6 +102,7 @@ class DeviceHandle final
     [[nodiscard]] Result<CameraParameterSnapshot> read_parameters();
     [[nodiscard]] Result<CameraParameterSnapshot> apply_parameters(
         const CameraParameterSnapshot& parameters);
+    void set_line_input_observer(LineInputObserver observer);
     [[nodiscard]] Result<void> software_trigger();
     [[nodiscard]] Result<CapturedFrameMetadata> capture_into(FrameBuffer& destination,
                                                              std::chrono::milliseconds timeout);
@@ -161,6 +166,24 @@ class ImageCallbackBoundary final
     std::atomic_uint64_t failures_{};
     std::atomic<CallbackFailure> last_failure_{CallbackFailure::none};
 };
+
+class LineEventCallbackBoundary final
+{
+  public:
+    using Handler = std::function<void(bool)>;
+
+    explicit LineEventCallbackBoundary(Handler handler);
+    [[nodiscard]] CallbackDiagnostics diagnostics() const noexcept;
+    void invoke(MV_EVENT_OUT_INFO* event_info) noexcept;
+
+  private:
+    Handler handler_;
+    std::atomic_uint64_t invocations_{};
+    std::atomic_uint64_t failures_{};
+    std::atomic<CallbackFailure> last_failure_{CallbackFailure::none};
+};
+
+void __stdcall line_event_callback_trampoline(MV_EVENT_OUT_INFO* event_info, void* user) noexcept;
 
 void __stdcall image_callback_trampoline(unsigned char* data, MV_FRAME_OUT_INFO_EX* frame_info,
                                          void* user) noexcept;

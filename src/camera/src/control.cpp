@@ -29,6 +29,7 @@ struct CameraControlRuntime::Session final
     std::unique_ptr<AcquisitionQueue> acquisition_queue;
     std::shared_ptr<AcquisitionWorker> acquisition;
     std::jthread frame_forwarder;
+    std::size_t line_input_slot{};
 };
 namespace
 {
@@ -45,27 +46,105 @@ Error unsupported(std::string op)
 } // namespace
 CameraControlRuntime::CameraControlRuntime(std::shared_ptr<ICameraProvider> p,
                                            CameraFrameObserver frame_observer,
-                                           CameraFrameDeliveryOptions delivery_options)
+                                           CameraFrameDeliveryOptions delivery_options,
+                                           CameraLineInputObserver line_input_observer)
     : provider_(std::move(p)), frame_observer_(std::move(frame_observer)),
-      delivery_options_(delivery_options)
+      delivery_options_(delivery_options), line_input_observer_(std::move(line_input_observer))
 {
+    line_input_dispatcher_ =
+        std::jthread([this](const std::stop_token token) { dispatch_line_inputs(token); });
 }
 CameraControlRuntime::~CameraControlRuntime()
 {
-    std::scoped_lock lock{mutex_};
-    for (auto& session : sessions_)
     {
-        std::scoped_lock operation_lock{session->operation_mutex};
-        if (!session->device)
-            continue;
-        if (session->state.load(std::memory_order_acquire) == CameraControlState::acquiring)
+        std::scoped_lock lock{mutex_};
+        for (auto& session : sessions_)
         {
-            static_cast<void>(stop_frame_delivery(*session));
-            static_cast<void>(session->device->stop_acquisition());
+            std::scoped_lock operation_lock{session->operation_mutex};
+            if (!session->device)
+                continue;
+            if (session->state.load(std::memory_order_acquire) == CameraControlState::acquiring)
+            {
+                static_cast<void>(stop_frame_delivery(*session));
+                static_cast<void>(session->device->stop_acquisition());
+            }
+            static_cast<void>(session->device->disconnect());
+            session->device.reset();
+            session->state.store(CameraControlState::disconnected, std::memory_order_release);
         }
-        static_cast<void>(session->device->disconnect());
-        session->device.reset();
-        session->state.store(CameraControlState::disconnected, std::memory_order_release);
+    }
+    if (line_input_dispatcher_.joinable())
+    {
+        line_input_dispatcher_.request_stop();
+        line_input_condition_.notify_all();
+        line_input_dispatcher_.join();
+    }
+}
+
+void CameraControlRuntime::enqueue_line_input(const std::size_t slot, const bool raw_level,
+                                              const std::int64_t timestamp_utc_ms) noexcept
+{
+    if (slot >= line_input_slots_.size())
+        return;
+    {
+        std::scoped_lock lock{line_input_mutex_};
+        const auto revision = ++line_input_revisions_[slot];
+        line_input_slots_[slot] = {
+            .raw_level = raw_level, .revision = revision, .timestamp_utc_ms = timestamp_utc_ms};
+    }
+    line_input_condition_.notify_one();
+}
+
+void CameraControlRuntime::dispatch_line_inputs(const std::stop_token stop_token) noexcept
+{
+    while (!stop_token.stop_requested())
+    {
+        std::array<std::optional<LineInputEvent>, 4U> pending;
+        std::array<std::string, 4U> pending_camera_ids;
+        {
+            std::unique_lock lock{line_input_mutex_};
+            line_input_condition_.wait(lock, stop_token, [this] {
+                return std::ranges::any_of(line_input_slots_,
+                                           [](const auto& item) { return item.has_value(); });
+            });
+            if (stop_token.stop_requested())
+                break;
+            pending.swap(line_input_slots_);
+            pending_camera_ids = line_input_camera_ids_;
+        }
+        for (std::size_t slot = 0U; slot < pending.size(); ++slot)
+        {
+            if (!pending[slot])
+                continue;
+            const std::string& camera_id = pending_camera_ids[slot];
+            Session* session{};
+            {
+                std::scoped_lock lock{mutex_};
+                auto found = find(camera_id);
+                if (found)
+                    session = found.value();
+            }
+            const bool connected = session && session->state.load(std::memory_order_acquire) !=
+                                                  CameraControlState::disconnected;
+            if (connected)
+            {
+                std::scoped_lock lock{session->cache_mutex};
+                if (session->actual)
+                    session->actual->line_input =
+                        LineInputState{.enabled = true,
+                                       .raw_level = pending[slot]->raw_level,
+                                       .revision = pending[slot]->revision,
+                                       .timestamp_utc_ms = pending[slot]->timestamp_utc_ms};
+            }
+            try
+            {
+                if (connected && line_input_observer_ && !camera_id.empty())
+                    line_input_observer_(camera_id, *pending[slot]);
+            }
+            catch (...)
+            {
+            }
+        }
     }
 }
 
@@ -375,6 +454,11 @@ Result<CameraControlSnapshot> CameraControlRuntime::connect(std::string_view id,
             auto created = std::make_unique<Session>();
             created->id = id;
             created->serial = serial;
+            created->line_input_slot = sessions_.size();
+            {
+                std::scoped_lock input_lock{line_input_mutex_};
+                line_input_camera_ids_[created->line_input_slot] = created->id;
+            }
             session = created.get();
             sessions_.push_back(std::move(created));
         }
@@ -400,6 +484,10 @@ Result<CameraControlSnapshot> CameraControlRuntime::connect(std::string_view id,
     auto device = provider_->create_device(serial);
     if (!device)
         return Result<CameraControlSnapshot>::failure(device.error());
+    const auto input_slot = session->line_input_slot;
+    device.value()->set_line_input_observer([this, input_slot](const LineInputEvent& event) {
+        enqueue_line_input(input_slot, event.raw_level, event.timestamp_utc_ms);
+    });
     auto open = device.value()->connect();
     if (!open)
         return Result<CameraControlSnapshot>::failure(open.error());
@@ -443,6 +531,10 @@ Result<CameraControlSnapshot> CameraControlRuntime::disconnect(std::string_view 
         return Result<CameraControlSnapshot>::failure(r.error());
     session->device.reset();
     session->state.store(CameraControlState::disconnected, std::memory_order_release);
+    {
+        std::scoped_lock input_lock{line_input_mutex_};
+        line_input_slots_[session->line_input_slot].reset();
+    }
     return read(*session);
 }
 Result<CameraControlSnapshot> CameraControlRuntime::start(std::string_view id)

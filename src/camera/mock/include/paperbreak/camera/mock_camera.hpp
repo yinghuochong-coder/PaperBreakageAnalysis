@@ -74,6 +74,15 @@ struct MockCameraConfig final
     std::size_t maximum_payload_bytes{};
     std::size_t fault_queue_capacity{16U};
     std::size_t trigger_capacity{16U};
+    LineIoCapabilities line_io_capabilities{
+        .alarm_input_supported = true,
+        .line0_rising_edge_supported = true,
+        .line0_falling_edge_supported = true,
+        .strobe_output_supported = true,
+        .strobe_duration_us = SteppedRange<std::uint32_t>{1U, 1000000U, 1U},
+        .strobe_pre_delay_us = SteppedRange<std::uint32_t>{0U, 1000000U, 1U},
+        .strobe_post_delay_us = SteppedRange<std::uint32_t>{0U, 1000000U, 1U}};
+    bool initial_line0_level{};
     std::vector<MockScheduledFault> fault_script;
     bool operator==(const MockCameraConfig&) const = default;
 };
@@ -105,6 +114,8 @@ class MockCameraControl final
     [[nodiscard]] Result<void> inject_fault(MockFault fault) const;
     /// Enqueues simulated hardware edges. Only valid in hardware-trigger mode.
     [[nodiscard]] Result<void> hardware_trigger(std::size_t count = 1U) const;
+    /// Changes Line 0 and emits a device input event when the input is enabled and connected.
+    [[nodiscard]] Result<void> set_line_input(bool raw_level) const;
     /// Clears queued runtime faults without rewinding the immutable startup script.
     void clear_faults() const noexcept;
     /// Returns a consistent state and bounded-channel snapshot.

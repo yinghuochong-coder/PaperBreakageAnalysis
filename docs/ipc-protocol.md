@@ -259,6 +259,12 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 相机拓扑与当前运行拓扑不同，连接、采集和参数
 下发均应等待服务重启。
 
+每个槽位还公开 `saved.lineIo`；连接后公开 `actual.lineIo`、`lineInput` 和
+`capabilities.lineIo`。能力对象包含 Line 0 输入、上升沿/下降沿支持状态，Line 1 频闪支持状态、
+不支持原因，以及 `strobeDurationUs`、`strobePreDelayUs`、`strobePostDelayUs` 三项设备实际
+`minimum/maximum/increment`。`lineInput` 包含 `enabled`、原始 `rawLevel`、按保存有效电平换算的
+`alarmActive`、`revision`、`timestampUtcMs` 和 `stale`。查询快照是断线重连和漏推送后的事实源。
+
 设备已连接后，`device`、`capabilities` 和 `actual` 表示最近一次成功连接或参数更新时的已验证
 回读值。采集期间 `camera.list` 和 `camera.getConfig` 读取该缓存及线程安全采集统计，不周期性访问
 MVS 参数节点；因此状态查询不会与取帧争用设备互斥。配置 `frameRate` 时适配器先启用
@@ -334,12 +340,21 @@ MVS 参数节点；因此状态查询不会与取帧争用设备互斥。配置 
     "triggerSource":"",
     "triggerDelayUs":0,
     "packetSizeBytes":1500,
-    "interPacketDelayNs":0
+    "interPacketDelayNs":0,
+    "lineIo":{
+      "alarmInputEnabled":false,
+      "alarmActiveLevel":"High",
+      "strobeOutputEnabled":false,
+      "strobeDurationUs":0,
+      "strobePreDelayUs":0,
+      "strobePostDelayUs":0
+    }
   }
 }
 ```
 
-`parameters` 只允许上述字段，并由配置 schema 与设备能力共同校验。服务先解析完整候选配置；设备
+`parameters` 只允许上述字段，并由配置 schema 与设备能力共同校验。Line 0 固定为输入；Line 1
+固定为 Strobe 且源为 `ExposureStartActive`，客户端不能覆盖线路模式或源。服务先解析完整候选配置；设备
 已连接时，还必须在保存前按该设备能力校验候选完整参数，校验失败不得提高配置修订号。通过后再由
 配置仓储执行乐观修订、审计和原子替换，并向已连接设备下发完整参数及回读。成功响应以 `saved`、`dispatched`、
 `applied`、`restartRequired` 和 `storedConfigRevision` 区分阶段；保存成功但设备未连接或拒绝参数时，
@@ -472,6 +487,10 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
   `cameraFrameNumber`、`sequenceNumber`、源图像 `width`/`height`/`stride`、可选 `brightness`、
   `actualFps`、`cameraStatus`、`roi` 和 `detectionResult`；二进制负载为 JPEG。每个连接/相机
   在服务端只保留最新待发送帧，旧帧可丢弃。二进制负载仍受 16 MiB 通用上限约束。
+- `camera.lineInputChanged`：payload 包含 `cameraId`、`rawLevel`、`alarmActive`、递增
+  `revision` 和 `timestampUtcMs`；无二进制负载。每相机使用独立
+  `camera.lineInputChanged:<cameraId>` 合并键和 `coalesce_latest` 策略，快速边沿允许合并但最终
+  电平与修订必须准确。本推送不创建系统报警或断纸事件。
 - `event.lifecycleChanged` 在候选建立及每个生命周期变化时发布，`event.committed` 在正式
   提交后发布；两者都走现有有界 IPC 推送队列并按 Event ID 合并。客户端在列表查询在途时
   只记一次补查，查询完成后立即刷新；即使推送丢失或重连，5 秒 `event.list` 周期补查仍是
@@ -489,6 +508,8 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
 - 相机开始/停止等控制请求超时只表示响应未在客户端截止时间内到达，不能据此宣称设备操作失败。控制台显示“结果未知，正在同步”，并使用后续 `camera.list` 快照确认目标状态；快照确认结果必须与普通成功响应区分标记；
 - 请求句柄同时包含 requestId 和连接代次。断线以 `IPC_CONNECTION_LOST` 完成该代请求，旧 socket 回调、未知 requestId 和迟到响应不能修改新连接状态；
 - 请求不跨连接自动重放。Qt 状态模型在每次新连接后重新发起幂等的 `system.getStatus`，同步完成前及断线后将服务状态标为过期；
+- 相机客户端每次连接或重连后调用 `camera.list` 恢复 Line 0 状态；运行中消费
+  `camera.lineInputChanged`。状态过期时保留最后有效值并设置 `stale=true`，重连初始电平负责纠正；
 - 客户端停止只 abort 自身 QLocalSocket、定时器和在途请求，不发送服务停止命令。
 
 ## 7. 兼容和错误行为

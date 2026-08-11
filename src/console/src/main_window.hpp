@@ -145,6 +145,7 @@ class MainWindow final : public QMainWindow
     void configure_camera_roi_editor(const CameraClientItem& camera);
     void update_camera_configuration_summary();
     void update_camera_controls();
+    void update_line_input_indicators();
     void run_camera_control(const std::string& command, bool confirmation_required);
     void show_camera_result(const Result<void>& result);
     void show_operations_result(const Result<void>& result);
@@ -161,6 +162,7 @@ class MainWindow final : public QMainWindow
     QLabel* machine_value_{};
     QLabel* uplink_value_{};
     QLabel* camera_count_value_{};
+    QLabel* line_input_value_{};
     QLabel* alarm_count_value_{};
     QLabel* disk_value_{};
     QLabel* version_value_{};
@@ -213,6 +215,16 @@ class MainWindow final : public QMainWindow
     QSpinBox* camera_trigger_delay_{};
     QSpinBox* camera_packet_size_{};
     QSpinBox* camera_packet_delay_{};
+    QCheckBox* camera_alarm_input_enabled_{};
+    QComboBox* camera_alarm_active_level_{};
+    QLabel* camera_line0_raw_{};
+    QLabel* camera_line0_alarm_{};
+    QCheckBox* camera_strobe_output_enabled_{};
+    QSpinBox* camera_strobe_duration_{};
+    QSpinBox* camera_strobe_pre_delay_{};
+    QSpinBox* camera_strobe_post_delay_{};
+    QLabel* camera_strobe_source_{};
+    QLabel* camera_line_io_actual_{};
     CameraUiActions camera_actions_;
     ThemeUiActions theme_actions_;
     OperationsUiActions operations_actions_;

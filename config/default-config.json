@@ -31,6 +31,14 @@
       "gainDb": 23.01,
       "id": "CAM01",
       "interPacketDelayNs": 400,
+      "lineIo": {
+        "alarmActiveLevel": "High",
+        "alarmInputEnabled": false,
+        "strobeDurationUs": 0,
+        "strobeOutputEnabled": false,
+        "strobePostDelayUs": 0,
+        "strobePreDelayUs": 0
+      },
       "location": "安装工位",
       "packetSizeBytes": 1500,
       "pixelFormat": "Mono8",
@@ -54,6 +62,14 @@
       "gainDb": 23.01,
       "id": "CAM02",
       "interPacketDelayNs": 400,
+      "lineIo": {
+        "alarmActiveLevel": "High",
+        "alarmInputEnabled": false,
+        "strobeDurationUs": 0,
+        "strobeOutputEnabled": false,
+        "strobePostDelayUs": 0,
+        "strobePreDelayUs": 0
+      },
       "location": "NoLed",
       "packetSizeBytes": 8164,
       "pixelFormat": "Mono8",
@@ -71,8 +87,8 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 51,
-  "configSchemaVersion": 2,
+  "configRevision": 53,
+  "configSchemaVersion": 3,
   "event": {
     "generatePreviewVideo": true,
     "keyFrameCount": 7,
@@ -99,7 +115,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-10T07:47:18.098Z",
+  "modifiedAt": "2026-08-10T09:16:55.084Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",
