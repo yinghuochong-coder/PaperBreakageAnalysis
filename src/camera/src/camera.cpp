@@ -174,6 +174,11 @@ Result<void> validate_roi(const CameraCapabilities& capabilities,
 Result<void> validate_enums(const CameraCapabilities& capabilities,
                             const CameraParameterSnapshot& parameters)
 {
+    if (parameters.exposure_auto_mode &&
+        !contains_value(capabilities.exposure_auto_modes, *parameters.exposure_auto_mode))
+    {
+        return Result<void>::failure(invalid_parameter("autoExposure", "unsupported"));
+    }
     if (parameters.pixel_format &&
         !contains_value(capabilities.pixel_formats, *parameters.pixel_format))
     {

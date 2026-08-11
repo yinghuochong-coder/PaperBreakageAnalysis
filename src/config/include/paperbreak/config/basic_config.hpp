@@ -12,7 +12,7 @@ namespace paperbreak::config
 {
 
 inline constexpr std::size_t config_max_bytes = 1024U * 1024U;
-inline constexpr std::uint32_t config_schema_version = 3U;
+inline constexpr std::uint32_t config_schema_version = 4U;
 inline constexpr std::size_t maximum_camera_count = 4U;
 
 enum class PixelFormat
@@ -28,6 +28,13 @@ enum class TriggerMode
     continuous,
     hardware,
     software,
+};
+
+enum class ExposureAutoMode
+{
+    off,
+    once,
+    continuous,
 };
 
 enum class LogLevel
@@ -81,6 +88,7 @@ struct CameraConfig final
     std::string serial_number;
     std::string location;
     double exposure_us{};
+    ExposureAutoMode exposure_auto_mode{ExposureAutoMode::off};
     double gain_db{};
     double frame_rate{};
     RoiConfig roi;

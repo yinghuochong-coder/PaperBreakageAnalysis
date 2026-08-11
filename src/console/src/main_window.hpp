@@ -201,6 +201,7 @@ class MainWindow final : public QMainWindow
     QWidget* camera_editor_{};
     QWidget* camera_control_actions_{};
     QDoubleSpinBox* camera_exposure_{};
+    QComboBox* camera_exposure_auto_{};
     QDoubleSpinBox* camera_gain_{};
     QDoubleSpinBox* camera_fps_{};
     QSpinBox* camera_roi_width_{};

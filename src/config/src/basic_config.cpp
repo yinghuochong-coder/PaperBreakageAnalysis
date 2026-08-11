@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -338,6 +339,20 @@ std::string_view trigger_mode_name(const TriggerMode value)
     return "Continuous";
 }
 
+std::string_view exposure_auto_mode_name(const ExposureAutoMode value) noexcept
+{
+    switch (value)
+    {
+    case ExposureAutoMode::off:
+        return "Off";
+    case ExposureAutoMode::once:
+        return "Once";
+    case ExposureAutoMode::continuous:
+        return "Continuous";
+    }
+    return "Off";
+}
+
 std::string_view alarm_active_level_name(const AlarmActiveLevel value) noexcept
 {
     return value == AlarmActiveLevel::high ? "High" : "Low";
@@ -377,14 +392,16 @@ Result<EdgeConfig> parse_metadata(const Json& root)
                                                 (std::numeric_limits<std::uint32_t>::max)());
     if (!schema)
         return Result<EdgeConfig>::failure(schema.error());
-    constexpr std::uint32_t migratable_schema_version = 2U;
-    if (schema.value() != config_schema_version && schema.value() != migratable_schema_version)
+    constexpr std::array migratable_schema_versions{2U, 3U};
+    if (schema.value() != config_schema_version &&
+        std::find(migratable_schema_versions.begin(), migratable_schema_versions.end(),
+                  schema.value()) == migratable_schema_versions.end())
     {
         Error error =
             make_error("SYS_CONFIG_SCHEMA_UNSUPPORTED", Severity::error, "不支持该配置 schema 版本",
                        "config", "config.validateSchemaVersion");
         error.details.push_back({"received", std::to_string(schema.value())});
-        error.details.push_back({"supported", "2,3"});
+        error.details.push_back({"supported", "2,3,4"});
         return Result<EdgeConfig>::failure(std::move(error));
     }
     auto revision = unsigned_field<std::uint64_t>(root, "configRevision", "", 1U,
@@ -442,7 +459,9 @@ Result<EdgeConfig> parse_system(const Json& root, EdgeConfig result)
 Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
 {
     const Json& cameras = root.at("cameras");
-    const bool migrating_v2 = root.at("configSchemaVersion").get<std::uint32_t>() == 2U;
+    const auto source_schema = root.at("configSchemaVersion").get<std::uint32_t>();
+    const bool migrating_v2 = source_schema == 2U;
+    const bool migrating_before_v4 = source_schema < 4U;
     if (!cameras.is_array() || cameras.size() > maximum_camera_count)
     {
         return Result<EdgeConfig>::failure(invalid_config(
@@ -460,16 +479,19 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
                 camera["reverseX"] = false;
             if (!camera.contains("reverseY"))
                 camera["reverseY"] = false;
+            if (migrating_before_v4 && !camera.contains("autoExposure"))
+                camera["autoExposure"] = "Off";
             if (migrating_v2 && !camera.contains("lineIo"))
                 camera["lineIo"] = {{"alarmInputEnabled", false},   {"alarmActiveLevel", "High"},
                                     {"strobeOutputEnabled", false}, {"strobeDurationUs", 0U},
                                     {"strobePreDelayUs", 0U},       {"strobePostDelayUs", 0U}};
         }
-        if (auto fields = exact_fields(camera, pointer,
-                                       {"id", "enabled", "serialNumber", "location", "exposureUs",
-                                        "gainDb", "frameRate", "roi", "pixelFormat", "triggerMode",
-                                        "triggerSource", "triggerDelayUs", "packetSizeBytes",
-                                        "interPacketDelayNs", "reverseX", "reverseY", "lineIo"});
+        if (auto fields =
+                exact_fields(camera, pointer,
+                             {"id", "enabled", "serialNumber", "location", "exposureUs",
+                              "autoExposure", "gainDb", "frameRate", "roi", "pixelFormat",
+                              "triggerMode", "triggerSource", "triggerDelayUs", "packetSizeBytes",
+                              "interPacketDelayNs", "reverseX", "reverseY", "lineIo"});
             !fields)
             return Result<EdgeConfig>::failure(fields.error());
         auto id = string_field(camera, "id", pointer, 5U);
@@ -477,6 +499,7 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
         auto serial = string_field(camera, "serialNumber", pointer, 128U, true);
         auto location = string_field(camera, "location", pointer, 128U);
         auto exposure = finite_field(camera, "exposureUs", pointer, 1.0, 10000000.0);
+        auto exposure_auto_text = string_field(camera, "autoExposure", pointer, 16U);
         auto gain = finite_field(camera, "gainDb", pointer, -24.0, 48.0);
         auto rate = finite_field(camera, "frameRate", pointer, 0.1, 1000.0);
         auto roi = parse_roi(camera.at("roi"), pointer + "/roi");
@@ -518,6 +541,8 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
             return Result<EdgeConfig>::failure(location.error());
         if (!exposure)
             return Result<EdgeConfig>::failure(exposure.error());
+        if (!exposure_auto_text)
+            return Result<EdgeConfig>::failure(exposure_auto_text.error());
         if (!gain)
             return Result<EdgeConfig>::failure(gain.error());
         if (!rate)
@@ -571,12 +596,19 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
                                               {"Mono10", PixelFormat::mono10},
                                               {"Mono12", PixelFormat::mono12},
                                               {"BayerRG8", PixelFormat::bayer_rg8}});
+        auto exposure_auto =
+            enum_value<ExposureAutoMode>(exposure_auto_text.value(), pointer + "/autoExposure",
+                                         {{"Off", ExposureAutoMode::off},
+                                          {"Once", ExposureAutoMode::once},
+                                          {"Continuous", ExposureAutoMode::continuous}});
         auto mode = enum_value<TriggerMode>(mode_text.value(), pointer + "/triggerMode",
                                             {{"Continuous", TriggerMode::continuous},
                                              {"Hardware", TriggerMode::hardware},
                                              {"Software", TriggerMode::software}});
         if (!pixel)
             return Result<EdgeConfig>::failure(pixel.error());
+        if (!exposure_auto)
+            return Result<EdgeConfig>::failure(exposure_auto.error());
         if (!mode)
             return Result<EdgeConfig>::failure(mode.error());
         auto active_level = enum_value<AlarmActiveLevel>(
@@ -608,6 +640,7 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
              .serial_number = std::move(serial).value(),
              .location = std::move(location).value(),
              .exposure_us = exposure.value(),
+             .exposure_auto_mode = exposure_auto.value(),
              .gain_db = gain.value(),
              .frame_rate = rate.value(),
              .roi = roi.value(),
@@ -1182,6 +1215,7 @@ std::string serialize_config(const EdgeConfig& config)
              {"serialNumber", camera.serial_number},
              {"location", camera.location},
              {"exposureUs", camera.exposure_us},
+             {"autoExposure", exposure_auto_mode_name(camera.exposure_auto_mode)},
              {"gainDb", camera.gain_db},
              {"frameRate", camera.frame_rate},
              {"roi", roi_json(camera.roi)},

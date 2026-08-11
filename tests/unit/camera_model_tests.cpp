@@ -306,6 +306,20 @@ TEST(CameraCapabilities, AcceptsContinuousFloatingRangeAndRejectsNonFiniteValue)
                                      {.exposure_us = std::numeric_limits<double>::infinity()}));
 }
 
+TEST(CameraCapabilities, AcceptsOnlyAdvertisedAutoExposureModes)
+{
+    CameraCapabilities capabilities;
+    capabilities.exposure_auto_modes = {ExposureAutoMode::off, ExposureAutoMode::continuous};
+
+    EXPECT_TRUE(
+        validate_parameters(capabilities, {.exposure_auto_mode = ExposureAutoMode::continuous}));
+    const auto unsupported =
+        validate_parameters(capabilities, {.exposure_auto_mode = ExposureAutoMode::once});
+    ASSERT_FALSE(unsupported);
+    EXPECT_EQ(unsupported.error().business_code, "CAMERA_CONFIG_FAILED");
+    EXPECT_EQ(unsupported.error().details.front().value, "autoExposure");
+}
+
 TEST(CameraCapabilities, RejectsUnsupportedOutOfStepAndInvalidCombination)
 {
     CameraCapabilities limited;

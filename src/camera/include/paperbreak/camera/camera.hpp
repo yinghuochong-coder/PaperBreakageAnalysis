@@ -16,6 +16,13 @@
 namespace paperbreak::camera
 {
 
+enum class ExposureAutoMode
+{
+    off,
+    once,
+    continuous,
+};
+
 enum class TriggerMode
 {
     continuous,
@@ -174,6 +181,7 @@ struct CameraDiscoveryReport final
 struct CameraCapabilities final
 {
     std::optional<SteppedRange<double>> exposure_us;
+    std::vector<ExposureAutoMode> exposure_auto_modes;
     std::optional<SteppedRange<double>> gain_db;
     std::optional<SteppedRange<double>> frame_rate;
     std::optional<RoiCapabilities> roi;
@@ -196,6 +204,7 @@ struct CameraCapabilities final
 struct CameraParameterSnapshot final
 {
     std::optional<double> exposure_us;
+    std::optional<ExposureAutoMode> exposure_auto_mode;
     std::optional<double> gain_db;
     std::optional<double> frame_rate;
     std::optional<Roi> roi;

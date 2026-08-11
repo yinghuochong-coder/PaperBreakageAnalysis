@@ -167,7 +167,7 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
             ++list_requests;
             return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
                 {.payload_json = dynamic_line_payload(
-                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"capabilities":{"roi":{"sensorWidth":1624,"sensorHeight":1240,"width":{"minimum":32,"maximum":1624,"increment":4},"height":{"minimum":4,"maximum":1240,"increment":4},"offsetX":{"minimum":0,"maximum":1592,"increment":2},"offsetY":{"minimum":0,"maximum":1232,"increment":16}},"lineIo":{"alarmInputSupported":true,"risingEdgeSupported":true,"fallingEdgeSupported":true,"strobeOutputSupported":true,"strobeDurationUs":{"minimum":1,"maximum":1000000,"increment":1},"strobePreDelayUs":{"minimum":0,"maximum":100000,"increment":1},"strobePostDelayUs":{"minimum":0,"maximum":100000,"increment":1},"unsupportedReason":""}},"lineInput":{"enabled":true,"rawLevel":false,"alarmActive":false,"revision":3,"timestampUtcMs":1000,"stale":false},"saved":{"exposureUs":100.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0,"lineIo":{"alarmInputEnabled":true,"alarmActiveLevel":"High","strobeOutputEnabled":true,"strobeDurationUs":100,"strobePreDelayUs":10,"strobePostDelayUs":20}},"actual":{"exposureUs":101.0,"gainDb":2.1,"frameRate":29.9,"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","lineIo":{"alarmInputEnabled":true,"strobeOutputEnabled":true,"strobeDurationUs":100,"strobePreDelayUs":10,"strobePostDelayUs":20}}}],"storedConfigRevision":7,"topologyRestartRequired":false})",
+                     R"({"cameras":[{"cameraId":"CAM01","location":"入口","state":"connected","serialNumber":"MOCK-01","model":"","ip":"","enabled":true,"savedConfigRevision":7,"device":{"model":"Mock","ip":"127.0.0.1"},"capabilities":{"autoExposureModes":["Off","Once","Continuous"],"roi":{"sensorWidth":1624,"sensorHeight":1240,"width":{"minimum":32,"maximum":1624,"increment":4},"height":{"minimum":4,"maximum":1240,"increment":4},"offsetX":{"minimum":0,"maximum":1592,"increment":2},"offsetY":{"minimum":0,"maximum":1232,"increment":16}},"lineIo":{"alarmInputSupported":true,"risingEdgeSupported":true,"fallingEdgeSupported":true,"strobeOutputSupported":true,"strobeDurationUs":{"minimum":1,"maximum":1000000,"increment":1},"strobePreDelayUs":{"minimum":0,"maximum":100000,"increment":1},"strobePostDelayUs":{"minimum":0,"maximum":100000,"increment":1},"unsupportedReason":""}},"lineInput":{"enabled":true,"rawLevel":false,"alarmActive":false,"revision":3,"timestampUtcMs":1000,"stale":false},"saved":{"exposureUs":100.0,"autoExposure":"Once","gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0,"lineIo":{"alarmInputEnabled":true,"alarmActiveLevel":"High","strobeOutputEnabled":true,"strobeDurationUs":100,"strobePreDelayUs":10,"strobePostDelayUs":20}},"actual":{"exposureUs":101.0,"autoExposure":"Continuous","gainDb":2.1,"frameRate":29.9,"reverseX":true,"reverseY":false,"pixelFormat":"Mono8","triggerMode":"Continuous","lineIo":{"alarmInputEnabled":true,"strobeOutputEnabled":true,"strobeDurationUs":100,"strobePreDelayUs":10,"strobePostDelayUs":20}}}],"storedConfigRevision":7,"topologyRestartRequired":false})",
                      line_raw_level.load(std::memory_order_acquire),
                      line_revision.load(std::memory_order_acquire)),
                  .binary = {}});
@@ -180,7 +180,7 @@ class CameraHandler final : public paperbreak::ipc::IRequestHandler
                  request.command == "camera.discover"
                      ? R"({"devices":[{"model":"Mock","serialNumber":"MOCK-01","ip":"127.0.0.1","networkInterface":"mock0","exclusiveAccessAvailable":true}]})"
                  : request.command == "camera.getConfig"
-                     ? R"({"cameraId":"CAM01","state":"connected","capabilities":{"roi":{"sensorWidth":1624,"sensorHeight":1240,"width":{"minimum":32,"maximum":1624,"increment":4},"height":{"minimum":4,"maximum":1240,"increment":4},"offsetX":{"minimum":0,"maximum":1592,"increment":2},"offsetY":{"minimum":0,"maximum":1232,"increment":16}}},"actual":{"exposureUs":777.0,"gainDb":3.0,"frameRate":25.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":false,"reverseY":true,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}})"
+                     ? R"({"cameraId":"CAM01","state":"connected","capabilities":{"autoExposureModes":["Off","Once","Continuous"],"roi":{"sensorWidth":1624,"sensorHeight":1240,"width":{"minimum":32,"maximum":1624,"increment":4},"height":{"minimum":4,"maximum":1240,"increment":4},"offsetX":{"minimum":0,"maximum":1592,"increment":2},"offsetY":{"minimum":0,"maximum":1232,"increment":16}}},"actual":{"exposureUs":777.0,"autoExposure":"Continuous","gainDb":3.0,"frameRate":25.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"reverseX":false,"reverseY":true,"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}})"
                  : request.command == "camera.connect"
                      ? R"({"cameraId":"CAM01","state":"connected","actual":{"exposureUs":101.0},"saved":false,"dispatched":false,"applied":false,"restartRequired":false,"applyError":{"code":"CAMERA_CONFIG_FAILED","message":"保存参数不符合当前设备能力"}})"
                  : request.command == "camera.updateConfig" || request.command == "camera.bind"
@@ -953,7 +953,10 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     EXPECT_EQ(camera.id, "CAM01");
     EXPECT_EQ(camera.saved_config_revision, 7U);
     EXPECT_DOUBLE_EQ(camera.saved.exposure_us.value(), 100.0);
+    EXPECT_EQ(camera.saved.exposure_auto_mode, "Once");
     EXPECT_DOUBLE_EQ(camera.actual.exposure_us.value(), 101.0);
+    EXPECT_EQ(camera.actual.exposure_auto_mode, "Continuous");
+    EXPECT_EQ(camera.exposure_auto_modes, (std::vector<std::string>{"Off", "Once", "Continuous"}));
     EXPECT_TRUE(camera.saved.reverse_x);
     EXPECT_FALSE(camera.saved.reverse_y);
     EXPECT_TRUE(camera.actual.reverse_x);
@@ -1055,6 +1058,7 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
 
     auto changed = camera.saved;
     changed.exposure_us = 120.0;
+    changed.exposure_auto_mode = "Continuous";
     changed.reverse_x = false;
     changed.reverse_y = true;
     ASSERT_TRUE(client.update_config("CAM01", 7U, changed));
@@ -1068,6 +1072,7 @@ TEST(CameraClient, SynchronizesReadbackAndSerializesControlOperations)
     EXPECT_FALSE(latest.operation->restart_required);
     const auto update_payload = nlohmann::json::parse(handler->last_payload_json);
     EXPECT_FALSE(update_payload["parameters"]["reverseX"].get<bool>());
+    EXPECT_EQ(update_payload["parameters"]["autoExposure"], "Continuous");
     EXPECT_TRUE(update_payload["parameters"]["reverseY"].get<bool>());
     EXPECT_TRUE(update_payload["parameters"]["lineIo"]["alarmInputEnabled"].get<bool>());
     EXPECT_EQ(update_payload["parameters"]["lineIo"]["alarmActiveLevel"], "High");

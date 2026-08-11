@@ -691,6 +691,35 @@ unsigned int native_pixel_format(const PixelFormat value) noexcept
     return 0U;
 }
 
+std::optional<ExposureAutoMode> map_exposure_auto_mode(const unsigned int value) noexcept
+{
+    switch (value)
+    {
+    case 0U:
+        return ExposureAutoMode::off;
+    case 1U:
+        return ExposureAutoMode::once;
+    case 2U:
+        return ExposureAutoMode::continuous;
+    default:
+        return std::nullopt;
+    }
+}
+
+const char* exposure_auto_mode_symbol(const ExposureAutoMode value) noexcept
+{
+    switch (value)
+    {
+    case ExposureAutoMode::off:
+        return "Off";
+    case ExposureAutoMode::once:
+        return "Once";
+    case ExposureAutoMode::continuous:
+        return "Continuous";
+    }
+    return "Off";
+}
+
 std::optional<std::string> line_name(const unsigned int value)
 {
     if (value > 3U)
@@ -708,13 +737,24 @@ Result<CameraCapabilities> read_capabilities_locked(
     timestamp_frequency_hz.reset();
     CameraCapabilities result;
     const auto exposure = optional_float(api, handle, "ExposureTime");
+    const auto exposure_auto = optional_enumeration(api, handle, "ExposureAuto");
     const auto gain = optional_float(api, handle, "Gain");
     const auto frame_rate = optional_float(api, handle, "AcquisitionFrameRate");
-    if (!exposure || !gain || !frame_rate)
+    if (!exposure || !exposure_auto || !gain || !frame_rate)
         return Result<CameraCapabilities>::failure(
-            !exposure ? exposure.error() : (!gain ? gain.error() : frame_rate.error()));
+            !exposure ? exposure.error()
+                      : (!exposure_auto ? exposure_auto.error()
+                                        : (!gain ? gain.error() : frame_rate.error())));
     if (exposure.value())
         result.exposure_us = {exposure.value()->fMin, exposure.value()->fMax, 0.0};
+    if (exposure_auto.value())
+        for (unsigned int index = 0; index < exposure_auto.value()->nSupportedNum; ++index)
+            if (const auto mode =
+                    map_exposure_auto_mode(exposure_auto.value()->nSupportValue[index]);
+                mode &&
+                std::find(result.exposure_auto_modes.begin(), result.exposure_auto_modes.end(),
+                          *mode) == result.exposure_auto_modes.end())
+                result.exposure_auto_modes.push_back(*mode);
     if (gain.value())
         result.gain_db = {gain.value()->fMin, gain.value()->fMax, 0.0};
     if (frame_rate.value())
@@ -970,6 +1010,20 @@ Result<CameraParameterSnapshot> read_parameters_locked(
         if (!value)
             return Result<CameraParameterSnapshot>::failure(value.error());
         result.exposure_us = value.value();
+    }
+    if (!capabilities.exposure_auto_modes.empty())
+    {
+        MVCC_ENUMVALUE value{};
+        const int code = api.get_enum_value(handle, "ExposureAuto", &value);
+        const auto mode = map_exposure_auto_mode(value.nCurValue);
+        if (code != MV_OK || !mode ||
+            std::find(capabilities.exposure_auto_modes.begin(),
+                      capabilities.exposure_auto_modes.end(),
+                      *mode) == capabilities.exposure_auto_modes.end())
+            return Result<CameraParameterSnapshot>::failure(parameter_error(
+                CameraErrorKind::parameter_read_failed, code == MV_OK ? MV_E_PARAMETER : code,
+                "camera.hikrobot.readParameters", "ExposureAuto", "read-failed"));
+        result.exposure_auto_mode = *mode;
     }
     if (capabilities.gain_db)
     {
@@ -1410,6 +1464,13 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
             }
         }
     }
+    if (parameters.exposure_auto_mode)
+        if (auto r = check(api.set_enum_value_by_string(
+                               handle, "ExposureAuto",
+                               exposure_auto_mode_symbol(*parameters.exposure_auto_mode)),
+                           "ExposureAuto");
+            !r)
+            return r;
     return Result<void>::success();
 }
 } // namespace
@@ -1569,21 +1630,14 @@ struct DeviceHandle::State final
             }
             if (resume)
             {
-                int code = api.set_enum_value_by_string(handle, "ExposureAuto", "Off");
-                const char* node = "ExposureAuto";
-                const char* reason = "restore-fixed-exposure-failed";
-                if (code == MV_OK)
-                {
-                    code = api.start_grabbing(handle);
-                    node = "Acquisition";
-                    reason = "resume-after-rollback-failed";
-                }
+                const int code = api.start_grabbing(handle);
                 if (code == MV_OK)
                     streaming = true;
                 else
                     restored = Result<void>::failure(
                         parameter_error(CameraErrorKind::parameter_faulted, code,
-                                        "camera.hikrobot.rollbackParameters", node, reason));
+                                        "camera.hikrobot.rollbackParameters", "Acquisition",
+                                        "resume-after-rollback-failed"));
             }
             if (!restored)
             {
@@ -1620,19 +1674,11 @@ struct DeviceHandle::State final
 
         if (resume)
         {
-            int code = api.set_enum_value_by_string(handle, "ExposureAuto", "Off");
-            const char* node = "ExposureAuto";
-            const char* reason = "resume-fixed-exposure-failed";
-            if (code == MV_OK)
-            {
-                code = api.start_grabbing(handle);
-                node = "Acquisition";
-                reason = "resume-failed";
-            }
+            const int code = api.start_grabbing(handle);
             if (code != MV_OK)
                 return restore_or_fault(parameter_error(CameraErrorKind::stream_start_failed, code,
                                                         "camera.hikrobot.resumeAfterParameters",
-                                                        node, reason));
+                                                        "Acquisition", "resume-failed"));
             streaming = true;
         }
         return actual;
@@ -1795,13 +1841,15 @@ Result<StreamSession> DeviceHandle::start_streaming()
             translate_mvs_error(CameraErrorKind::stream_start_failed, MV_E_CALLORDER,
                                 "camera.hikrobot.startGrabbing", "MVS 设备已经处于取流状态"));
     }
+    MVCC_ENUMVALUE exposure_auto{};
     const int exposure_code =
-        state_->api.set_enum_value_by_string(state_->handle, "ExposureAuto", "Off");
-    if (exposure_code != MV_OK)
+        state_->api.get_enum_value(state_->handle, "ExposureAuto", &exposure_auto);
+    if (exposure_code != MV_OK || !map_exposure_auto_mode(exposure_auto.nCurValue))
     {
         return Result<StreamSession>::failure(parameter_error(
-            CameraErrorKind::stream_start_failed, exposure_code, "camera.hikrobot.startGrabbing",
-            "ExposureAuto", "disable-auto-exposure-failed"));
+            CameraErrorKind::stream_start_failed,
+            exposure_code == MV_OK ? MV_E_PARAMETER : exposure_code,
+            "camera.hikrobot.startGrabbing", "ExposureAuto", "unconfirmed-auto-exposure-mode"));
     }
     const int code = state_->api.start_grabbing(state_->handle);
     if (code != MV_OK)

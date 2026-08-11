@@ -259,6 +259,10 @@ payload 必须且只能包含正整数 `alarmId`。确认对活动报警和仍�
 相机拓扑与当前运行拓扑不同，连接、采集和参数
 下发均应等待服务重启。
 
+`saved.autoExposure` 和连接后的 `actual.autoExposure` 使用 `Off`、`Once`、`Continuous`；
+`capabilities.autoExposureModes` 列出设备实际支持的子集。`Once` 完成后设备可能自行回到 `Off`；
+列表和状态轮询仍返回最近一次事务回读缓存，不在采集期间周期性访问 MVS 节点。
+
 每个槽位还公开 `saved.lineIo`；连接后公开 `actual.lineIo`、`lineInput` 和
 `capabilities.lineIo`。能力对象包含 Line 0 输入、上升沿/下降沿支持状态，Line 1 频闪支持状态、
 不支持原因，以及 `strobeDurationUs`、`strobePreDelayUs`、`strobePostDelayUs` 三项设备实际
@@ -330,6 +334,7 @@ MVS 参数节点；因此状态查询不会与取帧争用设备互斥。配置 
   "expectedConfigRevision":42,
   "parameters":{
     "exposureUs":1000.0,
+    "autoExposure":"Off",
     "gainDb":2.0,
     "frameRate":30.0,
     "roi":{"width":1920,"height":1080,"offsetX":0,"offsetY":0},
@@ -352,6 +357,10 @@ MVS 参数节点；因此状态查询不会与取帧争用设备互斥。配置 
   }
 }
 ```
+
+`autoExposure` 映射 Hikrobot `ExposureAuto`。完整参数事务先写 `Off`、再写 `exposureUs`，最后写
+目标 `Off`/`Once`/`Continuous` 并回读；开始和恢复取流只确认并保留该模式，不再强制关闭。
+旧 v2/v3 配置迁移为 `Off`。
 
 `interPacketDelayNs` 始终表示真实纳秒，不是 Hikrobot `GevSCPD` 寄存器的原生 tick。
 Hikrobot 适配器根据设备 `GevTimestampTickFrequency` 转换能力范围、写入值和回读值；例如

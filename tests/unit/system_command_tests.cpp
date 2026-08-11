@@ -258,7 +258,7 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json status_json = Json::parse(status.value().payload_json);
     EXPECT_EQ(status_json.at("serviceState"), "running");
     EXPECT_TRUE(status_json.at("acceptingWrites").get<bool>());
-    EXPECT_EQ(status_json.at("configSchemaVersion"), 3);
+    EXPECT_EQ(status_json.at("configSchemaVersion"), 4);
     EXPECT_EQ(status_json.at("storedConfigRevision"), 1);
     EXPECT_FALSE(status_json.at("machineId").get<std::string>().empty());
     EXPECT_EQ(status_json.at("loggingLevel"), "info");
@@ -375,6 +375,7 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
                       {"serialNumber", "SIM-01"},
                       {"location", "test"},
                       {"exposureUs", 1000.0},
+                      {"autoExposure", "Off"},
                       {"gainDb", 0.0},
                       {"frameRate", 10.0},
                       {"roi", {{"width", 4}, {"height", 4}, {"offsetX", 0}, {"offsetY", 0}}},
@@ -818,6 +819,7 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
                       {"serialNumber", "MOCK-01"},
                       {"location", "测试位置"},
                       {"exposureUs", 100.0},
+                      {"autoExposure", "Off"},
                       {"gainDb", 2.0},
                       {"frameRate", 30.0},
                       {"roi", {{"width", 64}, {"height", 48}, {"offsetX", 0}, {"offsetY", 0}}},
@@ -879,6 +881,7 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     EXPECT_TRUE(listed["topologyRestartRequired"].get<bool>());
     EXPECT_EQ(listed["cameras"][0]["state"], "disconnected");
     EXPECT_EQ(listed["cameras"][0]["saved"]["exposureUs"], 100.0);
+    EXPECT_EQ(listed["cameras"][0]["saved"]["autoExposure"], "Off");
 
     auto discovered = commands.handle(fixture.request("camera.discover"), reader, {});
     ASSERT_TRUE(discovered);
@@ -897,6 +900,7 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     ASSERT_TRUE(connected);
     const Json connected_json = Json::parse(connected.value().payload_json);
     EXPECT_EQ(connected_json["actual"]["exposureUs"], 100.0);
+    EXPECT_EQ(connected_json["actual"]["autoExposure"], "Off");
     EXPECT_EQ(connected_json["actual"]["pixelFormat"], "Mono8");
     ASSERT_TRUE(connected_json.contains("capabilities"));
     EXPECT_EQ(connected_json["capabilities"]["roi"]["sensorWidth"], 64U);
@@ -914,7 +918,7 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     auto updated = commands.handle(
         fixture.request(
             "camera.updateConfig",
-            R"({"cameraId":"CAM01","expectedConfigRevision":2,"parameters":{"exposureUs":120.0,"reverseX":true,"reverseY":true}})"),
+            R"({"cameraId":"CAM01","expectedConfigRevision":2,"parameters":{"exposureUs":120.0,"autoExposure":"Continuous","reverseX":true,"reverseY":true}})"),
         reader, {});
     ASSERT_TRUE(updated);
     const Json update_json = Json::parse(updated.value().payload_json);
@@ -922,6 +926,7 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToControlCamera)
     EXPECT_TRUE(update_json["dispatched"].get<bool>());
     EXPECT_TRUE(update_json["applied"].get<bool>());
     EXPECT_EQ(update_json["actual"]["exposureUs"], 120.0);
+    EXPECT_EQ(update_json["actual"]["autoExposure"], "Continuous");
     EXPECT_TRUE(update_json["actual"]["reverseX"].get<bool>());
     EXPECT_TRUE(update_json["actual"]["reverseY"].get<bool>());
 
@@ -1035,6 +1040,7 @@ TEST(SystemCommand, KeepsCameraConnectedWhenSavedParametersDoNotMatchDeviceCapab
                       {"serialNumber", "MOCK-MISMATCH-01"},
                       {"location", "测试位置"},
                       {"exposureUs", 100.0},
+                      {"autoExposure", "Off"},
                       {"gainDb", 2.0},
                       {"frameRate", 30.0},
                       {"roi", {{"width", 65}, {"height", 48}, {"offsetX", 0}, {"offsetY", 0}}},

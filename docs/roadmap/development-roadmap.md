@@ -784,6 +784,12 @@ M3 和 M4 可在 M2 完成后并行，但进入 M5 系统联调前必须分别�
 
 Line I/O 跟进（2026-08-10）：执行记录为 `.agent/plans/m4-05-line-io-strobe-followup.md`。配置升级为 schema v3 并支持 v2 安全迁移；Line 0 固定为高/低有效断纸光电输入，使用双边沿事件、四个容量 1 的 latest-wins 槽和单一 I/O 分发线程维护快照及逐相机 IPC 推送；Line 1 固定为 `ExposureStartActive` 频闪并回读持续/前置/后置时间。Console 增加当前相机状态灯和四路聚合灯，明确保存/实际值、能力范围和过期语义。该输入只驱动实时指示，不写系统报警历史、不触发断纸事件。自动化验证证据见执行记录；电气接线、隔离和示波器时序仍待硬件人工验证。
 
+自动曝光跟进（2026-08-11）：执行记录为 `.agent/plans/m4-05-auto-exposure.md`。配置升级为
+schema v4，v2/v3 安全迁移为 `Off`；公共相机模型、Mock、Hikrobot 私有适配器、IPC 和 Console
+贯通 `ExposureAuto` 的 `Off`/`Once`/`Continuous` 三态能力、保存、下发与实际回读。曝光事务先
+关闭自动曝光、写入 `ExposureTime` 基准，再写目标模式；启动和恢复取流只确认并保留模式，不再
+覆盖用户配置。自动化与构建证据见执行记录；实体相机的单次收敛、连续调节和图像质量未执行。
+
 实施 `camera.list/discover/bind/connect/disconnect/start/stop/getConfig/updateConfig/captureSnapshot/softwareTrigger` 及对应 UI；覆盖逻辑编号、安装位置、型号、序列号、IP、状态、曝光、增益、帧率、ROI、像素格式、触发和网络参数；危险操作二次确认；参数展示区分“已保存、已下发、已应用、失败、需重启”，最终显示服务回读的实际值。
 
 ### M4-06 状态、报警、日志和诊断

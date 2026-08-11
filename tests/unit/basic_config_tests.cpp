@@ -171,7 +171,7 @@ TEST(BasicConfig, AcceptsCompleteVersionTwoAtUnicodeAndSpacePath)
     const auto path = directory.write("纸机 配置.json", valid_config());
     const auto result = paperbreak::config::validate_basic_config(path);
     ASSERT_TRUE(result) << result.error().message;
-    EXPECT_EQ(result.value().schema_version, 3U);
+    EXPECT_EQ(result.value().schema_version, 4U);
     EXPECT_EQ(result.value().config_revision, 1U);
 }
 
@@ -248,7 +248,7 @@ TEST(BasicConfig, DefaultsLegacyCameraMirroringOffAndSerializesExplicitValues)
     EXPECT_NE(serialized.find("\"reverseY\": true"), std::string::npos);
 }
 
-TEST(BasicConfig, MigratesVersionTwoCameraLineIoToSafeVersionThreeDefaults)
+TEST(BasicConfig, MigratesVersionTwoCameraDefaultsToVersionFour)
 {
     const TemporaryDirectory directory;
     const auto contents = replace_once(
@@ -258,8 +258,9 @@ TEST(BasicConfig, MigratesVersionTwoCameraLineIoToSafeVersionThreeDefaults)
     ASSERT_TRUE(parsed) << parsed.error().message;
     ASSERT_EQ(parsed.value().cameras.size(), 1U);
     const auto& camera = parsed.value().cameras.front();
-    EXPECT_EQ(parsed.value().config_schema_version, 3U);
+    EXPECT_EQ(parsed.value().config_schema_version, 4U);
     EXPECT_DOUBLE_EQ(camera.exposure_us, 321.0);
+    EXPECT_EQ(camera.exposure_auto_mode, paperbreak::config::ExposureAutoMode::off);
     EXPECT_FALSE(camera.line_io.alarm_input_enabled);
     EXPECT_EQ(camera.line_io.alarm_active_level, paperbreak::config::AlarmActiveLevel::high);
     EXPECT_FALSE(camera.line_io.strobe_output_enabled);
@@ -268,8 +269,42 @@ TEST(BasicConfig, MigratesVersionTwoCameraLineIoToSafeVersionThreeDefaults)
     EXPECT_EQ(camera.line_io.strobe_post_delay_us, 0U);
 
     const auto serialized = paperbreak::config::serialize_config(parsed.value());
-    EXPECT_NE(serialized.find("\"configSchemaVersion\": 3"), std::string::npos);
+    EXPECT_NE(serialized.find("\"configSchemaVersion\": 4"), std::string::npos);
+    EXPECT_NE(serialized.find("\"autoExposure\": \"Off\""), std::string::npos);
     EXPECT_NE(serialized.find("\"lineIo\""), std::string::npos);
+}
+
+TEST(BasicConfig, MigratesVersionThreeAutoExposureOffAndRoundTripsVersionFourModes)
+{
+    const TemporaryDirectory directory;
+    const auto version_two = replace_once(
+        valid_config(), "\"cameras\": []",
+        R"("cameras": [{"id":"CAM01","enabled":true,"serialNumber":"MOCK-01","location":"入口","exposureUs":321.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}])");
+    const auto migrated_v2 = paperbreak::config::parse_config(version_two, directory.path());
+    ASSERT_TRUE(migrated_v2);
+    const auto version_four = paperbreak::config::serialize_config(migrated_v2.value());
+    auto version_three =
+        replace_once(version_four, "\"configSchemaVersion\": 4", "\"configSchemaVersion\": 3");
+    version_three = replace_once(version_three, "\"autoExposure\": \"Off\",\n", "");
+
+    const auto migrated_v3 = paperbreak::config::parse_config(version_three, directory.path());
+    ASSERT_TRUE(migrated_v3) << migrated_v3.error().message;
+    EXPECT_EQ(migrated_v3.value().cameras.front().exposure_auto_mode,
+              paperbreak::config::ExposureAutoMode::off);
+
+    const auto once =
+        replace_once(version_four, "\"autoExposure\": \"Off\"", "\"autoExposure\": \"Once\"");
+    const auto parsed_once = paperbreak::config::parse_config(once, directory.path());
+    ASSERT_TRUE(parsed_once) << parsed_once.error().message;
+    EXPECT_EQ(parsed_once.value().cameras.front().exposure_auto_mode,
+              paperbreak::config::ExposureAutoMode::once);
+    EXPECT_NE(paperbreak::config::serialize_config(parsed_once.value())
+                  .find("\"autoExposure\": \"Once\""),
+              std::string::npos);
+
+    const auto unknown =
+        replace_once(version_four, "\"autoExposure\": \"Off\"", "\"autoExposure\": \"Adaptive\"");
+    EXPECT_FALSE(paperbreak::config::parse_config(unknown, directory.path()));
 }
 
 TEST(BasicConfig, StrictlyValidatesVersionThreeLineIoAndDependencies)
@@ -315,7 +350,7 @@ TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
     const auto malformed = directory.write("truncated.json", R"({"configSchemaVersion":1)");
     const auto future =
         directory.write("future.json", replace_once(valid_config(), "\"configSchemaVersion\": 2",
-                                                    "\"configSchemaVersion\": 4"));
+                                                    "\"configSchemaVersion\": 5"));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(unknown));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(sensitive));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(malformed));

@@ -64,6 +64,15 @@ constexpr int event_table_visible_rows = 10;
 constexpr auto local_date_time_format = "yyyy-MM-dd HH:mm:ss.zzz ttt";
 constexpr auto local_clock_format = "yyyy-MM-dd HH:mm:ss ttt";
 
+QString auto_exposure_display(const std::string_view mode)
+{
+    if (mode == "Once")
+        return QStringLiteral("单次");
+    if (mode == "Continuous")
+        return QStringLiteral("连续");
+    return QStringLiteral("关闭");
+}
+
 void normalize_stepped_spin_box(QSpinBox* input)
 {
     const int minimum = input->property("cameraStepMinimum").toInt();
@@ -809,6 +818,11 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             camera_exposure_ = make_child<QDoubleSpinBox>(acquisition_panel);
             camera_exposure_->setRange(1.0, 10000000.0);
             camera_exposure_->setDecimals(1);
+            camera_exposure_auto_ = make_child<QComboBox>(acquisition_panel);
+            camera_exposure_auto_->setObjectName(QStringLiteral("camera-auto-exposure"));
+            camera_exposure_auto_->addItem(QStringLiteral("关闭"), QStringLiteral("Off"));
+            camera_exposure_auto_->addItem(QStringLiteral("单次"), QStringLiteral("Once"));
+            camera_exposure_auto_->addItem(QStringLiteral("连续"), QStringLiteral("Continuous"));
             camera_gain_ = make_child<QDoubleSpinBox>(acquisition_panel);
             camera_gain_->setRange(-24.0, 48.0);
             camera_gain_->setDecimals(2);
@@ -816,6 +830,7 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             camera_fps_->setRange(0.1, 1000.0);
             camera_fps_->setDecimals(3);
             acquisition_form->addRow(QStringLiteral("曝光时长 (us)"), camera_exposure_);
+            acquisition_form->addRow(QStringLiteral("自动曝光"), camera_exposure_auto_);
             acquisition_form->addRow(QStringLiteral("增益 (dB)"), camera_gain_);
             acquisition_form->addRow(QStringLiteral("帧率 (fps)"), camera_fps_);
             editor_grid->add_widget(acquisition_panel);
@@ -955,6 +970,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                     return;
                 CameraParameterValue value{
                     .exposure_us = camera_exposure_->value(),
+                    .exposure_auto_mode =
+                        camera_exposure_auto_->currentData().toString().toStdString(),
                     .gain_db = camera_gain_->value(),
                     .frame_rate = camera_fps_->value(),
                     .roi = CameraRoiValue{static_cast<std::uint32_t>(camera_roi_width_->value()),
@@ -2392,14 +2409,17 @@ void MainWindow::update_camera_configuration_summary()
         summary =
             QStringLiteral(
                 "%1 · %2 · 序列号 %3 · 状态 %4\n型号 %5 · IP %6\n保存值：曝光时长 %7 us / "
-                "增益 %8 dB / 帧率 %9 fps\n自动曝光：当前 %10 us / 增益 %11 dB / 帧率 %12 fps")
+                "自动曝光 %8 / 增益 %9 dB / 帧率 %10 fps\n实际值：曝光时长 %11 us / "
+                "自动曝光 %12 / 增益 %13 dB / 帧率 %14 fps")
                 .arg(QString::fromStdString(camera.id), QString::fromStdString(camera.location),
                      QString::fromStdString(camera.serial), QString::fromStdString(camera.state),
                      QString::fromStdString(camera.model), QString::fromStdString(camera.ip))
                 .arg(camera.saved.exposure_us.value_or(0.0), 0, 'f', 1)
+                .arg(auto_exposure_display(camera.saved.exposure_auto_mode))
                 .arg(camera.saved.gain_db.value_or(0.0), 0, 'f', 1)
                 .arg(camera.saved.frame_rate.value_or(0.0), 0, 'f', 1)
                 .arg(camera.actual.exposure_us.value_or(0.0), 0, 'f', 1)
+                .arg(auto_exposure_display(camera.actual.exposure_auto_mode))
                 .arg(camera.actual.gain_db.value_or(0.0), 0, 'f', 1)
                 .arg(camera.actual.frame_rate.value_or(0.0), 0, 'f', 1);
     }
@@ -2426,6 +2446,24 @@ void MainWindow::populate_camera_editor()
 
 void MainWindow::configure_camera_roi_editor(const CameraClientItem& camera)
 {
+    const QSignalBlocker exposure_auto_blocker{camera_exposure_auto_};
+    camera_exposure_auto_->clear();
+    const bool capabilities_known = camera.state == "connected" || camera.state == "acquiring";
+    const std::array exposure_modes{
+        std::pair{QStringLiteral("关闭"), std::string_view{"Off"}},
+        std::pair{QStringLiteral("单次"), std::string_view{"Once"}},
+        std::pair{QStringLiteral("连续"), std::string_view{"Continuous"}}};
+    for (const auto& [label, mode] : exposure_modes)
+        if (!capabilities_known ||
+            std::find(camera.exposure_auto_modes.begin(), camera.exposure_auto_modes.end(), mode) !=
+                camera.exposure_auto_modes.end())
+            camera_exposure_auto_->addItem(
+                label, QString::fromLatin1(mode.data(), static_cast<qsizetype>(mode.size())));
+    camera_exposure_auto_->setEnabled(camera_exposure_auto_->count() > 0);
+    camera_exposure_auto_->setToolTip(camera_exposure_auto_->count() > 0
+                                          ? QStringLiteral("设备支持的 ExposureAuto 模式")
+                                          : QStringLiteral("设备未报告支持的 ExposureAuto 模式"));
+
     const auto configure = [](QSpinBox* input, const CameraIntegerRangeValue& range,
                               const std::uint32_t maximum) {
         const auto to_int = [](const std::uint32_t value) {
@@ -2495,6 +2533,9 @@ void MainWindow::configure_camera_roi_editor(const CameraClientItem& camera)
 void MainWindow::populate_camera_editor(const CameraParameterValue& value)
 {
     camera_exposure_->setValue(value.exposure_us.value_or(1.0));
+    const int exposure_auto_index =
+        camera_exposure_auto_->findData(QString::fromStdString(value.exposure_auto_mode));
+    camera_exposure_auto_->setCurrentIndex(exposure_auto_index >= 0 ? exposure_auto_index : 0);
     camera_gain_->setValue(value.gain_db.value_or(0.0));
     camera_fps_->setValue(value.frame_rate.value_or(1.0));
     if (value.roi)
@@ -3549,12 +3590,12 @@ bool MainWindow::select_page(const std::size_t index) noexcept
 
 bool MainWindow::camera_configuration_ready() const noexcept
 {
-    return camera_selector_ && camera_exposure_ && camera_gain_ && camera_fps_ &&
-           camera_roi_width_ && camera_roi_height_ && camera_roi_x_ && camera_roi_y_ &&
-           camera_reverse_x_ && camera_reverse_y_ && camera_packet_size_ && camera_packet_delay_ &&
-           camera_line_input_actual_ && camera_line_output_actual_ && discovered_devices_ &&
-           camera_bind_slot_ && camera_bind_location_ && camera_bind_button_ &&
-           camera_configuration_value_ && camera_operation_value_ &&
+    return camera_selector_ && camera_exposure_ && camera_exposure_auto_ && camera_gain_ &&
+           camera_fps_ && camera_roi_width_ && camera_roi_height_ && camera_roi_x_ &&
+           camera_roi_y_ && camera_reverse_x_ && camera_reverse_y_ && camera_packet_size_ &&
+           camera_packet_delay_ && camera_line_input_actual_ && camera_line_output_actual_ &&
+           discovered_devices_ && camera_bind_slot_ && camera_bind_location_ &&
+           camera_bind_button_ && camera_configuration_value_ && camera_operation_value_ &&
            findChild<QWidget*>(QStringLiteral("camera-device-sidebar")) &&
            findChild<QWidget*>(QStringLiteral("camera-control-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-acquisition-panel")) &&
@@ -3565,6 +3606,7 @@ bool MainWindow::camera_configuration_ready() const noexcept
            findChild<QWidget*>(QStringLiteral("camera-action-bar")) &&
            findChild<QPushButton*>(QStringLiteral("camera-discover")) &&
            findChild<QPushButton*>(QStringLiteral("camera-read-parameters")) &&
+           findChild<QComboBox*>(QStringLiteral("camera-auto-exposure")) &&
            findChild<QPushButton*>(QStringLiteral("camera-camera.connect")) &&
            findChild<QPushButton*>(QStringLiteral("camera-camera.disconnect")) &&
            findChild<QPushButton*>(QStringLiteral("camera-camera.start")) &&

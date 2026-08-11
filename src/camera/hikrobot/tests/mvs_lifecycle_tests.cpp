@@ -243,6 +243,8 @@ int __stdcall fake_get_enum(void*, const char* node, MVCC_ENUMVALUE* value)
 {
     auto& state = context();
     state.calls.emplace_back("gete:" + std::string{node});
+    if (state.fail_get_node == node)
+        return state.fail_get_code;
     const auto found = state.enumerations.find(node);
     if (found == state.enumerations.end())
         return MV_E_SUPPORT;
@@ -270,7 +272,22 @@ int __stdcall fake_set_enum_by_string(void*, const char* node, const char* value
 {
     auto& state = context();
     state.calls.emplace_back("setes:" + std::string{node} + "=" + value);
-    return maybe_fail_set(node);
+    if (const int code = maybe_fail_set(node); code != MV_OK)
+        return code;
+    if (std::string_view{node} != "ExposureAuto")
+        return MV_OK;
+    const auto found = state.enumerations.find(node);
+    if (found == state.enumerations.end())
+        return MV_E_SUPPORT;
+    if (std::string_view{value} == "Off")
+        found->second.current = 0U;
+    else if (std::string_view{value} == "Once")
+        found->second.current = 1U;
+    else if (std::string_view{value} == "Continuous")
+        found->second.current = 2U;
+    else
+        return MV_E_PARAMETER;
+    return MV_OK;
 }
 
 int __stdcall fake_get_bool(void*, const char* node, bool* value)
@@ -361,6 +378,7 @@ class MvsLifecycleTest : public testing::Test
     {
         current_context = &context_;
         context_.device_info.nTLayerType = MV_GIGE_DEVICE;
+        context_.enumerations["ExposureAuto"] = {0U, {0U, 1U, 2U}};
     }
 
     void TearDown() override
@@ -408,6 +426,7 @@ void configure_parameter_nodes(FakeContext& state)
                       {"GevTimestampTickFrequency", {125000000, 1, 1000000000, 1}},
                       {"PayloadSize", {1920000, 1, 10000000, 1}}};
     state.enumerations = {
+        {"ExposureAuto", {0U, {0U, 1U, 2U}}},
         {"PixelFormat", {PixelType_Gvsp_Mono8, {PixelType_Gvsp_Mono8, PixelType_Gvsp_Mono12}}},
         {"TriggerMode", {0U, {0U, 1U}}},
         {"TriggerSource", {0U, {0U, 7U}}}};
@@ -531,6 +550,9 @@ TEST_F(MvsLifecycleTest, MapsParameterCapabilitiesAndReadsCompleteSnapshot)
     ASSERT_TRUE(capabilities.value().exposure_us);
     EXPECT_EQ(capabilities.value().exposure_us->increment, 0.0);
     EXPECT_EQ(capabilities.value().exposure_us->minimum, 10.0);
+    EXPECT_EQ(capabilities.value().exposure_auto_modes,
+              (std::vector<ExposureAutoMode>{ExposureAutoMode::off, ExposureAutoMode::once,
+                                             ExposureAutoMode::continuous}));
     ASSERT_TRUE(capabilities.value().roi);
     EXPECT_EQ(capabilities.value().roi->sensor_width, 1600U);
     EXPECT_TRUE(capabilities.value().supports_reverse_x);
@@ -549,6 +571,7 @@ TEST_F(MvsLifecycleTest, MapsParameterCapabilitiesAndReadsCompleteSnapshot)
     const auto snapshot = handle.read_parameters();
     ASSERT_TRUE(snapshot);
     EXPECT_EQ(snapshot.value().exposure_us, 1000.0);
+    EXPECT_EQ(snapshot.value().exposure_auto_mode, ExposureAutoMode::off);
     EXPECT_EQ(snapshot.value().roi, (Roi{1600U, 1200U, 0U, 0U}));
     EXPECT_EQ(snapshot.value().reverse_x, false);
     EXPECT_EQ(snapshot.value().reverse_y, true);
@@ -713,6 +736,7 @@ TEST_F(MvsLifecycleTest, ParameterApplyPausesWritesReadsBackAndResumesStreaming)
     context_.calls.clear();
 
     const auto applied = handle.apply_parameters({.exposure_us = 2500.0,
+                                                  .exposure_auto_mode = ExposureAutoMode::off,
                                                   .roi = Roi{800U, 600U, 8U, 4U},
                                                   .reverse_x = true,
                                                   .reverse_y = false,
@@ -746,6 +770,33 @@ TEST_F(MvsLifecycleTest, ParameterApplyPausesWritesReadsBackAndResumesStreaming)
     EXPECT_LT(keep_fixed_exposure, restart);
     EXPECT_LT(first_write, restart);
     EXPECT_TRUE(std::move(stream).value().active());
+}
+
+TEST_F(MvsLifecycleTest, AutoExposureWritesBaselineThenContinuousModeAndReadsBack)
+{
+    configure_parameter_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.calls.clear();
+
+    const auto applied = handle.apply_parameters(
+        {.exposure_us = 2500.0, .exposure_auto_mode = ExposureAutoMode::continuous});
+
+    ASSERT_TRUE(applied) << applied.error().message;
+    EXPECT_EQ(applied.value().exposure_auto_mode, ExposureAutoMode::continuous);
+    EXPECT_EQ(context_.enumerations.at("ExposureAuto").current, 2U);
+    const auto disabled =
+        std::find(context_.calls.begin(), context_.calls.end(), "setes:ExposureAuto=Off");
+    const auto exposure =
+        std::find(context_.calls.begin(), context_.calls.end(), "setf:ExposureTime");
+    const auto enabled =
+        std::find(context_.calls.begin(), context_.calls.end(), "setes:ExposureAuto=Continuous");
+    ASSERT_NE(disabled, context_.calls.end());
+    ASSERT_NE(exposure, context_.calls.end());
+    ASSERT_NE(enabled, context_.calls.end());
+    EXPECT_LT(disabled, exposure);
+    EXPECT_LT(exposure, enabled);
 }
 
 TEST_F(MvsLifecycleTest, FrameRateEnableIsWrittenBeforeRateAndReadBack)
@@ -868,6 +919,7 @@ TEST_F(MvsLifecycleTest, ParameterReadFailureUsesStableBusinessAndNativeDiagnost
 TEST_F(MvsLifecycleTest, WriteFailureRestoresOldSnapshotAndReturnsStableNativeError)
 {
     configure_parameter_nodes(context_);
+    context_.enumerations.at("ExposureAuto").current = 2U;
     auto opened = DeviceHandle::open(fake_api, context_.device_info);
     ASSERT_TRUE(opened);
     auto handle = std::move(opened).value();
@@ -875,7 +927,8 @@ TEST_F(MvsLifecycleTest, WriteFailureRestoresOldSnapshotAndReturnsStableNativeEr
     context_.fail_set_code = MV_E_PARAMETER_RANGE;
     context_.fail_set_remaining = 1U;
 
-    const auto applied = handle.apply_parameters({.exposure_us = 2500.0, .gain_db = 5.0});
+    const auto applied = handle.apply_parameters(
+        {.exposure_us = 2500.0, .exposure_auto_mode = ExposureAutoMode::once, .gain_db = 5.0});
 
     ASSERT_FALSE(applied);
     EXPECT_EQ(applied.error().business_code, "CAMERA_PARAMETER_WRITE_FAILED");
@@ -883,6 +936,7 @@ TEST_F(MvsLifecycleTest, WriteFailureRestoresOldSnapshotAndReturnsStableNativeEr
     const auto restored = handle.read_parameters();
     ASSERT_TRUE(restored);
     EXPECT_EQ(restored.value().exposure_us, 1000.0);
+    EXPECT_EQ(restored.value().exposure_auto_mode, ExposureAutoMode::continuous);
     EXPECT_EQ(restored.value().gain_db, 2.0);
 }
 
@@ -1192,9 +1246,8 @@ TEST_F(MvsLifecycleTest, StreamAndHandleDestructorsReleaseInReverseOrder)
         EXPECT_TRUE(stream.active());
     }
 
-    EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Off", "start",
-                                        "stop", "close", "destroy"}));
+    EXPECT_EQ(context_.calls, (std::vector<std::string>{"create", "open", "gete:ExposureAuto",
+                                                        "start", "stop", "close", "destroy"}));
 }
 
 TEST_F(MvsLifecycleTest, ExplicitStopIsIdempotent)
@@ -1211,13 +1264,13 @@ TEST_F(MvsLifecycleTest, ExplicitStopIsIdempotent)
     EXPECT_TRUE(handle.close());
     EXPECT_TRUE(handle.close());
 
-    EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Off", "start",
-                                        "stop", "close", "destroy"}));
+    EXPECT_EQ(context_.calls, (std::vector<std::string>{"create", "open", "gete:ExposureAuto",
+                                                        "start", "stop", "close", "destroy"}));
 }
 
-TEST_F(MvsLifecycleTest, StartDisablesAutoExposureBeforeGrabbing)
+TEST_F(MvsLifecycleTest, StartPreservesConfirmedContinuousAutoExposure)
 {
+    context_.enumerations.at("ExposureAuto").current = 2U;
     auto handle_result = DeviceHandle::open(fake_api, context_.device_info);
     ASSERT_TRUE(handle_result);
     auto handle = std::move(handle_result).value();
@@ -1226,18 +1279,20 @@ TEST_F(MvsLifecycleTest, StartDisablesAutoExposureBeforeGrabbing)
 
     ASSERT_TRUE(stream_result);
     const auto auto_exposure =
-        std::find(context_.calls.begin(), context_.calls.end(), "setes:ExposureAuto=Off");
+        std::find(context_.calls.begin(), context_.calls.end(), "gete:ExposureAuto");
     const auto start = std::find(context_.calls.begin(), context_.calls.end(), "start");
     ASSERT_NE(auto_exposure, context_.calls.end());
     ASSERT_NE(start, context_.calls.end());
     EXPECT_LT(auto_exposure, start);
+    EXPECT_EQ(context_.enumerations.at("ExposureAuto").current, 2U);
+    EXPECT_EQ(std::find(context_.calls.begin(), context_.calls.end(), "setes:ExposureAuto=Off"),
+              context_.calls.end());
 }
 
-TEST_F(MvsLifecycleTest, DisablingAutoExposureFailurePreventsGrabbing)
+TEST_F(MvsLifecycleTest, UnconfirmedAutoExposureModePreventsGrabbing)
 {
-    context_.fail_set_node = "ExposureAuto";
-    context_.fail_set_code = MV_E_GC_ACCESS;
-    context_.fail_set_remaining = 1U;
+    context_.fail_get_node = "ExposureAuto";
+    context_.fail_get_code = MV_E_GC_ACCESS;
     auto handle_result = DeviceHandle::open(fake_api, context_.device_info);
     ASSERT_TRUE(handle_result);
     auto handle = std::move(handle_result).value();
@@ -1281,8 +1336,8 @@ TEST_F(MvsLifecycleTest, CleanupContinuesAfterStopFailure)
     }
 
     EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Off", "start",
-                                        "stop", "stop", "stop", "close", "destroy"}));
+              (std::vector<std::string>{"create", "open", "gete:ExposureAuto", "start", "stop",
+                                        "stop", "stop", "close", "destroy"}));
 }
 
 TEST_F(MvsLifecycleTest, CapturesIntoPreallocatedBufferAndMapsFrameMetadata)

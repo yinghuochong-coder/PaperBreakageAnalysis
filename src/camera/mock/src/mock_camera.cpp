@@ -203,6 +203,8 @@ struct MockSharedState final
             config.maximum_payload_bytes = *base_size;
         }
         capabilities = {.exposure_us = SteppedRange<double>{1.0, 1000000.0, 1.0},
+                        .exposure_auto_modes = {ExposureAutoMode::off, ExposureAutoMode::once,
+                                                ExposureAutoMode::continuous},
                         .gain_db = SteppedRange<double>{0.0, 48.0, 0.1},
                         .frame_rate = SteppedRange<double>{0.001, 1000.0, 0.001},
                         .roi = RoiCapabilities{.sensor_width = config.width,
@@ -224,6 +226,7 @@ struct MockSharedState final
                         .line_io = config.line_io_capabilities,
                         .maximum_payload_bytes = config.maximum_payload_bytes};
         parameters = {.exposure_us = 1000.0,
+                      .exposure_auto_mode = ExposureAutoMode::off,
                       .gain_db = 0.0,
                       .frame_rate = config.frame_rate,
                       .roi = Roi{config.width, config.height, 0U, 0U},
@@ -491,6 +494,8 @@ class MockCameraDevice final : public ICameraDevice
         auto candidate = state_->parameters;
         if (parameters.exposure_us)
             candidate.exposure_us = parameters.exposure_us;
+        if (parameters.exposure_auto_mode)
+            candidate.exposure_auto_mode = parameters.exposure_auto_mode;
         if (parameters.gain_db)
             candidate.gain_db = parameters.gain_db;
         if (parameters.frame_rate)

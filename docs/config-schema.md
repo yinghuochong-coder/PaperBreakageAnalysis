@@ -1,8 +1,15 @@
 # 配置格式
 
-当前配置格式为 `configSchemaVersion = 3`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v3.schema.json`，可部署起点见 `config/default-config.json`。v1/v2 合同继续归档；程序读取 v2 时为每路相机补入安全的 Line I/O 默认值并归一化为内存 v3，下一次保存输出完整 v3；v1 不静默迁移。
+当前配置格式为 `configSchemaVersion = 4`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v4.schema.json`，可部署起点见 `config/default-config.json`。v1/v2/v3 合同继续归档；程序读取 v2 时为每路相机补入安全的 Line I/O 默认值，读取 v2/v3 时把缺少的自动曝光模式补为 `Off`，并归一化为内存 v4；下一次保存输出完整 v4，v1 不静默迁移。
 
 配置根对象包含 system、cameras、acquisition、preview、algorithm、event、storage、uplink、plantIo、logging 和 health。最多配置四路相机，逻辑编号限定为 CAM01～CAM04；启用相机必须具有唯一序列号。相机数值在 M1 只应用安全结构上限，M3 还必须按真实设备能力回读校验。每路相机的 `reverseX`、`reverseY` 分别控制水平、垂直镜像；旧 v2 配置省略时均按 `false` 处理，序列化保存后会显式写出。
+
+## 自动曝光（schema v4）
+
+每个相机对象必须包含 `autoExposure`，取值为 `Off`、`Once` 或 `Continuous`，分别映射
+Hikrobot `ExposureAuto` 的关闭、单次和连续模式。v2/v3 迁移固定补为 `Off`，因此升级不会自行
+改变既有固定曝光行为。完整参数事务写入 `exposureUs` 时先把自动曝光关闭、写入曝光基准，再写入
+目标 `autoExposure` 并回读；设备未声明支持的模式由相机能力校验拒绝。
 
 ## 相机线路 I/O（schema v3）
 

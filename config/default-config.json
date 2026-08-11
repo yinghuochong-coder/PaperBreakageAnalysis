@@ -26,6 +26,7 @@
   "cameras": [
     {
       "enabled": true,
+      "autoExposure": "Off",
       "exposureUs": 500.0,
       "frameRate": 60.0,
       "gainDb": 23.01,
@@ -57,6 +58,7 @@
     },
     {
       "enabled": true,
+      "autoExposure": "Off",
       "exposureUs": 500.0,
       "frameRate": 60.0,
       "gainDb": 23.01,
@@ -88,7 +90,7 @@
     }
   ],
   "configRevision": 73,
-  "configSchemaVersion": 3,
+  "configSchemaVersion": 4,
   "event": {
     "generatePreviewVideo": true,
     "keyFrameCount": 7,

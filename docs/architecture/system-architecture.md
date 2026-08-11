@@ -480,10 +480,11 @@ FrameBufferPool → FramePacket 元数据
 
 采集线程到 `acquisition.frames` 入队后立即返回，不等待任何下游分支。
 
-Hikrobot 取流入口在调用 MVS `StartGrabbing` 前同步设置 `ExposureAuto=Off`，使配置且经
-回读确认的 `ExposureTime` 成为每次采集会话的固定曝光参数。参数事务写入曝光时间前同样
-先关闭自动曝光，恢复取流时保持关闭；任一曝光模式写入失败都使取流启动失败，不带着
-未确认的曝光状态继续采集。
+Hikrobot 参数事务把 `ExposureAuto` 作为公共三态参数处理。写入完整曝光配置时先设置
+`ExposureAuto=Off`，写入 `ExposureTime` 基准值，最后写入目标 `Off`、`Once` 或
+`Continuous` 并完整回读；失败时与其他相机参数一起恢复旧快照。取流入口在调用 MVS
+`StartGrabbing` 前确认当前模式是受支持值，但不覆盖用户已确认的模式；无法确认时启动失败，
+不带着未知曝光状态继续采集。
 
 ### 9.2 算法与候选
 

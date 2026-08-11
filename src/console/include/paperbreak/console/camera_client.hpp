@@ -77,6 +77,7 @@ struct CameraLineInputValue final
 struct CameraParameterValue final
 {
     std::optional<double> exposure_us;
+    std::string exposure_auto_mode{"Off"};
     std::optional<double> gain_db;
     std::optional<double> frame_rate;
     std::optional<CameraRoiValue> roi;
@@ -104,6 +105,7 @@ struct CameraClientItem final
     std::uint64_t saved_config_revision{};
     CameraParameterValue saved;
     CameraParameterValue actual;
+    std::vector<std::string> exposure_auto_modes;
     std::optional<CameraRoiCapabilitiesValue> roi_capabilities;
     std::optional<CameraLineIoCapabilitiesValue> line_io_capabilities;
     std::optional<CameraLineInputValue> line_input;

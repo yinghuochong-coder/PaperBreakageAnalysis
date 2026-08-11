@@ -189,13 +189,15 @@ TEST(CameraMockLifecycle, AppliesAndReadsParametersAndRejectsIllegalStates)
     EXPECT_FALSE(device->start_acquisition());
     EXPECT_TRUE(device->connect());
     EXPECT_FALSE(device->connect());
-    auto applied = device->apply_parameters({.frame_rate = 50.0,
+    auto applied = device->apply_parameters({.exposure_auto_mode = ExposureAutoMode::continuous,
+                                             .frame_rate = 50.0,
                                              .roi = Roi{2U, 2U, 0U, 0U},
                                              .reverse_x = true,
                                              .reverse_y = false,
                                              .pixel_format = PixelFormat::mono10,
                                              .trigger_mode = TriggerMode::software});
     ASSERT_TRUE(applied);
+    EXPECT_EQ(applied.value().exposure_auto_mode, ExposureAutoMode::continuous);
     EXPECT_EQ(applied.value().frame_rate, 50.0);
     EXPECT_EQ(applied.value().roi, (Roi{2U, 2U, 0U, 0U}));
     EXPECT_EQ(applied.value().reverse_x, true);

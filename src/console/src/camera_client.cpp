@@ -61,6 +61,8 @@ void parse_parameters(const Json& source, CameraParameterValue& target)
         return;
     if (source.contains("exposureUs") && source["exposureUs"].is_number())
         target.exposure_us = source["exposureUs"].get<double>();
+    if (source.contains("autoExposure") && source["autoExposure"].is_string())
+        target.exposure_auto_mode = source["autoExposure"].get<std::string>();
     if (source.contains("gainDb") && source["gainDb"].is_number())
         target.gain_db = source["gainDb"].get<double>();
     if (source.contains("frameRate") && source["frameRate"].is_number())
@@ -151,6 +153,18 @@ bool parse_capabilities(const Json& source, CameraClientItem& target)
 {
     if (!source.is_object())
         return false;
+    if (source.contains("autoExposureModes"))
+    {
+        const auto& modes = source["autoExposureModes"];
+        if (!modes.is_array() || std::any_of(modes.begin(), modes.end(), [](const Json& mode) {
+                return !mode.is_string() ||
+                       (mode != "Off" && mode != "Once" && mode != "Continuous");
+            }))
+            return false;
+        target.exposure_auto_modes.clear();
+        for (const auto& mode : modes)
+            target.exposure_auto_modes.push_back(mode.get<std::string>());
+    }
     if (source.contains("roi"))
     {
         CameraRoiCapabilitiesValue roi;
@@ -197,6 +211,7 @@ Json parameter_json(const CameraParameterValue& value)
     Json result = Json::object();
     if (value.exposure_us)
         result["exposureUs"] = *value.exposure_us;
+    result["autoExposure"] = value.exposure_auto_mode;
     if (value.gain_db)
         result["gainDb"] = *value.gain_db;
     if (value.frame_rate)

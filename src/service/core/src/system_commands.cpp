@@ -997,6 +997,34 @@ template <typename T> Json stepped_range_json(const camera::SteppedRange<T>& val
     return {{"minimum", value.minimum}, {"maximum", value.maximum}, {"increment", value.increment}};
 }
 
+std::string_view exposure_auto_mode_name(const camera::ExposureAutoMode value) noexcept
+{
+    switch (value)
+    {
+    case camera::ExposureAutoMode::off:
+        return "Off";
+    case camera::ExposureAutoMode::once:
+        return "Once";
+    case camera::ExposureAutoMode::continuous:
+        return "Continuous";
+    }
+    return "Off";
+}
+
+std::string_view exposure_auto_mode_name(const config::ExposureAutoMode value) noexcept
+{
+    switch (value)
+    {
+    case config::ExposureAutoMode::off:
+        return "Off";
+    case config::ExposureAutoMode::once:
+        return "Once";
+    case config::ExposureAutoMode::continuous:
+        return "Continuous";
+    }
+    return "Off";
+}
+
 Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
 {
     Json result{{"cameraId", value.camera_id},
@@ -1019,6 +1047,10 @@ Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
     }
     if (value.capabilities)
     {
+        Json modes = Json::array();
+        for (const auto mode : value.capabilities->exposure_auto_modes)
+            modes.push_back(exposure_auto_mode_name(mode));
+        result["capabilities"]["autoExposureModes"] = std::move(modes);
         const auto& line = value.capabilities->line_io;
         Json line_io{{"alarmInputSupported", line.alarm_input_supported},
                      {"risingEdgeSupported", line.line0_rising_edge_supported},
@@ -1039,6 +1071,8 @@ Json camera_snapshot_json(const camera::CameraControlSnapshot& value)
         Json actual;
         if (p.exposure_us)
             actual["exposureUs"] = *p.exposure_us;
+        if (p.exposure_auto_mode)
+            actual["autoExposure"] = exposure_auto_mode_name(*p.exposure_auto_mode);
         if (p.gain_db)
             actual["gainDb"] = *p.gain_db;
         if (p.frame_rate)
@@ -1118,6 +1152,7 @@ Json saved_camera_json(const config::CameraConfig& value)
 {
     Json result{
         {"exposureUs", value.exposure_us},
+        {"autoExposure", exposure_auto_mode_name(value.exposure_auto_mode)},
         {"gainDb", value.gain_db},
         {"frameRate", value.frame_rate},
         {"roi",
@@ -1181,6 +1216,19 @@ void add_alarm_active(Json& value, const config::CameraConfig& configuration)
 
 camera::CameraParameterSnapshot camera_parameters(const config::CameraConfig& value)
 {
+    camera::ExposureAutoMode exposure_auto = camera::ExposureAutoMode::off;
+    switch (value.exposure_auto_mode)
+    {
+    case config::ExposureAutoMode::off:
+        exposure_auto = camera::ExposureAutoMode::off;
+        break;
+    case config::ExposureAutoMode::once:
+        exposure_auto = camera::ExposureAutoMode::once;
+        break;
+    case config::ExposureAutoMode::continuous:
+        exposure_auto = camera::ExposureAutoMode::continuous;
+        break;
+    }
     camera::PixelFormat pixel = camera::PixelFormat::mono8;
     switch (value.pixel_format)
     {
@@ -1212,6 +1260,7 @@ camera::CameraParameterSnapshot camera_parameters(const config::CameraConfig& va
     }
     camera::CameraParameterSnapshot result{
         .exposure_us = value.exposure_us,
+        .exposure_auto_mode = exposure_auto,
         .gain_db = value.gain_db,
         .frame_rate = value.frame_rate,
         .roi =
@@ -1246,9 +1295,9 @@ Result<Json> bound_camera_json(const std::string& id, const std::string& serial,
             "ipc.camera.bind"));
     }
     const auto& actual = *snapshot.actual;
-    if (!actual.exposure_us || !actual.gain_db || !actual.frame_rate || !actual.roi ||
-        !actual.pixel_format || !actual.trigger_mode || !actual.trigger_delay_us ||
-        !actual.packet_size_bytes || !actual.inter_packet_delay_ns)
+    if (!actual.exposure_us || !actual.exposure_auto_mode || !actual.gain_db ||
+        !actual.frame_rate || !actual.roi || !actual.pixel_format || !actual.trigger_mode ||
+        !actual.trigger_delay_us || !actual.packet_size_bytes || !actual.inter_packet_delay_ns)
     {
         return Result<Json>::failure(command_error("CAMERA_PARAMETER_READ_FAILED", Severity::error,
                                                    "相机没有返回创建配置所需的完整参数",
@@ -1286,33 +1335,35 @@ Result<Json> bound_camera_json(const std::string& id, const std::string& serial,
         break;
     }
 
-    return Result<Json>::success({{"id", id},
-                                  {"enabled", true},
-                                  {"serialNumber", serial},
-                                  {"location", location},
-                                  {"exposureUs", *actual.exposure_us},
-                                  {"gainDb", *actual.gain_db},
-                                  {"frameRate", *actual.frame_rate},
-                                  {"roi",
-                                   {{"width", actual.roi->width},
-                                    {"height", actual.roi->height},
-                                    {"offsetX", actual.roi->offset_x},
-                                    {"offsetY", actual.roi->offset_y}}},
-                                  {"reverseX", actual.reverse_x.value_or(false)},
-                                  {"reverseY", actual.reverse_y.value_or(false)},
-                                  {"pixelFormat", std::move(pixel_format)},
-                                  {"triggerMode", std::move(trigger_mode)},
-                                  {"triggerSource", actual.trigger_source.value_or("")},
-                                  {"triggerDelayUs", *actual.trigger_delay_us},
-                                  {"packetSizeBytes", *actual.packet_size_bytes},
-                                  {"interPacketDelayNs", *actual.inter_packet_delay_ns},
-                                  {"lineIo",
-                                   {{"alarmInputEnabled", false},
-                                    {"alarmActiveLevel", "High"},
-                                    {"strobeOutputEnabled", false},
-                                    {"strobeDurationUs", 0U},
-                                    {"strobePreDelayUs", 0U},
-                                    {"strobePostDelayUs", 0U}}}});
+    return Result<Json>::success(
+        {{"id", id},
+         {"enabled", true},
+         {"serialNumber", serial},
+         {"location", location},
+         {"exposureUs", *actual.exposure_us},
+         {"autoExposure", exposure_auto_mode_name(*actual.exposure_auto_mode)},
+         {"gainDb", *actual.gain_db},
+         {"frameRate", *actual.frame_rate},
+         {"roi",
+          {{"width", actual.roi->width},
+           {"height", actual.roi->height},
+           {"offsetX", actual.roi->offset_x},
+           {"offsetY", actual.roi->offset_y}}},
+         {"reverseX", actual.reverse_x.value_or(false)},
+         {"reverseY", actual.reverse_y.value_or(false)},
+         {"pixelFormat", std::move(pixel_format)},
+         {"triggerMode", std::move(trigger_mode)},
+         {"triggerSource", actual.trigger_source.value_or("")},
+         {"triggerDelayUs", *actual.trigger_delay_us},
+         {"packetSizeBytes", *actual.packet_size_bytes},
+         {"interPacketDelayNs", *actual.inter_packet_delay_ns},
+         {"lineIo",
+          {{"alarmInputEnabled", false},
+           {"alarmActiveLevel", "High"},
+           {"strobeOutputEnabled", false},
+           {"strobeDurationUs", 0U},
+           {"strobePreDelayUs", 0U},
+           {"strobePostDelayUs", 0U}}}});
 }
 
 Result<ipc::CommandResponse> diagnostics_response(
@@ -2610,14 +2661,20 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                     "camera.updateConfig 需要 expectedConfigRevision 和 parameters 对象",
                     "ipc.camera.updateConfig"));
             const Json& parameters = payload.value()["parameters"];
-            static constexpr std::array<std::string_view, 13U> allowed{
-                "exposureUs",      "gainDb",
-                "frameRate",       "roi",
-                "pixelFormat",     "triggerMode",
-                "triggerSource",   "triggerDelayUs",
-                "packetSizeBytes", "interPacketDelayNs",
-                "reverseX",        "reverseY",
-                "lineIo"};
+            static constexpr std::array<std::string_view, 14U> allowed{"exposureUs",
+                                                                       "autoExposure",
+                                                                       "gainDb",
+                                                                       "frameRate",
+                                                                       "roi",
+                                                                       "pixelFormat",
+                                                                       "triggerMode",
+                                                                       "triggerSource",
+                                                                       "triggerDelayUs",
+                                                                       "packetSizeBytes",
+                                                                       "interPacketDelayNs",
+                                                                       "reverseX",
+                                                                       "reverseY",
+                                                                       "lineIo"};
             for (auto it = parameters.begin(); it != parameters.end(); ++it)
                 if (std::find(allowed.begin(), allowed.end(), it.key()) == allowed.end())
                     return Result<ipc::CommandResponse>::failure(command_error(
