@@ -479,6 +479,40 @@ TEST(StorageMetadataDatabase, IntegrityFailurePreservesDecisionAndReviewAndBlock
     EXPECT_EQ(failed_upload.value()->state, UploadJobState::manual_intervention);
 }
 
+TEST(StorageMetadataDatabase, ManifestReindexDoesNotDowngradeTerminalDecision)
+{
+    TemporaryDirectory temporary{"terminal-decision-reindex"};
+    const auto options = database_options(temporary);
+    auto database = EventMetadataDatabase::open(options);
+    ASSERT_TRUE(database);
+    const std::array<std::string, 3U> terminal_states{"Confirmed", "Timeout", "Rejected"};
+    for (std::size_t index = 0U; index < terminal_states.size(); ++index)
+    {
+        const auto event_id = "019fcb3d-7777-7000-8000-00000000000" + std::to_string(index);
+        auto request =
+            event_request(event_id, "CAM01", "Candidate",
+                          std::chrono::milliseconds{7100 + static_cast<int>(index) * 100});
+        request.metadata.confirmed_time.reset();
+        const auto persisted = persist_event(options, std::move(request));
+        ASSERT_TRUE(database.value()->index_committed_manifest(persisted.committed_directory,
+                                                               persisted.manifest_json));
+        const auto confirmed_time = terminal_states[index] == "Confirmed"
+                                        ? std::optional<std::int64_t>{8000}
+                                        : std::nullopt;
+        ASSERT_TRUE(database.value()->update_event_lifecycle(event_id, terminal_states[index],
+                                                             "Committed", 1U, confirmed_time));
+
+        ASSERT_TRUE(database.value()->index_committed_manifest(persisted.committed_directory,
+                                                               persisted.manifest_json));
+        auto record = database.value()->get_event(event_id);
+        ASSERT_TRUE(record);
+        EXPECT_EQ(record.value().decision_state, terminal_states[index]);
+        EXPECT_EQ(record.value().persistence_state, "Committed");
+        if (terminal_states[index] == "Confirmed")
+            EXPECT_EQ(record.value().confirmed_time_utc_ms, confirmed_time);
+    }
+}
+
 TEST(StorageMetadataDatabase, RejectsLegacyEventDirectoryWithoutDeletingIt)
 {
     TemporaryDirectory temporary{"legacy-event-directory"};

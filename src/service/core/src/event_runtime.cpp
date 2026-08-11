@@ -178,6 +178,7 @@ struct EventPipelineState final
     std::map<std::string, std::string> source_to_canonical;
     std::map<std::string, std::string> source_decisions;
     std::set<std::string> counted_confirmed_events;
+    std::mutex lifecycle_mutex;
     camera::MonotonicTime last_monotonic_time{};
     camera::WallClockTime last_wall_clock_time{};
     std::mutex result_mutex;
@@ -841,23 +842,35 @@ struct EventRuntimeImpl final
             submit_persistence(std::move(*complete));
     }
 
+    static bool terminal_decision(const std::string_view decision) noexcept
+    {
+        return decision == "Confirmed" || decision == "Rejected" || decision == "Timeout";
+    }
+
+    static void release_source_mapping(EventPipelineState& state, const std::string_view source_id)
+    {
+        state.source_decisions.erase(std::string{source_id});
+        state.source_to_canonical.erase(std::string{source_id});
+        state.counted_confirmed_events.erase(std::string{source_id});
+    }
+
     void freeze(EventPipelineState& state, event::FrozenEventWindow window)
     {
         std::vector<std::string> source_ids;
         source_ids.reserve(window.triggers.size());
         for (const auto& item : window.triggers)
             source_ids.push_back(item.source_event_id);
-        const auto release_sources = [&] {
+        const auto release_terminal_sources = [&] {
             for (const auto& source_id : source_ids)
             {
-                state.source_decisions.erase(source_id);
-                state.source_to_canonical.erase(source_id);
-                state.counted_confirmed_events.erase(source_id);
+                const auto decision = state.source_decisions.find(source_id);
+                if (decision != state.source_decisions.end() && terminal_decision(decision->second))
+                    release_source_mapping(state, source_id);
             }
         };
         if (window.triggers.empty() || window.camera_windows.empty())
         {
-            release_sources();
+            release_terminal_sources();
             return;
         }
         event::KeyFrameSelectionContext context;
@@ -881,7 +894,7 @@ struct EventRuntimeImpl final
             ++event_failures;
             transition_lifecycle(window.event_id, "Candidate", "Incomplete", source_ids.size());
             report(selected.error());
-            release_sources();
+            release_terminal_sources();
             return;
         }
         if (selected.value().frames.size() > state.configuration.event.key_frame_count)
@@ -961,7 +974,7 @@ struct EventRuntimeImpl final
             transition_lifecycle(event_id, "Candidate", "Incomplete", source_ids.size());
             report(runtime_error("EVENT_QUEUE_FULL", Severity::critical, "待关键帧事件达到固定上限",
                                  "event.runtime.pending"));
-            release_sources();
+            release_terminal_sources();
             return;
         }
         if (selected.value().frames.empty())
@@ -974,7 +987,7 @@ struct EventRuntimeImpl final
                 pending.erase(found);
             }
             submit_persistence(std::move(*complete));
-            release_sources();
+            release_terminal_sources();
             return;
         }
         auto submitted = jpeg->submit(selected.value());
@@ -996,7 +1009,7 @@ struct EventRuntimeImpl final
                 transition_lifecycle(complete->metadata.event_id, complete->metadata.decision_state,
                                      "Incomplete", complete->metadata.trigger_count);
         }
-        release_sources();
+        release_terminal_sources();
     }
 
     [[nodiscard]] std::vector<Error> enqueue_result(EventPipelineState& state, Lane& lane,
@@ -1062,11 +1075,168 @@ struct EventRuntimeImpl final
         return aggregate;
     }
 
+    void start_candidate_window(EventPipelineState& state, Lane& lane,
+                                const event::CandidateEventSnapshot& candidate_event)
+    {
+        if (state.source_to_canonical.contains(candidate_event.event_id))
+            return;
+
+        auto window_started = state.windows->start_or_merge(candidate_event.event_id,
+                                                            candidate_event.candidate_trigger);
+        if (!window_started)
+        {
+            ++event_failures;
+            report(window_started.error());
+            return;
+        }
+
+        const auto canonical_id = window_started.value().event.event_id;
+        for (const auto& source : window_started.value().event.triggers)
+            state.source_to_canonical[source.source_event_id] = canonical_id;
+        ++lane.candidates_created;
+        state.source_decisions[candidate_event.event_id] =
+            std::string{event::to_string(candidate_event.decision_state)};
+        const auto aggregate = aggregate_decision(state, canonical_id);
+        const auto confirmed_time =
+            candidate_event.decision_state == event::CandidateEventState::confirmed &&
+                    candidate_event.decision
+                ? std::optional<std::int64_t>{std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                  candidate_event.decision->wall_clock_time
+                                                      .time_since_epoch())
+                                                  .count()}
+                : std::nullopt;
+        auto existing = options.database->get_event(canonical_id);
+        if (!existing && existing.error().business_code == "EVENT_NOT_FOUND")
+        {
+            const auto pre = std::chrono::seconds{state.configuration.event.pre_event_seconds};
+            const auto post = std::chrono::seconds{state.configuration.event.post_event_seconds};
+            std::vector<std::string> all_cameras;
+            all_cameras.reserve(state.lanes.size());
+            for (const auto& camera_lane : state.lanes)
+                all_cameras.push_back(camera_lane->camera_id);
+            const auto wall_ms = [](const camera::WallClockTime time) {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(
+                           time.time_since_epoch())
+                    .count();
+            };
+            auto created = options.database->create_collecting_event(
+                {.event_id = canonical_id,
+                 .decision_state = aggregate,
+                 .candidate_time_utc_ms =
+                     wall_ms(candidate_event.candidate_trigger.wall_clock_time),
+                 .confirmed_time_utc_ms = confirmed_time,
+                 .start_time_utc_ms =
+                     wall_ms(candidate_event.candidate_trigger.wall_clock_time - pre),
+                 .end_time_utc_ms =
+                     wall_ms(candidate_event.candidate_trigger.wall_clock_time + post),
+                 .camera_ids = std::move(all_cameras),
+                 .trigger_camera_id = candidate_event.candidate_trigger.camera_id,
+                 .trigger_frame_number = candidate_event.candidate_trigger.camera_frame_number,
+                 .trigger_reason = trigger_reason(candidate_event.candidate_trigger),
+                 .confidence = candidate_event.candidate_trigger.confidence,
+                 .trigger_count = window_started.value().event.triggers.size()});
+            if (!created)
+            {
+                ++event_failures;
+                report(created.error());
+            }
+            else
+            {
+                ++events_started;
+                publish_lifecycle(created.value());
+            }
+        }
+        else if (!existing)
+        {
+            ++event_failures;
+            report(existing.error());
+        }
+        transition_lifecycle(canonical_id, aggregate, "Collecting",
+                             window_started.value().event.triggers.size(), confirmed_time);
+
+        bool lease_exists = false;
+        {
+            std::scoped_lock lock{mutex};
+            lease_exists = nvme_lease_sources.contains(candidate_event.event_id);
+        }
+        if (options.nvme_cache && !lease_exists)
+        {
+            std::vector<std::string> camera_ids;
+            camera_ids.reserve(state.lanes.size());
+            for (const auto& camera_lane : state.lanes)
+                camera_ids.push_back(camera_lane->camera_id);
+            const auto pre = std::chrono::seconds{state.configuration.event.pre_event_seconds};
+            const auto post = std::chrono::seconds{state.configuration.event.post_event_seconds};
+            auto protected_window = options.nvme_cache->protect_event_window(
+                {.event_id = candidate_event.event_id,
+                 .camera_ids = std::move(camera_ids),
+                 .start_monotonic_time = candidate_event.candidate_trigger.monotonic_time - pre,
+                 .end_monotonic_time = candidate_event.candidate_trigger.monotonic_time + post,
+                 .start_wall_clock_time = candidate_event.candidate_trigger.wall_clock_time - pre,
+                 .end_wall_clock_time = candidate_event.candidate_trigger.wall_clock_time + post});
+            if (!protected_window)
+                report(protected_window.error());
+            else
+            {
+                std::scoped_lock lock{mutex};
+                nvme_lease_sources.insert(candidate_event.event_id);
+            }
+        }
+    }
+
+    void apply_candidate_decision(EventPipelineState& state, Lane& lane,
+                                  const event::CandidateEventSnapshot& candidate_event)
+    {
+        const auto decision = std::string{event::to_string(candidate_event.decision_state)};
+        if (!terminal_decision(decision))
+            return;
+        if (candidate_event.decision_state == event::CandidateEventState::confirmed &&
+            state.counted_confirmed_events.insert(candidate_event.event_id).second)
+            ++lane.confirmed_events;
+
+        const auto canonical = state.source_to_canonical.find(candidate_event.event_id);
+        if (canonical == state.source_to_canonical.end())
+            return;
+        const auto canonical_id = canonical->second;
+        state.source_decisions[candidate_event.event_id] = decision;
+        auto current = options.database->get_event(canonical_id);
+        if (current)
+        {
+            const auto confirmed_time =
+                candidate_event.decision_state == event::CandidateEventState::confirmed &&
+                        candidate_event.decision
+                    ? std::optional<
+                          std::int64_t>{std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            candidate_event.decision->wall_clock_time
+                                                .time_since_epoch())
+                                            .count()}
+                    : std::nullopt;
+            transition_lifecycle(canonical_id, aggregate_decision(state, canonical_id),
+                                 current.value().persistence_state, current.value().trigger_count,
+                                 confirmed_time);
+        }
+        else if (current.error().business_code != "EVENT_NOT_FOUND")
+        {
+            ++event_failures;
+            report(current.error());
+        }
+
+        auto active = state.windows->active(candidate_event.event_id);
+        if (!active && active.error().business_code == "EVENT_NOT_FOUND")
+            release_source_mapping(state, candidate_event.event_id);
+        else if (!active)
+        {
+            ++event_failures;
+            report(active.error());
+        }
+    }
+
     void process_result(EventPipelineState& state, AlgorithmResultEnvelope envelope)
     {
         auto* lane = find_lane(state, envelope.frame.camera_id());
         if (lane == nullptr || !state.windows || !state.candidates)
             return;
+        const std::scoped_lock lifecycle_lock{state.lifecycle_mutex};
 
         std::vector<event::FrozenEventWindow> frozen_windows;
         {
@@ -1080,162 +1250,15 @@ struct EventRuntimeImpl final
                     ++event_failures;
                     report(candidate.error());
                 }
-                else if (candidate.value().camera.event)
+                else
                 {
-                    const auto& candidate_event = *candidate.value().camera.event;
-                    if (candidate_event.decision_state == event::CandidateEventState::confirmed &&
-                        state.counted_confirmed_events.insert(candidate_event.event_id).second)
-                        ++lane->confirmed_events;
-                    if (envelope.detection->triggered &&
-                        !state.source_to_canonical.contains(candidate_event.event_id))
+                    for (const auto& notification : candidate.value().notifications)
                     {
-                        auto window_started = state.windows->start_or_merge(
-                            candidate_event.event_id, *envelope.detection);
-                        if (!window_started)
-                        {
-                            ++event_failures;
-                            report(window_started.error());
-                        }
+                        if (notification.kind ==
+                            event::CandidateNotificationKind::candidate_created)
+                            start_candidate_window(state, *lane, notification.event);
                         else
-                        {
-                            const auto canonical_id = window_started.value().event.event_id;
-                            for (const auto& source : window_started.value().event.triggers)
-                                state.source_to_canonical[source.source_event_id] = canonical_id;
-                            ++lane->candidates_created;
-                            const auto decision =
-                                std::string{event::to_string(candidate_event.decision_state)};
-                            state.source_decisions[candidate_event.event_id] = decision;
-                            const auto aggregate = aggregate_decision(state, canonical_id);
-                            const auto confirmed_time =
-                                candidate_event.decision_state ==
-                                            event::CandidateEventState::confirmed &&
-                                        candidate_event.decision
-                                    ? std::optional<std::int64_t>{std::chrono::duration_cast<
-                                                                      std::chrono::milliseconds>(
-                                                                      candidate_event.decision
-                                                                          ->wall_clock_time
-                                                                          .time_since_epoch())
-                                                                      .count()}
-                                    : std::nullopt;
-                            auto existing = options.database->get_event(canonical_id);
-                            if (!existing && existing.error().business_code == "EVENT_NOT_FOUND")
-                            {
-                                const auto pre = std::chrono::seconds{
-                                    state.configuration.event.pre_event_seconds};
-                                const auto post = std::chrono::seconds{
-                                    state.configuration.event.post_event_seconds};
-                                std::vector<std::string> all_cameras;
-                                all_cameras.reserve(state.lanes.size());
-                                for (const auto& camera_lane : state.lanes)
-                                    all_cameras.push_back(camera_lane->camera_id);
-                                const auto wall_ms = [](const camera::WallClockTime time) {
-                                    return std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               time.time_since_epoch())
-                                        .count();
-                                };
-                                auto created = options.database->create_collecting_event(
-                                    {.event_id = canonical_id,
-                                     .decision_state = aggregate,
-                                     .candidate_time_utc_ms =
-                                         wall_ms(candidate_event.candidate_trigger.wall_clock_time),
-                                     .confirmed_time_utc_ms = confirmed_time,
-                                     .start_time_utc_ms = wall_ms(
-                                         candidate_event.candidate_trigger.wall_clock_time - pre),
-                                     .end_time_utc_ms = wall_ms(
-                                         candidate_event.candidate_trigger.wall_clock_time + post),
-                                     .camera_ids = std::move(all_cameras),
-                                     .trigger_camera_id =
-                                         candidate_event.candidate_trigger.camera_id,
-                                     .trigger_frame_number =
-                                         candidate_event.candidate_trigger.camera_frame_number,
-                                     .trigger_reason =
-                                         trigger_reason(candidate_event.candidate_trigger),
-                                     .confidence = candidate_event.candidate_trigger.confidence,
-                                     .trigger_count =
-                                         window_started.value().event.triggers.size()});
-                                if (!created)
-                                {
-                                    ++event_failures;
-                                    report(created.error());
-                                }
-                                else
-                                {
-                                    ++events_started;
-                                    publish_lifecycle(created.value());
-                                }
-                            }
-                            else if (!existing)
-                            {
-                                ++event_failures;
-                                report(existing.error());
-                            }
-                            transition_lifecycle(canonical_id, aggregate, "Collecting",
-                                                 window_started.value().event.triggers.size(),
-                                                 confirmed_time);
-
-                            bool lease_exists = false;
-                            {
-                                std::scoped_lock lock{mutex};
-                                lease_exists =
-                                    nvme_lease_sources.contains(candidate_event.event_id);
-                            }
-                            if (options.nvme_cache && !lease_exists)
-                            {
-                                std::vector<std::string> camera_ids;
-                                camera_ids.reserve(state.lanes.size());
-                                for (const auto& camera_lane : state.lanes)
-                                    camera_ids.push_back(camera_lane->camera_id);
-                                const auto pre = std::chrono::seconds{
-                                    state.configuration.event.pre_event_seconds};
-                                const auto post = std::chrono::seconds{
-                                    state.configuration.event.post_event_seconds};
-                                auto protected_window = options.nvme_cache->protect_event_window(
-                                    {.event_id = candidate_event.event_id,
-                                     .camera_ids = std::move(camera_ids),
-                                     .start_monotonic_time =
-                                         envelope.detection->monotonic_time - pre,
-                                     .end_monotonic_time =
-                                         envelope.detection->monotonic_time + post,
-                                     .start_wall_clock_time =
-                                         envelope.detection->wall_clock_time - pre,
-                                     .end_wall_clock_time =
-                                         envelope.detection->wall_clock_time + post});
-                                if (!protected_window)
-                                    report(protected_window.error());
-                                else
-                                {
-                                    std::scoped_lock lock{mutex};
-                                    nvme_lease_sources.insert(candidate_event.event_id);
-                                }
-                            }
-                        }
-                    }
-                    else if (const auto canonical =
-                                 state.source_to_canonical.find(candidate_event.event_id);
-                             canonical != state.source_to_canonical.end())
-                    {
-                        auto current = options.database->get_event(canonical->second);
-                        if (current)
-                        {
-                            const auto decision =
-                                std::string{event::to_string(candidate_event.decision_state)};
-                            state.source_decisions[candidate_event.event_id] = decision;
-                            const auto aggregate = aggregate_decision(state, canonical->second);
-                            const auto confirmed_time =
-                                candidate_event.decision_state ==
-                                            event::CandidateEventState::confirmed &&
-                                        candidate_event.decision
-                                    ? std::optional<std::int64_t>{std::chrono::duration_cast<
-                                                                      std::chrono::milliseconds>(
-                                                                      candidate_event.decision
-                                                                          ->wall_clock_time
-                                                                          .time_since_epoch())
-                                                                      .count()}
-                                    : std::nullopt;
-                            transition_lifecycle(canonical->second, aggregate,
-                                                 current.value().persistence_state,
-                                                 current.value().trigger_count, confirmed_time);
-                        }
+                            apply_candidate_decision(state, *lane, notification.event);
                     }
                 }
             }
@@ -1244,17 +1267,9 @@ struct EventRuntimeImpl final
                                                envelope.frame.received_wall_clock_time());
             for (const auto& candidate_event : timed_out)
             {
-                const auto canonical = state.source_to_canonical.find(candidate_event.event_id);
-                if (canonical == state.source_to_canonical.end())
-                    continue;
-                auto current = options.database->get_event(canonical->second);
-                if (current)
-                {
-                    state.source_decisions[candidate_event.event_id] = "Timeout";
-                    transition_lifecycle(
-                        canonical->second, aggregate_decision(state, canonical->second),
-                        current.value().persistence_state, current.value().trigger_count);
-                }
+                auto* source_lane = find_lane(state, candidate_event.camera_id);
+                if (source_lane != nullptr)
+                    apply_candidate_decision(state, *source_lane, candidate_event);
             }
             frozen_windows = state.windows->advance_time(envelope.frame.received_monotonic_time());
         }
@@ -1861,15 +1876,29 @@ Result<void> EventRuntime::update_external_confirmation(const std::string_view c
                                                         const camera::MonotonicTime monotonic_time,
                                                         const camera::WallClockTime wall_clock_time)
 {
-    std::scoped_lock lock{impl_->mutex};
-    if (!impl_->accepting || !impl_->pipeline->candidates)
-        return Result<void>::failure(runtime_error("SYS_SERVICE_STOPPING", Severity::warning,
-                                                   "事件运行时未接收外部确认信号",
-                                                   "event.runtime.externalConfirmation", true));
-    auto updated = impl_->pipeline->candidates->update_external_signal(
-        camera_id, active, monotonic_time, wall_clock_time);
+    std::scoped_lock transaction_lock{impl_->reconfigure_mutex};
+    EventPipelineState* state{};
+    {
+        std::scoped_lock lock{impl_->mutex};
+        if (!impl_->accepting || !impl_->pipeline->candidates)
+            return Result<void>::failure(runtime_error("SYS_SERVICE_STOPPING", Severity::warning,
+                                                       "事件运行时未接收外部确认信号",
+                                                       "event.runtime.externalConfirmation", true));
+        state = impl_->pipeline.get();
+    }
+    auto updated = state->candidates->update_external_signal(camera_id, active, monotonic_time,
+                                                             wall_clock_time);
     if (!updated)
         return Result<void>::failure(std::move(updated).error());
+    if (updated.value().event)
+    {
+        auto* lane = find_lane(*state, camera_id);
+        if (lane != nullptr)
+        {
+            const std::scoped_lock lifecycle_lock{state->lifecycle_mutex};
+            impl_->apply_candidate_decision(*state, *lane, *updated.value().event);
+        }
+    }
     return Result<void>::success();
 }
 

@@ -153,6 +153,8 @@ struct ControlledDetectorBehavior final
     bool release_cam01{};
     std::map<std::string, std::size_t> failures_remaining;
     std::set<std::string> triggered_cameras;
+    std::map<std::pair<std::string, std::uint64_t>, double> confidence_by_frame;
+    double default_trigger_confidence{1.0};
     std::map<std::string, std::vector<std::uint64_t>> completed_sequences;
     std::size_t active_calls{};
     std::size_t maximum_active_calls{};
@@ -176,6 +178,7 @@ class ControlledRuntimeDetector final : public algorithm::IBreakDetector
     {
         bool fail = false;
         bool triggered = false;
+        double confidence = 0.0;
         {
             std::unique_lock lock{behavior_->mutex};
             ++behavior_->active_calls;
@@ -190,6 +193,14 @@ class ControlledRuntimeDetector final : public algorithm::IBreakDetector
                 fail = true;
             }
             triggered = behavior_->triggered_cameras.contains(input.camera_id());
+            if (triggered)
+            {
+                const auto configured = behavior_->confidence_by_frame.find(
+                    {input.camera_id(), input.sequence_number()});
+                confidence = configured == behavior_->confidence_by_frame.end()
+                                 ? behavior_->default_trigger_confidence
+                                 : configured->second;
+            }
             behavior_->completed_sequences[input.camera_id()].push_back(input.sequence_number());
             --behavior_->active_calls;
         }
@@ -210,7 +221,7 @@ class ControlledRuntimeDetector final : public algorithm::IBreakDetector
                                   .height = input.geometry().height},
              .paper_ratio = 1.0,
              .anomalous = triggered,
-             .confidence = triggered ? 1.0 : 0.0,
+             .confidence = confidence,
              .detector_version = "controlled-runtime-test/1.0",
              .model_version = "none"});
     }
@@ -422,6 +433,182 @@ TEST(EventRuntimeIntegration, ManualTriggerPersistsContinuousWindowWithoutBlocki
     EXPECT_GT(snapshot.persistence_last_write_bytes, 0U);
     EXPECT_GT(snapshot.persistence_last_write_mib_per_second, 0.0);
     EXPECT_EQ(errors.load(), 0U);
+}
+
+TEST(EventRuntimeIntegration, FrozenCandidateMappingSurvivesUntilConfirmationAndNextIdIsUnique)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto behavior = std::make_shared<ControlledDetectorBehavior>();
+    behavior->triggered_cameras = {"CAM01"};
+    behavior->default_trigger_confidence = 0.7;
+    behavior->confidence_by_frame[{"CAM01", 3U}] = 0.9;
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "controlled-runtime-test";
+    configuration.algorithm.candidate_threshold = 0.6;
+    configuration.algorithm.confirmation_threshold = 0.8;
+    configuration.algorithm.consecutive_frames = 1U;
+    configuration.algorithm.cooldown_ms = 0U;
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration,
+         .event_root = event_root,
+         .database = shared_database,
+         .frame_queue_capacity = 64U,
+         .detector_registry_configurer = controlled_detector_registration(behavior)});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 1U; }));
+    auto first_page = shared_database->query_events({.limit = 10U});
+    ASSERT_TRUE(first_page);
+    ASSERT_EQ(first_page.value().events.size(), 1U);
+    const auto first_id = first_page.value().events.front().event_id;
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 1200ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_frozen == 1U; }));
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 1300ms)));
+    ASSERT_TRUE(wait_until([&] {
+        auto record = shared_database->get_event(first_id);
+        return record && record.value().decision_state == "Confirmed";
+    }));
+    EXPECT_EQ(runtime.value()->snapshot().events_started, 1U);
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(4U, 1400ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 2U; }));
+    auto second_page = shared_database->query_events({.limit = 10U});
+    ASSERT_TRUE(second_page);
+    ASSERT_EQ(second_page.value().events.size(), 2U);
+    std::set<std::string> event_ids;
+    for (const auto& event : second_page.value().events)
+        event_ids.insert(event.event_id);
+    EXPECT_EQ(event_ids.size(), 2U);
+    EXPECT_TRUE(event_ids.contains(first_id));
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(5U, 2500ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_frozen == 2U; }));
+    EXPECT_EQ(runtime.value()->snapshot().events_started, 2U);
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeIntegration, FrozenCandidateTimeoutDoesNotReuseIdAndLaterCandidateIsUnique)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto behavior = std::make_shared<ControlledDetectorBehavior>();
+    behavior->triggered_cameras = {"CAM01"};
+    behavior->default_trigger_confidence = 0.7;
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "controlled-runtime-test";
+    configuration.algorithm.candidate_threshold = 0.6;
+    configuration.algorithm.confirmation_threshold = 0.8;
+    configuration.algorithm.consecutive_frames = 1U;
+    configuration.algorithm.cooldown_ms = 1000U;
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration,
+         .event_root = event_root,
+         .database = shared_database,
+         .frame_queue_capacity = 64U,
+         .detector_registry_configurer = controlled_detector_registration(behavior)});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 1U; }));
+    auto first_page = shared_database->query_events({.limit = 10U});
+    ASSERT_TRUE(first_page);
+    ASSERT_EQ(first_page.value().events.size(), 1U);
+    const auto first_id = first_page.value().events.front().event_id;
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 1200ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_frozen == 1U; }));
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 3100ms)));
+    ASSERT_TRUE(wait_until([&] {
+        auto record = shared_database->get_event(first_id);
+        return record && record.value().decision_state == "Timeout";
+    }));
+    EXPECT_EQ(runtime.value()->snapshot().events_started, 1U);
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(4U, 4200ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 2U; }));
+    auto second_page = shared_database->query_events({.limit = 10U});
+    ASSERT_TRUE(second_page);
+    ASSERT_EQ(second_page.value().events.size(), 2U);
+    EXPECT_NE(second_page.value().events[0].event_id, second_page.value().events[1].event_id);
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeIntegration, ExternalConfirmationAfterFreezeUpdatesOriginalAndReleasesMapping)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto behavior = std::make_shared<ControlledDetectorBehavior>();
+    behavior->triggered_cameras = {"CAM01"};
+    behavior->default_trigger_confidence = 0.9;
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "controlled-runtime-test";
+    configuration.algorithm.candidate_threshold = 0.6;
+    configuration.algorithm.confirmation_threshold = 0.8;
+    configuration.algorithm.consecutive_frames = 1U;
+    configuration.algorithm.cooldown_ms = 0U;
+    configuration.plant_io.enabled = true;
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration,
+         .event_root = event_root,
+         .database = shared_database,
+         .frame_queue_capacity = 64U,
+         .detector_registry_configurer = controlled_detector_registration(behavior)});
+    ASSERT_TRUE(runtime) << runtime.error().message;
+    ASSERT_TRUE(runtime.value()->start());
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 1U; }));
+    auto first_page = shared_database->query_events({.limit = 10U});
+    ASSERT_TRUE(first_page);
+    ASSERT_EQ(first_page.value().events.size(), 1U);
+    const auto first_id = first_page.value().events.front().event_id;
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 1200ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_frozen == 1U; }));
+
+    const auto wall = WallClockTime{std::chrono::sys_days{std::chrono::year{2026} / 8 / 4}};
+    ASSERT_TRUE(runtime.value()->update_external_confirmation("CAM01", true, MonotonicTime{1300ms},
+                                                              wall + 1300ms));
+    ASSERT_TRUE(wait_until([&] {
+        auto record = shared_database->get_event(first_id);
+        return record && record.value().decision_state == "Confirmed";
+    }));
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 1400ms)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 2U; }));
+    auto second_page = shared_database->query_events({.limit = 10U});
+    ASSERT_TRUE(second_page);
+    ASSERT_EQ(second_page.value().events.size(), 2U);
+    EXPECT_NE(second_page.value().events[0].event_id, second_page.value().events[1].event_id);
+
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }
 
 TEST(EventRuntimeIntegration, DeployableDefaultConfigurationSatisfiesPoolBudget)

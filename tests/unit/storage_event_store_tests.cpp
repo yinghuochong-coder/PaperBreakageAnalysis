@@ -279,6 +279,7 @@ class FaultingFileSystem final : public IEventFileSystem
 
     Result<void> create_directory_exclusive(const std::filesystem::path& path) override
     {
+        ++create_directory_exclusive_occurrences;
         return delegate_->create_directory_exclusive(path);
     }
 
@@ -353,6 +354,14 @@ class FaultingFileSystem final : public IEventFileSystem
 
     Result<EventPathKind> path_kind(const std::filesystem::path& path) override
     {
+        const auto occurrence = ++path_kind_occurrences;
+        if (create_path_before_kind_occurrence != 0U &&
+            occurrence == create_path_before_kind_occurrence)
+        {
+            auto created = delegate_->create_directories(path);
+            if (!created)
+                return Result<EventPathKind>::failure(std::move(created).error());
+        }
         return delegate_->path_kind(path);
     }
 
@@ -377,6 +386,9 @@ class FaultingFileSystem final : public IEventFileSystem
     std::filesystem::path hash_failure_filename;
     std::map<std::string, std::size_t> read_occurrences;
     std::map<std::string, std::size_t> write_occurrences;
+    std::size_t create_directory_exclusive_occurrences{};
+    std::size_t path_kind_occurrences{};
+    std::size_t create_path_before_kind_occurrence{};
     std::size_t fail_read_occurrence{1U};
     std::string native_code{"112"};
     bool fail_move{};
@@ -496,6 +508,48 @@ TEST(StorageEventStore, PersistenceWritesAndHashesEachFileOnceWithoutPayloadRead
     EXPECT_EQ(file_system->write_occurrences["event.json"], 1U);
     EXPECT_EQ(file_system->write_occurrences["keyframe-0.jpg"], 1U);
     EXPECT_EQ(file_system->write_occurrences["manifest.json"], 1U);
+}
+
+TEST(StorageEventStore, ExistingDestinationIsRejectedBeforeTransactionPayloadIsWritten)
+{
+    TemporaryDirectory temporary{"existing-destination-preflight"};
+    auto file_system = std::make_shared<FaultingFileSystem>(make_windows_event_file_system());
+    auto writer = writer_for(temporary.path(), file_system);
+    const auto event_id = "019f-m506-existing-preflight";
+    ASSERT_TRUE(writer->persist(request(event_id)));
+    file_system->write_occurrences.clear();
+    const auto exclusive_creates = file_system->create_directory_exclusive_occurrences;
+
+    auto duplicate = writer->persist(request(event_id));
+
+    ASSERT_FALSE(duplicate);
+    EXPECT_EQ(duplicate.error().business_code, "EVENT_WRITE_FAILED");
+    EXPECT_EQ(duplicate.error().operation, "event.persist.preflight");
+    EXPECT_TRUE(file_system->write_occurrences.empty());
+    EXPECT_EQ(file_system->create_directory_exclusive_occurrences, exclusive_creates);
+    const auto transactions = temporary.path() / ".transactions";
+    EXPECT_EQ(std::filesystem::directory_iterator{transactions},
+              std::filesystem::directory_iterator{});
+}
+
+TEST(StorageEventStore, FinalDestinationRecheckRejectsPreflightRaceAndKeepsTransaction)
+{
+    TemporaryDirectory temporary{"destination-race"};
+    auto file_system = std::make_shared<FaultingFileSystem>(make_windows_event_file_system());
+    file_system->create_path_before_kind_occurrence = 2U;
+    auto writer = writer_for(temporary.path(), file_system);
+    const auto event_id = "019f-m506-destination-race";
+
+    auto raced = writer->persist(request(event_id));
+
+    ASSERT_FALSE(raced);
+    EXPECT_EQ(raced.error().business_code, "EVENT_WRITE_FAILED");
+    EXPECT_EQ(raced.error().operation, "event.persist.commit");
+    EXPECT_FALSE(file_system->write_occurrences.empty());
+    EXPECT_TRUE(std::filesystem::is_directory(temporary.path() / "2026" / "08" / "04" / event_id));
+    const auto transactions = temporary.path() / ".transactions";
+    EXPECT_NE(std::filesystem::directory_iterator{transactions},
+              std::filesystem::directory_iterator{});
 }
 
 TEST(StorageEventStore, ShortWriteAndHashApiFailureKeepTransactionIncomplete)

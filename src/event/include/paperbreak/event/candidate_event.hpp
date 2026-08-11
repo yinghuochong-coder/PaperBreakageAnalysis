@@ -114,6 +114,10 @@ struct CandidateProcessOutcome final
 {
     CandidateCameraSnapshot camera;
     bool duplicate{};
+    /// Ordered, bounded notifications produced by this process call. At most one candidate can be
+    /// active per camera, so a single result produces no more than the manager's fixed three-event
+    /// notification budget.
+    std::vector<CandidateEventNotification> notifications;
 };
 
 struct CandidateCommandOutcome final

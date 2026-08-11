@@ -935,6 +935,15 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
         return Result<EventPersistenceOutcome>::failure(
             event_error("EVENT_WRITE_FAILED", Severity::critical, "无法生成事件正式目录",
                         "event.persist.path"));
+    const auto destination = impl_->options.event_root / relative_destination;
+    auto destination_kind = impl_->file_system->path_kind(destination);
+    if (!destination_kind)
+        return Result<EventPersistenceOutcome>::failure(wrap_file_error(
+            destination_kind.error(), "无法预检事件正式目录", "event.persist.preflight"));
+    if (destination_kind.value() != EventPathKind::missing)
+        return Result<EventPersistenceOutcome>::failure(
+            event_error("EVENT_WRITE_FAILED", Severity::critical, "正式事件目录已存在",
+                        "event.persist.preflight"));
 
     std::filesystem::path transaction;
     for (std::size_t attempt = 0U; attempt < 16U; ++attempt)
@@ -1087,15 +1096,17 @@ Result<EventPersistenceOutcome> EventTransactionWriter::persist(
             event_error("EVENT_CHECKSUM_FAILED", Severity::critical, "事件 manifest 写入结果无效",
                         "event.persist.manifest"));
 
-    const auto destination = impl_->options.event_root / relative_destination;
     auto parent = impl_->file_system->create_directories(destination.parent_path());
     if (!parent)
         return Result<EventPersistenceOutcome>::failure(wrap_file_error(
             parent.error(), "无法创建事件日期目录", "event.persist.commit", transaction));
-    auto destination_kind = impl_->file_system->path_kind(destination);
-    if (!destination_kind || destination_kind.value() != EventPathKind::missing)
+    destination_kind = impl_->file_system->path_kind(destination);
+    if (!destination_kind)
+        return Result<EventPersistenceOutcome>::failure(wrap_file_error(
+            destination_kind.error(), "无法复检事件正式目录", "event.persist.commit", transaction));
+    if (destination_kind.value() != EventPathKind::missing)
         return Result<EventPersistenceOutcome>::failure(
-            event_error("EVENT_WRITE_FAILED", Severity::critical, "正式事件目录已存在或无法检查",
+            event_error("EVENT_WRITE_FAILED", Severity::critical, "正式事件目录已存在",
                         "event.persist.commit"));
     auto moved = impl_->file_system->move_directory_atomically(transaction, destination);
     if (!moved)

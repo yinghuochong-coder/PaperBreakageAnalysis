@@ -1053,11 +1053,14 @@ VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
        ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)
 ON CONFLICT(event_id) DO UPDATE SET
  event_schema_version=excluded.event_schema_version,
- event_state=excluded.decision_state,decision_state=excluded.decision_state,
+ event_state=CASE WHEN events.decision_state='Candidate' THEN excluded.decision_state
+                  ELSE events.decision_state END,
+ decision_state=CASE WHEN events.decision_state='Candidate' THEN excluded.decision_state
+                     ELSE events.decision_state END,
  persistence_state='Committed',artifacts_available=1,
  trigger_count=MAX(events.trigger_count,excluded.trigger_count),
  candidate_time_utc_ms=excluded.candidate_time_utc_ms,
- confirmed_time_utc_ms=excluded.confirmed_time_utc_ms,
+ confirmed_time_utc_ms=COALESCE(events.confirmed_time_utc_ms,excluded.confirmed_time_utc_ms),
  start_time_utc_ms=excluded.start_time_utc_ms,
  end_time_utc_ms=excluded.end_time_utc_ms,trigger_camera_id=excluded.trigger_camera_id,
  trigger_frame_number=excluded.trigger_frame_number,trigger_reason=excluded.trigger_reason,

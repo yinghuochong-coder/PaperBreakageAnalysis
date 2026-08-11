@@ -769,6 +769,8 @@ Result<CandidateProcessOutcome> CandidateEventManager::process(
         }
     }
     impl_->deliver(notifications);
+    if (*response)
+        response->value().notifications = std::move(notifications);
     return std::move(*response);
 }
 
