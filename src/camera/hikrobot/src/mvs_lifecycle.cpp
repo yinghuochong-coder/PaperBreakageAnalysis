@@ -1111,11 +1111,17 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
             !r)
             return r;
     if (parameters.exposure_us)
+    {
+        if (auto r = check(api.set_enum_value_by_string(handle, "ExposureAuto", "Off"),
+                           "ExposureAuto");
+            !r)
+            return r;
         if (auto r = check(api.set_float_value(handle, "ExposureTime",
                                                static_cast<float>(*parameters.exposure_us)),
                            "ExposureTime");
             !r)
             return r;
+    }
     if (parameters.gain_db)
         if (auto r =
                 check(api.set_float_value(handle, "Gain", static_cast<float>(*parameters.gain_db)),
@@ -1435,14 +1441,21 @@ struct DeviceHandle::State final
             }
             if (resume)
             {
-                const int code = api.start_grabbing(handle);
+                int code = api.set_enum_value_by_string(handle, "ExposureAuto", "Continuous");
+                const char* node = "ExposureAuto";
+                const char* reason = "restore-auto-exposure-failed";
+                if (code == MV_OK)
+                {
+                    code = api.start_grabbing(handle);
+                    node = "Acquisition";
+                    reason = "resume-after-rollback-failed";
+                }
                 if (code == MV_OK)
                     streaming = true;
                 else
                     restored = Result<void>::failure(
                         parameter_error(CameraErrorKind::parameter_faulted, code,
-                                        "camera.hikrobot.rollbackParameters", "Acquisition",
-                                        "resume-after-rollback-failed"));
+                                        "camera.hikrobot.rollbackParameters", node, reason));
             }
             if (!restored)
             {
@@ -1478,11 +1491,19 @@ struct DeviceHandle::State final
 
         if (resume)
         {
-            const int code = api.start_grabbing(handle);
+            int code = api.set_enum_value_by_string(handle, "ExposureAuto", "Continuous");
+            const char* node = "ExposureAuto";
+            const char* reason = "resume-auto-exposure-failed";
+            if (code == MV_OK)
+            {
+                code = api.start_grabbing(handle);
+                node = "Acquisition";
+                reason = "resume-failed";
+            }
             if (code != MV_OK)
                 return restore_or_fault(parameter_error(CameraErrorKind::stream_start_failed, code,
                                                         "camera.hikrobot.resumeAfterParameters",
-                                                        "Acquisition", "resume-failed"));
+                                                        node, reason));
             streaming = true;
         }
         return actual;
@@ -1644,6 +1665,14 @@ Result<StreamSession> DeviceHandle::start_streaming()
         return Result<StreamSession>::failure(
             translate_mvs_error(CameraErrorKind::stream_start_failed, MV_E_CALLORDER,
                                 "camera.hikrobot.startGrabbing", "MVS 设备已经处于取流状态"));
+    }
+    const int exposure_code =
+        state_->api.set_enum_value_by_string(state_->handle, "ExposureAuto", "Continuous");
+    if (exposure_code != MV_OK)
+    {
+        return Result<StreamSession>::failure(parameter_error(
+            CameraErrorKind::stream_start_failed, exposure_code, "camera.hikrobot.startGrabbing",
+            "ExposureAuto", "enable-continuous-auto-exposure-failed"));
     }
     const int code = state_->api.start_grabbing(state_->handle);
     if (code != MV_OK)

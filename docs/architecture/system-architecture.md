@@ -480,6 +480,11 @@ FrameBufferPool → FramePacket 元数据
 
 采集线程到 `acquisition.frames` 入队后立即返回，不等待任何下游分支。
 
+Hikrobot 取流入口在调用 MVS `StartGrabbing` 前同步设置
+`ExposureAuto=Continuous`，使自动曝光成为每次采集会话的固定前置条件。参数事务如果需要
+写入历史手动曝光值，必须先临时关闭自动曝光，恢复取流前再重新开启；任一自动曝光写入
+失败都使取流启动失败，不带着手动曝光状态继续采集。
+
 ### 9.2 算法与候选
 
 ```text

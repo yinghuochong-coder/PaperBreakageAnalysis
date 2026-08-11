@@ -696,6 +696,10 @@ int main(int argc, char* argv[])
             std::ranges::none_of(main_window.findChildren<QLabel*>(), [](const QLabel* label) {
                 return label && label->text() == QStringLiteral("相机配置与实际值");
             });
+        const bool fixed_acquisition_controls_removed =
+            !main_window.findChild<QWidget*>(QStringLiteral("camera-trigger-panel")) &&
+            !main_window.findChild<QPushButton*>(
+                QStringLiteral("camera-camera.softwareTrigger"));
         camera_smoke.topology_restart_required = true;
         main_window.apply_camera_snapshot(camera_smoke);
         const bool restart_state_disabled_controls = main_window.camera_device_controls_disabled();
@@ -873,6 +877,7 @@ int main(int argc, char* argv[])
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && camera_layout_responsive &&
                    preview_panes_stable_and_cycle && camera_banner_removed &&
+                   fixed_acquisition_controls_removed &&
                    camera_discover_above_list && first_camera_status_only &&
                    selected_camera_status_only && first_camera_mirroring_loaded &&
                    selected_camera_mirroring_loaded && roi_capabilities_loaded &&

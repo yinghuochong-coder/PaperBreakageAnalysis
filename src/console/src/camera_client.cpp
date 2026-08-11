@@ -212,7 +212,8 @@ Json parameter_json(const CameraParameterValue& value)
         result["pixelFormat"] = value.pixel_format;
     if (!value.trigger_mode.empty())
         result["triggerMode"] = value.trigger_mode;
-    result["triggerSource"] = value.trigger_source;
+    if (!value.trigger_source.empty() || !value.trigger_mode.empty())
+        result["triggerSource"] = value.trigger_source;
     if (value.trigger_delay_us)
         result["triggerDelayUs"] = *value.trigger_delay_us;
     if (value.packet_size_bytes)

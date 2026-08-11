@@ -602,11 +602,18 @@ TEST_F(MvsLifecycleTest, ParameterApplyPausesWritesReadsBackAndResumesStreaming)
     const auto stop = std::find(context_.calls.begin(), context_.calls.end(), "stop");
     const auto first_write =
         std::find(context_.calls.begin(), context_.calls.end(), "seti:OffsetX");
+    const auto disable_auto =
+        std::find(context_.calls.begin(), context_.calls.end(), "setes:ExposureAuto=Off");
+    const auto exposure_write =
+        std::find(context_.calls.begin(), context_.calls.end(), "setf:ExposureTime");
     const auto restart = std::find(context_.calls.begin(), context_.calls.end(), "start");
     ASSERT_NE(stop, context_.calls.end());
     ASSERT_NE(first_write, context_.calls.end());
+    ASSERT_NE(disable_auto, context_.calls.end());
+    ASSERT_NE(exposure_write, context_.calls.end());
     ASSERT_NE(restart, context_.calls.end());
     EXPECT_LT(stop, first_write);
+    EXPECT_LT(disable_auto, exposure_write);
     EXPECT_LT(first_write, restart);
     EXPECT_TRUE(std::move(stream).value().active());
 }
@@ -1056,7 +1063,9 @@ TEST_F(MvsLifecycleTest, StreamAndHandleDestructorsReleaseInReverseOrder)
     }
 
     EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open", "start", "stop", "close", "destroy"}));
+              (std::vector<std::string>{"create", "open",
+                                        "setes:ExposureAuto=Continuous", "start", "stop", "close",
+                                        "destroy"}));
 }
 
 TEST_F(MvsLifecycleTest, ExplicitStopIsIdempotent)
@@ -1074,7 +1083,44 @@ TEST_F(MvsLifecycleTest, ExplicitStopIsIdempotent)
     EXPECT_TRUE(handle.close());
 
     EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open", "start", "stop", "close", "destroy"}));
+              (std::vector<std::string>{"create", "open",
+                                        "setes:ExposureAuto=Continuous", "start", "stop", "close",
+                                        "destroy"}));
+}
+
+TEST_F(MvsLifecycleTest, StartEnablesContinuousAutoExposureBeforeGrabbing)
+{
+    auto handle_result = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(handle_result);
+    auto handle = std::move(handle_result).value();
+
+    auto stream_result = handle.start_streaming();
+
+    ASSERT_TRUE(stream_result);
+    const auto auto_exposure =
+        std::find(context_.calls.begin(), context_.calls.end(), "setes:ExposureAuto=Continuous");
+    const auto start = std::find(context_.calls.begin(), context_.calls.end(), "start");
+    ASSERT_NE(auto_exposure, context_.calls.end());
+    ASSERT_NE(start, context_.calls.end());
+    EXPECT_LT(auto_exposure, start);
+}
+
+TEST_F(MvsLifecycleTest, AutoExposureFailurePreventsGrabbing)
+{
+    context_.fail_set_node = "ExposureAuto";
+    context_.fail_set_code = MV_E_GC_ACCESS;
+    context_.fail_set_remaining = 1U;
+    auto handle_result = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(handle_result);
+    auto handle = std::move(handle_result).value();
+
+    auto stream_result = handle.start_streaming();
+
+    ASSERT_FALSE(stream_result);
+    EXPECT_EQ(stream_result.error().business_code, "CAMERA_STREAM_START_FAILED");
+    EXPECT_EQ(stream_result.error().details.at(0).value, "ExposureAuto");
+    EXPECT_EQ(std::find(context_.calls.begin(), context_.calls.end(), "start"),
+              context_.calls.end());
 }
 
 TEST_F(MvsLifecycleTest, StartFailureDoesNotCreateStreamingOwner)
@@ -1106,8 +1152,10 @@ TEST_F(MvsLifecycleTest, CleanupContinuesAfterStopFailure)
         EXPECT_EQ(stop_result.error().native_code, "0x800000FE");
     }
 
-    EXPECT_EQ(context_.calls, (std::vector<std::string>{"create", "open", "start", "stop", "stop",
-                                                        "stop", "close", "destroy"}));
+    EXPECT_EQ(context_.calls,
+              (std::vector<std::string>{"create", "open",
+                                        "setes:ExposureAuto=Continuous", "start", "stop", "stop",
+                                        "stop", "close", "destroy"}));
 }
 
 TEST_F(MvsLifecycleTest, CapturesIntoPreallocatedBufferAndMapsFrameMetadata)

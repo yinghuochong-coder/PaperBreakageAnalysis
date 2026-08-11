@@ -793,7 +793,6 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             add_action(QStringLiteral("开始采集"), "camera.start", true);
             add_action(QStringLiteral("停止采集"), "camera.stop", true);
             add_action(QStringLiteral("抓取快照"), "camera.captureSnapshot", false);
-            add_action(QStringLiteral("软件触发"), "camera.softwareTrigger", false);
             control_group_layout->addWidget(action_grid);
             main_layout->addWidget(control_group);
 
@@ -816,7 +815,7 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             camera_fps_ = make_child<QDoubleSpinBox>(acquisition_panel);
             camera_fps_->setRange(0.1, 1000.0);
             camera_fps_->setDecimals(3);
-            acquisition_form->addRow(QStringLiteral("曝光 (us)"), camera_exposure_);
+            acquisition_form->addRow(QStringLiteral("曝光时长 (us)"), camera_exposure_);
             acquisition_form->addRow(QStringLiteral("增益 (dB)"), camera_gain_);
             acquisition_form->addRow(QStringLiteral("帧率 (fps)"), camera_fps_);
             editor_grid->add_widget(acquisition_panel);
@@ -855,29 +854,6 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             roi_form->addRow(QStringLiteral("水平镜像"), camera_reverse_x_);
             roi_form->addRow(QStringLiteral("垂直镜像"), camera_reverse_y_);
             editor_grid->add_widget(roi_panel);
-
-            auto* trigger_panel =
-                make_child<QGroupBox>(camera_editor_, QStringLiteral("触发与同步"));
-            trigger_panel->setObjectName(QStringLiteral("camera-trigger-panel"));
-            trigger_panel->setProperty("role", "cameraPanel");
-            auto* trigger_form = make_layout<QFormLayout>(trigger_panel);
-            trigger_form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-            trigger_form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-            camera_pixel_format_ = make_child<QComboBox>(trigger_panel);
-            camera_pixel_format_->addItems({QStringLiteral("Mono8"), QStringLiteral("Mono10"),
-                                            QStringLiteral("Mono12"), QStringLiteral("BayerRG8")});
-            camera_trigger_mode_ = make_child<QComboBox>(trigger_panel);
-            camera_trigger_mode_->addItems({QStringLiteral("Continuous"),
-                                            QStringLiteral("Hardware"),
-                                            QStringLiteral("Software")});
-            camera_trigger_source_ = make_child<QLineEdit>(trigger_panel);
-            camera_trigger_delay_ = make_child<QSpinBox>(trigger_panel);
-            camera_trigger_delay_->setRange(0, 60000000);
-            trigger_form->addRow(QStringLiteral("像素格式"), camera_pixel_format_);
-            trigger_form->addRow(QStringLiteral("触发模式"), camera_trigger_mode_);
-            trigger_form->addRow(QStringLiteral("触发源"), camera_trigger_source_);
-            trigger_form->addRow(QStringLiteral("触发延迟 (us)"), camera_trigger_delay_);
-            editor_grid->add_widget(trigger_panel);
 
             auto* transport_panel =
                 make_child<QGroupBox>(camera_editor_, QStringLiteral("传输与性能"));
@@ -971,10 +947,6 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                                           static_cast<std::uint32_t>(camera_roi_y_->value())},
                     .reverse_x = camera_reverse_x_->isChecked(),
                     .reverse_y = camera_reverse_y_->isChecked(),
-                    .pixel_format = camera_pixel_format_->currentText().toStdString(),
-                    .trigger_mode = camera_trigger_mode_->currentText().toStdString(),
-                    .trigger_source = camera_trigger_source_->text().toStdString(),
-                    .trigger_delay_us = static_cast<std::uint32_t>(camera_trigger_delay_->value()),
                     .packet_size_bytes = static_cast<std::uint32_t>(camera_packet_size_->value()),
                     .inter_packet_delay_ns =
                         static_cast<std::uint32_t>(camera_packet_delay_->value()),
@@ -2282,7 +2254,7 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
             const auto actual = std::find_if(
                 camera_snapshot_.cameras.begin(), camera_snapshot_.cameras.end(),
                 [&](const auto& item) { return item.id == snapshot.operation->camera_id; });
-            if (actual != camera_snapshot_.cameras.end() && actual->actual.exposure_us &&
+            if (actual != camera_snapshot_.cameras.end() && actual->actual.roi &&
                 camera_selector_->currentText().toStdString() == actual->id)
             {
                 camera_editor_id_ = actual->id;
@@ -2384,8 +2356,8 @@ void MainWindow::update_camera_configuration_summary()
         const auto& camera = camera_snapshot_.cameras[static_cast<std::size_t>(selected_index)];
         summary =
             QStringLiteral(
-                "%1 · %2 · 序列号 %3 · 状态 %4\n型号 %5 · IP %6\n保存值：曝光 %7 us / 增益 %8 dB / "
-                "帧率 %9 fps\n实际值：曝光 %10 us / 增益 %11 dB / 帧率 %12 fps")
+                "%1 · %2 · 序列号 %3 · 状态 %4\n型号 %5 · IP %6\n保存值：曝光时长 %7 us / "
+                "增益 %8 dB / 帧率 %9 fps\n自动曝光：当前 %10 us / 增益 %11 dB / 帧率 %12 fps")
                 .arg(QString::fromStdString(camera.id), QString::fromStdString(camera.location),
                      QString::fromStdString(camera.serial), QString::fromStdString(camera.state),
                      QString::fromStdString(camera.model), QString::fromStdString(camera.ip))
@@ -2499,10 +2471,6 @@ void MainWindow::populate_camera_editor(const CameraParameterValue& value)
     }
     camera_reverse_x_->setChecked(value.reverse_x);
     camera_reverse_y_->setChecked(value.reverse_y);
-    camera_pixel_format_->setCurrentText(QString::fromStdString(value.pixel_format));
-    camera_trigger_mode_->setCurrentText(QString::fromStdString(value.trigger_mode));
-    camera_trigger_source_->setText(QString::fromStdString(value.trigger_source));
-    camera_trigger_delay_->setValue(static_cast<int>(value.trigger_delay_us.value_or(0U)));
     camera_packet_size_->setValue(static_cast<int>(value.packet_size_bytes.value_or(1500U)));
     camera_packet_delay_->setValue(static_cast<int>(value.inter_packet_delay_ns.value_or(0U)));
     camera_alarm_input_enabled_->setChecked(value.line_io.alarm_input_enabled);
@@ -3521,16 +3489,14 @@ bool MainWindow::camera_configuration_ready() const noexcept
 {
     return camera_selector_ && camera_exposure_ && camera_gain_ && camera_fps_ &&
            camera_roi_width_ && camera_roi_height_ && camera_roi_x_ && camera_roi_y_ &&
-           camera_reverse_x_ && camera_reverse_y_ && camera_pixel_format_ && camera_trigger_mode_ &&
-           camera_trigger_source_ && camera_trigger_delay_ && camera_packet_size_ &&
-           camera_packet_delay_ && discovered_devices_ && camera_bind_slot_ &&
+           camera_reverse_x_ && camera_reverse_y_ && camera_packet_size_ && camera_packet_delay_ &&
+           discovered_devices_ && camera_bind_slot_ &&
            camera_bind_location_ && camera_bind_button_ && camera_configuration_value_ &&
            camera_operation_value_ &&
            findChild<QWidget*>(QStringLiteral("camera-device-sidebar")) &&
            findChild<QWidget*>(QStringLiteral("camera-control-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-acquisition-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-roi-panel")) &&
-           findChild<QWidget*>(QStringLiteral("camera-trigger-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-transport-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-action-bar")) &&
            findChild<QPushButton*>(QStringLiteral("camera-discover")) &&
@@ -3540,7 +3506,6 @@ bool MainWindow::camera_configuration_ready() const noexcept
            findChild<QPushButton*>(QStringLiteral("camera-camera.start")) &&
            findChild<QPushButton*>(QStringLiteral("camera-camera.stop")) &&
            findChild<QPushButton*>(QStringLiteral("camera-camera.captureSnapshot")) &&
-           findChild<QPushButton*>(QStringLiteral("camera-camera.softwareTrigger")) &&
            findChild<QPushButton*>(QStringLiteral("camera-update-config"));
 }
 

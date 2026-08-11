@@ -209,10 +209,6 @@ class MainWindow final : public QMainWindow
     QSpinBox* camera_roi_y_{};
     QCheckBox* camera_reverse_x_{};
     QCheckBox* camera_reverse_y_{};
-    QComboBox* camera_pixel_format_{};
-    QComboBox* camera_trigger_mode_{};
-    QLineEdit* camera_trigger_source_{};
-    QSpinBox* camera_trigger_delay_{};
     QSpinBox* camera_packet_size_{};
     QSpinBox* camera_packet_delay_{};
     QCheckBox* camera_alarm_input_enabled_{};

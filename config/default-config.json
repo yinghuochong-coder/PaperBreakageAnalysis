@@ -87,7 +87,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 55,
+  "configRevision": 57,
   "configSchemaVersion": 3,
   "event": {
     "generatePreviewVideo": true,
@@ -115,7 +115,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-11T01:06:34.264Z",
+  "modifiedAt": "2026-08-11T01:27:47.470Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",
