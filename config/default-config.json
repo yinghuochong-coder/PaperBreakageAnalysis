@@ -33,11 +33,11 @@
       "interPacketDelayNs": 400,
       "lineIo": {
         "alarmActiveLevel": "High",
-        "alarmInputEnabled": false,
-        "strobeDurationUs": 0,
+        "alarmInputEnabled": true,
+        "strobeDurationUs": 23,
         "strobeOutputEnabled": false,
         "strobePostDelayUs": 0,
-        "strobePreDelayUs": 0
+        "strobePreDelayUs": 5
       },
       "location": "安装工位",
       "packetSizeBytes": 1500,
@@ -64,11 +64,11 @@
       "interPacketDelayNs": 400,
       "lineIo": {
         "alarmActiveLevel": "High",
-        "alarmInputEnabled": false,
-        "strobeDurationUs": 0,
-        "strobeOutputEnabled": false,
+        "alarmInputEnabled": true,
+        "strobeDurationUs": 23,
+        "strobeOutputEnabled": true,
         "strobePostDelayUs": 0,
-        "strobePreDelayUs": 0
+        "strobePreDelayUs": 5
       },
       "location": "NoLed",
       "packetSizeBytes": 8164,
@@ -87,7 +87,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 53,
+  "configRevision": 54,
   "configSchemaVersion": 3,
   "event": {
     "generatePreviewVideo": true,
@@ -115,7 +115,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-10T09:16:55.084Z",
+  "modifiedAt": "2026-08-11T00:38:30.924Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

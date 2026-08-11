@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -417,9 +418,9 @@ void configure_line_io_nodes(FakeContext& state)
 {
     state.enumerations["LineSelector"] = {0U, {0U, 1U}};
     state.enumerations["LineMode"] = {0U, {0U, 8U}};
-    state.floats["StrobeLineDuration"] = {0.0F, 1.0F, 1000000.0F};
-    state.floats["StrobeLinePreDelay"] = {0.0F, 0.0F, 100000.0F};
-    state.floats["StrobeLineDelay"] = {0.0F, 0.0F, 100000.0F};
+    state.integers["StrobeLineDuration"] = {0, 1, 1000000, 1};
+    state.integers["StrobeLinePreDelay"] = {0, 0, 100000, 2};
+    state.integers["StrobeLineDelay"] = {0, 0, 100000, 1};
     state.booleans["LineStatus"] = false;
     state.booleans["StrobeEnable"] = false;
 }
@@ -825,6 +826,7 @@ TEST_F(MvsLifecycleTest, MapsLineZeroEventsAndLineOneStrobeRangesAndReadback)
     EXPECT_EQ(capabilities.value().line_io.strobe_duration_us->maximum, 1000000U);
     ASSERT_TRUE(capabilities.value().line_io.strobe_pre_delay_us);
     EXPECT_EQ(capabilities.value().line_io.strobe_pre_delay_us->minimum, 0U);
+    EXPECT_EQ(capabilities.value().line_io.strobe_pre_delay_us->increment, 2U);
 
     std::vector<bool> levels;
     handle.set_line_input_observer(
@@ -856,12 +858,18 @@ TEST_F(MvsLifecycleTest, MapsLineZeroEventsAndLineOneStrobeRangesAndReadback)
     EXPECT_NE(std::find(context_.enum_writes.begin(), context_.enum_writes.end(),
                         std::pair<std::string, unsigned int>{"LineMode", 8U}),
               context_.enum_writes.end());
-    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "setf:StrobeLineDuration"),
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "seti:StrobeLineDuration"),
               context_.calls.end());
-    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "setf:StrobeLinePreDelay"),
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "seti:StrobeLinePreDelay"),
               context_.calls.end());
-    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "setf:StrobeLineDelay"),
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "seti:StrobeLineDelay"),
               context_.calls.end());
+    EXPECT_EQ(std::count_if(context_.calls.begin(), context_.calls.end(),
+                            [](const auto& call) {
+                                return call.starts_with("getf:StrobeLine") ||
+                                       call.starts_with("setf:StrobeLine");
+                            }),
+              0);
 
     MV_EVENT_OUT_INFO rising{};
     constexpr char rising_name[] = "EventLine0RisingEdge";
@@ -899,7 +907,7 @@ TEST_F(MvsLifecycleTest, LineIoFailureRollsBackEventsAndStrobeState)
     ASSERT_TRUE(restored.value().line_io);
     EXPECT_FALSE(restored.value().line_io->alarm_input_enabled);
     EXPECT_FALSE(restored.value().line_io->strobe_output_enabled);
-    EXPECT_FLOAT_EQ(context_.floats.at("StrobeLineDuration").current, 0.0F);
+    EXPECT_EQ(context_.integers.at("StrobeLineDuration").current, 0);
     EXPECT_NE(
         std::find(context_.calls.begin(), context_.calls.end(), "event-off:EventLine0RisingEdge"),
         context_.calls.end());

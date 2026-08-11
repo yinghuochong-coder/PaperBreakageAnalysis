@@ -819,9 +819,9 @@ Result<CameraCapabilities> read_capabilities_locked(const MvsApi& api, void* han
                     CameraErrorKind::parameter_read_failed, select_strobe,
                     "camera.hikrobot.capabilities", "LineSelector", "strobe-selector-failed"));
             }
-            const auto duration = optional_float(api, handle, "StrobeLineDuration");
-            const auto pre_delay = optional_float(api, handle, "StrobeLinePreDelay");
-            const auto post_delay = optional_float(api, handle, "StrobeLineDelay");
+            const auto duration = optional_integer(api, handle, "StrobeLineDuration");
+            const auto pre_delay = optional_integer(api, handle, "StrobeLinePreDelay");
+            const auto post_delay = optional_integer(api, handle, "StrobeLineDelay");
             const int restore_code = api.set_enum_value(handle, "LineSelector", original);
             if (restore_code != MV_OK)
                 return Result<CameraCapabilities>::failure(parameter_error(
@@ -831,17 +831,12 @@ Result<CameraCapabilities> read_capabilities_locked(const MvsApi& api, void* han
                 return Result<CameraCapabilities>::failure(
                     !duration ? duration.error()
                               : (!pre_delay ? pre_delay.error() : post_delay.error()));
-            const auto convert = [](const std::optional<MVCC_FLOATVALUE>& value)
-                -> std::optional<SteppedRange<std::uint32_t>> {
-                if (!value || value->fMin < 0.0F || value->fMax < value->fMin ||
-                    value->fMax > static_cast<float>(std::numeric_limits<std::uint32_t>::max()))
-                    return std::nullopt;
-                return SteppedRange<std::uint32_t>{static_cast<std::uint32_t>(value->fMin),
-                                                   static_cast<std::uint32_t>(value->fMax), 1U};
-            };
-            result.line_io.strobe_duration_us = convert(duration.value());
-            result.line_io.strobe_pre_delay_us = convert(pre_delay.value());
-            result.line_io.strobe_post_delay_us = convert(post_delay.value());
+            if (duration.value())
+                result.line_io.strobe_duration_us = integer_range(*duration.value());
+            if (pre_delay.value())
+                result.line_io.strobe_pre_delay_us = integer_range(*pre_delay.value());
+            if (post_delay.value())
+                result.line_io.strobe_post_delay_us = integer_range(*post_delay.value());
             if (!result.line_io.strobe_duration_us || !result.line_io.strobe_pre_delay_us ||
                 !result.line_io.strobe_post_delay_us)
             {
@@ -1049,17 +1044,17 @@ Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* 
             return Result<CameraParameterSnapshot>::failure(
                 parameter_error(CameraErrorKind::parameter_read_failed, code,
                                 "camera.hikrobot.readParameters", "StrobeEnable", "read-failed"));
-        auto duration = read_float("StrobeLineDuration");
-        auto pre_delay = read_float("StrobeLinePreDelay");
-        auto post_delay = read_float("StrobeLineDelay");
+        auto duration = read_int("StrobeLineDuration");
+        auto pre_delay = read_int("StrobeLinePreDelay");
+        auto post_delay = read_int("StrobeLineDelay");
         if (!duration || !pre_delay || !post_delay)
             return Result<CameraParameterSnapshot>::failure(
                 !duration ? duration.error()
                           : (!pre_delay ? pre_delay.error() : post_delay.error()));
         line_io.strobe_output_enabled = enabled;
-        line_io.strobe_duration_us = static_cast<std::uint32_t>(duration.value());
-        line_io.strobe_pre_delay_us = static_cast<std::uint32_t>(pre_delay.value());
-        line_io.strobe_post_delay_us = static_cast<std::uint32_t>(post_delay.value());
+        line_io.strobe_duration_us = duration.value();
+        line_io.strobe_pre_delay_us = pre_delay.value();
+        line_io.strobe_post_delay_us = post_delay.value();
     }
     result.line_io = line_io;
     return Result<CameraParameterSnapshot>::success(std::move(result));
@@ -1285,25 +1280,19 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
                         "LineSource");
                     !source)
                     return source;
-                if (auto duration =
-                        check(api.set_float_value(
-                                  handle, "StrobeLineDuration",
-                                  static_cast<float>(parameters.line_io->strobe_duration_us)),
-                              "StrobeLineDuration");
+                if (auto duration = check(api.set_int_value(handle, "StrobeLineDuration",
+                                                            parameters.line_io->strobe_duration_us),
+                                          "StrobeLineDuration");
                     !duration)
                     return duration;
-                if (auto pre =
-                        check(api.set_float_value(
-                                  handle, "StrobeLinePreDelay",
-                                  static_cast<float>(parameters.line_io->strobe_pre_delay_us)),
-                              "StrobeLinePreDelay");
+                if (auto pre = check(api.set_int_value(handle, "StrobeLinePreDelay",
+                                                       parameters.line_io->strobe_pre_delay_us),
+                                     "StrobeLinePreDelay");
                     !pre)
                     return pre;
-                if (auto post =
-                        check(api.set_float_value(
-                                  handle, "StrobeLineDelay",
-                                  static_cast<float>(parameters.line_io->strobe_post_delay_us)),
-                              "StrobeLineDelay");
+                if (auto post = check(api.set_int_value(handle, "StrobeLineDelay",
+                                                        parameters.line_io->strobe_post_delay_us),
+                                      "StrobeLineDelay");
                     !post)
                     return post;
                 if (auto enabled =
