@@ -190,7 +190,7 @@ QString style_sheet(const ThemeColors& c)
         QComboBox#theme-selector { background: %9; color: %10; border-color: %11; min-width: 92px; }
         QComboBox#theme-selector QAbstractItemView { background: %2; color: %4; }
         QScrollArea { background: transparent; border: 0; }
-        QWidget#camera-page-header, QWidget#camera-action-bar {
+        QWidget#camera-page-header {
             background: %2; border: 1px solid %8; border-radius: 6px;
         }
         QWidget#camera-editor { background: transparent; border: 0; }

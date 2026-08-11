@@ -931,10 +931,10 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             editor_grid->add_widget(transport_panel);
             main_layout->addWidget(camera_editor_);
 
-            auto* footer = make_child<QWidget>(camera_control_actions_);
+            auto* footer = make_child<QWidget>(control_group);
             footer->setObjectName(QStringLiteral("camera-action-bar"));
             auto* footer_layout = make_layout<QHBoxLayout>(footer);
-            footer_layout->setContentsMargins(14, 10, 14, 10);
+            footer_layout->setContentsMargins(0, 4, 0, 0);
             camera_operation_value_ = make_child<QLabel>(footer, QStringLiteral("尚未执行操作"));
             camera_operation_value_->setObjectName(QStringLiteral("camera-operation-status"));
             camera_operation_value_->setWordWrap(true);
@@ -982,8 +982,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             });
             footer_layout->addWidget(camera_operation_value_, 1);
             footer_layout->addWidget(save);
+            control_group_layout->addWidget(footer);
             main_layout->addStretch(1);
-            main_layout->addWidget(footer);
             content_layout->addWidget(camera_control_actions_, 1);
 
             scroll->setWidget(content);

@@ -809,8 +809,25 @@ int main(int argc, char* argv[])
             main_window.findChild<QWidget*>(QStringLiteral("camera-editor"));
         auto* const camera_control_grid =
             main_window.findChild<QWidget*>(QStringLiteral("camera-control-grid"));
+        auto* const camera_control_panel =
+            main_window.findChild<QWidget*>(QStringLiteral("camera-control-panel"));
+        auto* const camera_action_bar =
+            main_window.findChild<QWidget*>(QStringLiteral("camera-action-bar"));
+        auto* const camera_operation_status =
+            main_window.findChild<QLabel*>(QStringLiteral("camera-operation-status"));
+        auto* const camera_update_config =
+            main_window.findChild<QPushButton*>(QStringLiteral("camera-update-config"));
         auto* const camera_scroll =
             main_window.findChild<QScrollArea*>(QStringLiteral("camera-configuration-scroll"));
+        const bool camera_action_bar_merged =
+            camera_control_panel && camera_action_bar && camera_control_grid &&
+            camera_operation_status && camera_update_config &&
+            camera_action_bar->parentWidget() == camera_control_panel &&
+            camera_operation_status->parentWidget() == camera_action_bar &&
+            camera_update_config->parentWidget() == camera_action_bar &&
+            camera_control_panel->layout() &&
+            camera_control_panel->layout()->indexOf(camera_control_grid) <
+                camera_control_panel->layout()->indexOf(camera_action_bar);
         const bool camera_page_selected = main_window.select_page(2U);
         main_window.resize(1680, 900);
         application.processEvents();
@@ -894,6 +911,7 @@ int main(int argc, char* argv[])
                    !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && camera_layout_responsive &&
+                   camera_action_bar_merged &&
                    preview_panes_stable_and_cycle && camera_banner_removed &&
                    fixed_acquisition_controls_removed &&
                    camera_discover_above_list && line_io_panels_split && first_camera_status_only &&
