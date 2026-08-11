@@ -589,6 +589,56 @@ SteppedRange<std::uint32_t> integer_range(const MVCC_INTVALUE_EX& value)
             static_cast<std::uint32_t>(value.nInc)};
 }
 
+constexpr std::uint64_t nanoseconds_per_second = 1'000'000'000ULL;
+
+Result<std::uint32_t> delay_ticks_to_nanoseconds(const std::uint32_t ticks,
+                                                 const std::uint32_t nanoseconds_per_tick,
+                                                 const std::string_view operation)
+{
+    if (nanoseconds_per_tick == 0U ||
+        ticks > std::numeric_limits<std::uint32_t>::max() / nanoseconds_per_tick)
+    {
+        return Result<std::uint32_t>::failure(
+            parameter_error(CameraErrorKind::parameter_read_failed, MV_E_PARAMETER, operation,
+                            "GevSCPD", "delay-conversion-overflow"));
+    }
+    return Result<std::uint32_t>::success(ticks * nanoseconds_per_tick);
+}
+
+Result<std::uint32_t> delay_nanoseconds_to_ticks(const std::uint32_t nanoseconds,
+                                                 const std::uint32_t nanoseconds_per_tick,
+                                                 const CameraErrorKind error_kind,
+                                                 const std::string_view operation)
+{
+    if (nanoseconds_per_tick == 0U || nanoseconds % nanoseconds_per_tick != 0U)
+    {
+        return Result<std::uint32_t>::failure(parameter_error(
+            error_kind, MV_E_PARAMETER, operation, "GevSCPD", "nanoseconds-not-aligned-to-tick"));
+    }
+    return Result<std::uint32_t>::success(nanoseconds / nanoseconds_per_tick);
+}
+
+Result<SteppedRange<std::uint32_t>> delay_range_in_nanoseconds(
+    const MVCC_INTVALUE_EX& value, const std::uint32_t nanoseconds_per_tick)
+{
+    const auto minimum =
+        delay_ticks_to_nanoseconds(static_cast<std::uint32_t>(value.nMin), nanoseconds_per_tick,
+                                   "camera.hikrobot.capabilities");
+    const auto maximum =
+        delay_ticks_to_nanoseconds(static_cast<std::uint32_t>(value.nMax), nanoseconds_per_tick,
+                                   "camera.hikrobot.capabilities");
+    const auto increment =
+        delay_ticks_to_nanoseconds(static_cast<std::uint32_t>(value.nInc), nanoseconds_per_tick,
+                                   "camera.hikrobot.capabilities");
+    if (!minimum || !maximum || !increment)
+    {
+        return Result<SteppedRange<std::uint32_t>>::failure(
+            !minimum ? minimum.error() : (!maximum ? maximum.error() : increment.error()));
+    }
+    return Result<SteppedRange<std::uint32_t>>::success(
+        {minimum.value(), maximum.value(), increment.value()});
+}
+
 SteppedRange<std::uint32_t> roi_range_with_boundary(const MVCC_INTVALUE_EX& value,
                                                     const std::uint32_t boundary_maximum)
 {
@@ -650,8 +700,12 @@ std::optional<std::string> line_name(const unsigned int value)
     return "Line" + std::to_string(value);
 }
 
-Result<CameraCapabilities> read_capabilities_locked(const MvsApi& api, void* handle)
+Result<CameraCapabilities> read_capabilities_locked(
+    const MvsApi& api, void* handle, std::optional<std::uint32_t>& delay_nanoseconds_per_tick,
+    std::optional<std::uint64_t>& timestamp_frequency_hz)
 {
+    delay_nanoseconds_per_tick.reset();
+    timestamp_frequency_hz.reset();
     CameraCapabilities result;
     const auto exposure = optional_float(api, handle, "ExposureTime");
     const auto gain = optional_float(api, handle, "Gain");
@@ -775,7 +829,32 @@ Result<CameraCapabilities> read_capabilities_locked(const MvsApi& api, void* han
     if (packet.value())
         result.packet_size_bytes = integer_range(*packet.value());
     if (delay.value())
-        result.inter_packet_delay_ns = integer_range(*delay.value());
+    {
+        const auto frequency = optional_integer_current(api, handle, "GevTimestampTickFrequency");
+        if (!frequency)
+            return Result<CameraCapabilities>::failure(frequency.error());
+        if (!frequency.value())
+            return Result<CameraCapabilities>::failure(
+                parameter_error(CameraErrorKind::parameter_read_failed, MV_E_SUPPORT,
+                                "camera.hikrobot.capabilities", "GevTimestampTickFrequency",
+                                "timestamp-frequency-unavailable"));
+        const std::uint64_t frequency_value = *frequency.value();
+        if (frequency_value == 0U || frequency_value > nanoseconds_per_second ||
+            nanoseconds_per_second % frequency_value != 0U)
+        {
+            return Result<CameraCapabilities>::failure(
+                parameter_error(CameraErrorKind::parameter_read_failed, MV_E_PARAMETER,
+                                "camera.hikrobot.capabilities", "GevTimestampTickFrequency",
+                                "timestamp-frequency-not-integral-nanoseconds"));
+        }
+        const auto scale = static_cast<std::uint32_t>(nanoseconds_per_second / frequency_value);
+        auto converted_range = delay_range_in_nanoseconds(*delay.value(), scale);
+        if (!converted_range)
+            return Result<CameraCapabilities>::failure(converted_range.error());
+        result.inter_packet_delay_ns = converted_range.value();
+        delay_nanoseconds_per_tick = scale;
+        timestamp_frequency_hz = frequency_value;
+    }
     if (payload.value())
         result.maximum_payload_bytes = static_cast<std::size_t>(payload.value()->nCurValue);
 
@@ -864,9 +943,10 @@ template <typename T> Result<T> required_node(const int code, T value, const std
     return Result<T>::success(std::move(value));
 }
 
-Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* handle,
-                                                       const CameraCapabilities& capabilities,
-                                                       const bool alarm_events_enabled = false)
+Result<CameraParameterSnapshot> read_parameters_locked(
+    const MvsApi& api, void* handle, const CameraCapabilities& capabilities,
+    const std::optional<std::uint32_t> delay_nanoseconds_per_tick,
+    const bool alarm_events_enabled = false)
 {
     CameraParameterSnapshot result;
     auto read_float = [&](const char* node) -> Result<double> {
@@ -998,7 +1078,16 @@ Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* 
         auto value = read_int("GevSCPD");
         if (!value)
             return Result<CameraParameterSnapshot>::failure(value.error());
-        result.inter_packet_delay_ns = value.value();
+        if (!delay_nanoseconds_per_tick)
+            return Result<CameraParameterSnapshot>::failure(
+                parameter_error(CameraErrorKind::parameter_read_failed, MV_E_PARAMETER,
+                                "camera.hikrobot.readParameters", "GevTimestampTickFrequency",
+                                "timestamp-frequency-unavailable"));
+        auto converted = delay_ticks_to_nanoseconds(value.value(), *delay_nanoseconds_per_tick,
+                                                    "camera.hikrobot.readParameters");
+        if (!converted)
+            return Result<CameraParameterSnapshot>::failure(converted.error());
+        result.inter_packet_delay_ns = converted.value();
     }
     for (const auto& line : capabilities.digital_io)
     {
@@ -1063,6 +1152,7 @@ Result<CameraParameterSnapshot> read_parameters_locked(const MvsApi& api, void* 
 Result<void> write_parameters_locked(const MvsApi& api, void* handle,
                                      const CameraParameterSnapshot& parameters,
                                      const CameraCapabilities& capabilities,
+                                     const std::optional<std::uint32_t> delay_nanoseconds_per_tick,
                                      const CameraErrorKind error_kind,
                                      const std::optional<bool> frame_rate_enable,
                                      LineEventCallbackBoundary* line_callback,
@@ -1112,8 +1202,8 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
             return r;
     if (parameters.exposure_us)
     {
-        if (auto r = check(api.set_enum_value_by_string(handle, "ExposureAuto", "Off"),
-                           "ExposureAuto");
+        if (auto r =
+                check(api.set_enum_value_by_string(handle, "ExposureAuto", "Off"), "ExposureAuto");
             !r)
             return r;
         if (auto r = check(api.set_float_value(handle, "ExposureTime",
@@ -1159,10 +1249,19 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
             !r)
             return r;
     if (parameters.inter_packet_delay_ns)
-        if (auto r = check(api.set_int_value(handle, "GevSCPD", *parameters.inter_packet_delay_ns),
-                           "GevSCPD");
-            !r)
+    {
+        if (!delay_nanoseconds_per_tick)
+            return Result<void>::failure(
+                parameter_error(error_kind, MV_E_PARAMETER, "camera.hikrobot.applyParameters",
+                                "GevTimestampTickFrequency", "timestamp-frequency-unavailable"));
+        auto ticks = delay_nanoseconds_to_ticks(*parameters.inter_packet_delay_ns,
+                                                *delay_nanoseconds_per_tick, error_kind,
+                                                "camera.hikrobot.applyParameters");
+        if (!ticks)
+            return Result<void>::failure(ticks.error());
+        if (auto r = check(api.set_int_value(handle, "GevSCPD", ticks.value()), "GevSCPD"); !r)
             return r;
+    }
     if (parameters.trigger_mode)
     {
         if (*parameters.trigger_mode == TriggerMode::continuous)
@@ -1369,7 +1468,16 @@ struct DeviceHandle::State final
         if (parameter_faulted)
             return Result<CameraCapabilities>::failure(
                 faulted_error("camera.hikrobot.capabilities"));
-        return read_capabilities_locked(api, handle);
+        std::optional<std::uint32_t> delay_nanoseconds_per_tick;
+        std::optional<std::uint64_t> frequency;
+        auto capabilities =
+            read_capabilities_locked(api, handle, delay_nanoseconds_per_tick, frequency);
+        if (capabilities && frequency)
+        {
+            timestamp_frequency_hz = *frequency;
+            timestamp_frequency_checked = true;
+        }
+        return capabilities;
     }
 
     Result<CameraParameterSnapshot> parameters_locked()
@@ -1377,10 +1485,19 @@ struct DeviceHandle::State final
         if (parameter_faulted)
             return Result<CameraParameterSnapshot>::failure(
                 faulted_error("camera.hikrobot.readParameters"));
-        auto capabilities = read_capabilities_locked(api, handle);
+        std::optional<std::uint32_t> delay_nanoseconds_per_tick;
+        std::optional<std::uint64_t> frequency;
+        auto capabilities =
+            read_capabilities_locked(api, handle, delay_nanoseconds_per_tick, frequency);
         if (!capabilities)
             return Result<CameraParameterSnapshot>::failure(capabilities.error());
-        return read_parameters_locked(api, handle, capabilities.value(), alarm_events_enabled);
+        if (frequency)
+        {
+            timestamp_frequency_hz = *frequency;
+            timestamp_frequency_checked = true;
+        }
+        return read_parameters_locked(api, handle, capabilities.value(), delay_nanoseconds_per_tick,
+                                      alarm_events_enabled);
     }
 
     Result<CameraParameterSnapshot> apply_locked(const CameraParameterSnapshot& parameters)
@@ -1388,12 +1505,21 @@ struct DeviceHandle::State final
         if (parameter_faulted)
             return Result<CameraParameterSnapshot>::failure(
                 faulted_error("camera.hikrobot.applyParameters"));
-        auto capabilities = read_capabilities_locked(api, handle);
+        std::optional<std::uint32_t> delay_nanoseconds_per_tick;
+        std::optional<std::uint64_t> frequency;
+        auto capabilities =
+            read_capabilities_locked(api, handle, delay_nanoseconds_per_tick, frequency);
         if (!capabilities)
             return Result<CameraParameterSnapshot>::failure(capabilities.error());
+        if (frequency)
+        {
+            timestamp_frequency_hz = *frequency;
+            timestamp_frequency_checked = true;
+        }
         if (auto validation = validate_parameters(capabilities.value(), parameters); !validation)
             return Result<CameraParameterSnapshot>::failure(validation.error());
-        auto old = read_parameters_locked(api, handle, capabilities.value(), alarm_events_enabled);
+        auto old = read_parameters_locked(api, handle, capabilities.value(),
+                                          delay_nanoseconds_per_tick, alarm_events_enabled);
         if (!old)
             return Result<CameraParameterSnapshot>::failure(old.error());
         std::optional<bool> old_frame_rate_enable;
@@ -1420,12 +1546,14 @@ struct DeviceHandle::State final
 
         auto restore_or_fault = [&](Error original) -> Result<CameraParameterSnapshot> {
             auto restored = write_parameters_locked(
-                api, handle, old.value(), capabilities.value(), CameraErrorKind::parameter_faulted,
-                old_frame_rate_enable, &line_callback, alarm_events_enabled);
+                api, handle, old.value(), capabilities.value(), delay_nanoseconds_per_tick,
+                CameraErrorKind::parameter_faulted, old_frame_rate_enable, &line_callback,
+                alarm_events_enabled);
             if (restored)
             {
                 auto confirmed =
-                    read_parameters_locked(api, handle, capabilities.value(), alarm_events_enabled);
+                    read_parameters_locked(api, handle, capabilities.value(),
+                                           delay_nanoseconds_per_tick, alarm_events_enabled);
                 if (!confirmed || confirmed.value() != old.value())
                     restored =
                         Result<void>::failure(faulted_error("camera.hikrobot.rollbackParameters"));
@@ -1467,12 +1595,13 @@ struct DeviceHandle::State final
         };
 
         auto written = write_parameters_locked(
-            api, handle, parameters, capabilities.value(), CameraErrorKind::parameter_write_failed,
-            requested_frame_rate_enable, &line_callback, alarm_events_enabled);
+            api, handle, parameters, capabilities.value(), delay_nanoseconds_per_tick,
+            CameraErrorKind::parameter_write_failed, requested_frame_rate_enable, &line_callback,
+            alarm_events_enabled);
         if (!written)
             return restore_or_fault(written.error());
-        auto actual =
-            read_parameters_locked(api, handle, capabilities.value(), alarm_events_enabled);
+        auto actual = read_parameters_locked(api, handle, capabilities.value(),
+                                             delay_nanoseconds_per_tick, alarm_events_enabled);
         if (!actual)
             return restore_or_fault(actual.error());
         if (parameters.frame_rate && requested_frame_rate_enable)

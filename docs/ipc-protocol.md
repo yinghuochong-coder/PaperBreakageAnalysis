@@ -353,6 +353,12 @@ MVS 参数节点；因此状态查询不会与取帧争用设备互斥。配置 
 }
 ```
 
+`interPacketDelayNs` 始终表示真实纳秒，不是 Hikrobot `GevSCPD` 寄存器的原生 tick。
+Hikrobot 适配器根据设备 `GevTimestampTickFrequency` 转换能力范围、写入值和回读值；例如
+125 MHz 设备的 1 tick 为 8 ns，因此请求 `400` ns 时写入 `GevSCPD=50`，原生
+`GevSCPD=400` 则回读为 `3200` ns。无法取得有效频率或无法精确换算时，参数能力/操作失败，
+不得把原生 tick 原样返回为纳秒。
+
 `parameters` 只允许上述字段，并由配置 schema 与设备能力共同校验。Line 0 固定为输入；Line 1
 固定为 Strobe 且源为 `ExposureStartActive`，客户端不能覆盖线路模式或源。服务先解析完整候选配置；设备
 已连接时，还必须在保存前按该设备能力校验候选完整参数，校验失败不得提高配置修订号。通过后再由

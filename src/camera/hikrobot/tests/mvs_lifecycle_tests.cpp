@@ -404,7 +404,8 @@ void configure_parameter_nodes(FakeContext& state)
                       {"OffsetX", {0, 0, 1536, 4}},
                       {"OffsetY", {0, 0, 1136, 2}},
                       {"GevSCPSPacketSize", {1500, 576, 9000, 4}},
-                      {"GevSCPD", {0, 0, 10000, 1}},
+                      {"GevSCPD", {400, 0, 10000, 1}},
+                      {"GevTimestampTickFrequency", {125000000, 1, 1000000000, 1}},
                       {"PayloadSize", {1920000, 1, 10000000, 1}}};
     state.enumerations = {
         {"PixelFormat", {PixelType_Gvsp_Mono8, {PixelType_Gvsp_Mono8, PixelType_Gvsp_Mono12}}},
@@ -541,6 +542,9 @@ TEST_F(MvsLifecycleTest, MapsParameterCapabilitiesAndReadsCompleteSnapshot)
                                         TriggerMode::hardware}));
     EXPECT_EQ(capabilities.value().trigger_sources, std::vector<std::string>{"Line0"});
     EXPECT_EQ(capabilities.value().maximum_payload_bytes, 1920000U);
+    ASSERT_TRUE(capabilities.value().inter_packet_delay_ns);
+    EXPECT_EQ(*capabilities.value().inter_packet_delay_ns,
+              (SteppedRange<std::uint32_t>{0U, 80000U, 8U}));
 
     const auto snapshot = handle.read_parameters();
     ASSERT_TRUE(snapshot);
@@ -551,6 +555,127 @@ TEST_F(MvsLifecycleTest, MapsParameterCapabilitiesAndReadsCompleteSnapshot)
     EXPECT_EQ(snapshot.value().pixel_format, PixelFormat::mono8);
     EXPECT_EQ(snapshot.value().trigger_mode, TriggerMode::continuous);
     EXPECT_EQ(snapshot.value().packet_size_bytes, 1500U);
+    EXPECT_EQ(snapshot.value().inter_packet_delay_ns, 3200U);
+}
+
+TEST_F(MvsLifecycleTest, ConvertsPacketDelayNanosecondsToDeviceTicksAndReadsBack)
+{
+    configure_parameter_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+
+    const auto applied = handle.apply_parameters({.inter_packet_delay_ns = 400U});
+
+    ASSERT_TRUE(applied) << applied.error().message;
+    EXPECT_EQ(context_.integers.at("GevSCPD").current, 50);
+    EXPECT_EQ(applied.value().inter_packet_delay_ns, 400U);
+}
+
+TEST_F(MvsLifecycleTest, RejectsPacketDelayNotAlignedToDeviceTickBeforeWrite)
+{
+    configure_parameter_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.calls.clear();
+
+    const auto applied = handle.apply_parameters({.inter_packet_delay_ns = 50U});
+
+    ASSERT_FALSE(applied);
+    EXPECT_EQ(applied.error().business_code, "CAMERA_CONFIG_FAILED");
+    EXPECT_EQ(std::count(context_.calls.begin(), context_.calls.end(), "seti:GevSCPD"), 0);
+    EXPECT_EQ(context_.integers.at("GevSCPD").current, 400);
+}
+
+TEST_F(MvsLifecycleTest, OneGigahertzPacketDelayFrequencyKeepsNanosecondsOneToOne)
+{
+    configure_parameter_nodes(context_);
+    context_.integers.at("GevTimestampTickFrequency").current = 1000000000;
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+
+    const auto snapshot = handle.read_parameters();
+    ASSERT_TRUE(snapshot);
+    EXPECT_EQ(snapshot.value().inter_packet_delay_ns, 400U);
+    const auto applied = handle.apply_parameters({.inter_packet_delay_ns = 400U});
+    ASSERT_TRUE(applied);
+    EXPECT_EQ(context_.integers.at("GevSCPD").current, 400);
+}
+
+TEST_F(MvsLifecycleTest, PacketDelayRequiresTimestampFrequency)
+{
+    configure_parameter_nodes(context_);
+    context_.integers.erase("GevTimestampTickFrequency");
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+
+    const auto capabilities = handle.capabilities();
+
+    ASSERT_FALSE(capabilities);
+    EXPECT_EQ(capabilities.error().business_code, "CAMERA_PARAMETER_READ_FAILED");
+    ASSERT_FALSE(capabilities.error().details.empty());
+    EXPECT_EQ(capabilities.error().details.back().value, "timestamp-frequency-unavailable");
+}
+
+TEST_F(MvsLifecycleTest, PacketDelayRejectsInvalidTimestampFrequencies)
+{
+    for (const std::int64_t frequency : {0LL, 3LL, 2000000000LL})
+    {
+        configure_parameter_nodes(context_);
+        context_.integers.at("GevTimestampTickFrequency").current = frequency;
+        auto opened = DeviceHandle::open(fake_api, context_.device_info);
+        ASSERT_TRUE(opened);
+        auto handle = std::move(opened).value();
+
+        const auto capabilities = handle.capabilities();
+
+        ASSERT_FALSE(capabilities);
+        EXPECT_EQ(capabilities.error().business_code, "CAMERA_PARAMETER_READ_FAILED");
+        ASSERT_FALSE(capabilities.error().details.empty());
+        EXPECT_EQ(capabilities.error().details.back().value,
+                  "timestamp-frequency-not-integral-nanoseconds");
+        ASSERT_TRUE(handle.close());
+    }
+}
+
+TEST_F(MvsLifecycleTest, PacketDelayRejectsNanosecondRangeOverflow)
+{
+    configure_parameter_nodes(context_);
+    context_.integers.at("GevSCPD").maximum = std::numeric_limits<std::uint32_t>::max();
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+
+    const auto capabilities = handle.capabilities();
+
+    ASSERT_FALSE(capabilities);
+    EXPECT_EQ(capabilities.error().business_code, "CAMERA_PARAMETER_READ_FAILED");
+    ASSERT_FALSE(capabilities.error().details.empty());
+    EXPECT_EQ(capabilities.error().details.back().value, "delay-conversion-overflow");
+}
+
+TEST_F(MvsLifecycleTest, PacketDelayRollbackConvertsNanosecondsBackToOriginalTicks)
+{
+    configure_parameter_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.fail_set_node = "TriggerSource";
+    context_.fail_set_code = MV_E_PARAMETER_RANGE;
+    context_.fail_set_remaining = 1U;
+
+    const auto applied = handle.apply_parameters(
+        {.trigger_mode = TriggerMode::software, .inter_packet_delay_ns = 400U});
+
+    ASSERT_FALSE(applied);
+    EXPECT_EQ(applied.error().business_code, "CAMERA_PARAMETER_WRITE_FAILED");
+    EXPECT_EQ(context_.integers.at("GevSCPD").current, 400);
+    const auto restored = handle.read_parameters();
+    ASSERT_TRUE(restored);
+    EXPECT_EQ(restored.value().inter_packet_delay_ns, 3200U);
 }
 
 TEST_F(MvsLifecycleTest, ExpandsDynamicVerticalOffsetRangeForSmallerRequestedHeight)
@@ -1063,9 +1188,8 @@ TEST_F(MvsLifecycleTest, StreamAndHandleDestructorsReleaseInReverseOrder)
     }
 
     EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open",
-                                        "setes:ExposureAuto=Continuous", "start", "stop", "close",
-                                        "destroy"}));
+              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Continuous", "start",
+                                        "stop", "close", "destroy"}));
 }
 
 TEST_F(MvsLifecycleTest, ExplicitStopIsIdempotent)
@@ -1083,9 +1207,8 @@ TEST_F(MvsLifecycleTest, ExplicitStopIsIdempotent)
     EXPECT_TRUE(handle.close());
 
     EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open",
-                                        "setes:ExposureAuto=Continuous", "start", "stop", "close",
-                                        "destroy"}));
+              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Continuous", "start",
+                                        "stop", "close", "destroy"}));
 }
 
 TEST_F(MvsLifecycleTest, StartEnablesContinuousAutoExposureBeforeGrabbing)
@@ -1153,9 +1276,8 @@ TEST_F(MvsLifecycleTest, CleanupContinuesAfterStopFailure)
     }
 
     EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open",
-                                        "setes:ExposureAuto=Continuous", "start", "stop", "stop",
-                                        "stop", "close", "destroy"}));
+              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Continuous", "start",
+                                        "stop", "stop", "stop", "close", "destroy"}));
 }
 
 TEST_F(MvsLifecycleTest, CapturesIntoPreallocatedBufferAndMapsFrameMetadata)

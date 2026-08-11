@@ -40,15 +40,15 @@
         "strobePreDelayUs": 5
       },
       "location": "安装工位",
-      "packetSizeBytes": 1500,
+      "packetSizeBytes": 8164,
       "pixelFormat": "Mono8",
       "reverseX": false,
       "reverseY": false,
       "roi": {
-        "height": 600,
-        "offsetX": 500,
-        "offsetY": 208,
-        "width": 800
+        "height": 1240,
+        "offsetX": 0,
+        "offsetY": 0,
+        "width": 1624
       },
       "serialNumber": "DB1888674",
       "triggerDelayUs": 0,
@@ -87,7 +87,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 57,
+  "configRevision": 60,
   "configSchemaVersion": 3,
   "event": {
     "generatePreviewVideo": true,
@@ -115,7 +115,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-11T01:27:47.470Z",
+  "modifiedAt": "2026-08-11T02:19:10.643Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

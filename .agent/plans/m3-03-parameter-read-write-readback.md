@@ -2,10 +2,10 @@
 
 ## 元数据
 
-- 状态：completed
+- 状态：completed（2026-08-11 单位语义纠正）
 - 负责人：Codex
 - 创建日期：2026-08-01
-- 最后更新：2026-08-01
+- 最后更新：2026-08-11
 - 路线图条目：`docs/roadmap/development-roadmap.md` M3-03
 - 关联需求：需求 4.4、8、11、16；架构 5.2～5.4、6.1、13、15、16.3
 
@@ -21,6 +21,7 @@
 - Hikrobot GenICam 节点能力映射、参数读取、确定性写入顺序和回读；
 - 取流中参数事务的暂停/恢复、失败回滚和不可恢复故障锁定；
 - 伪 MVS API 自动化测试、默认 Mock 回归及真实 SDK 的编译/link 验证。
+- 纠正 `inter_packet_delay_ns` 与 `GevSCPD` 的单位边界：公共字段使用真实纳秒，Hikrobot 私有适配器使用设备 timestamp tick。
 
 ### 范围外
 
@@ -40,7 +41,7 @@
 
 - 使用 SFNC/MVS 节点名：`ExposureTime`、`Gain`、`AcquisitionFrameRate`、`Width/Height/OffsetX/OffsetY`、`PixelFormat`、`TriggerMode/TriggerSource/TriggerDelay`、`GevSCPSPacketSize/GevSCPD`、`LineSelector/LineMode/LineStatus/UserOutputSelector/UserOutputValue`；节点不支持时能力中省略，不虚构支持；
 - MVS 浮点能力只给最小/最大值，无离散步长，公共模型以 `increment == 0` 表示连续浮点范围；整数范围仍要求正步长；
-- 数字 IO 仅暴露能由节点集合完整证明方向和读写方式的行，未知枚举不映射；传输延迟保存为 GenICam `GevSCPD` 原生 tick 值，公共字段名沿用现有 `inter_packet_delay_ns`，真实单位需目标相机核对，因此不声明真机纳秒精度；
+- 数字 IO 仅暴露能由节点集合完整证明方向和读写方式的行，未知枚举不映射；`inter_packet_delay_ns` 始终表示真实纳秒，Hikrobot 适配器依据 `GevTimestampTickFrequency` 与 GenICam `GevSCPD` 原生 tick 双向换算；
 - 没有实体相机时只证明节点映射与事务语义，不声明真实上下限、支持枚举或实际回读值。
 
 ## 设计说明
@@ -50,6 +51,7 @@
 - 参数应用前由公共入口查询能力并校验；适配器保存完整旧快照，若句柄正在取流则先停流，按会影响依赖的安全顺序写入，完整回读后恢复取流并返回实际快照。
 - 写入、回读或恢复取流失败时，先用旧快照执行恢复并回读确认，再恢复原取流状态；恢复成功返回原始稳定业务错误，恢复失败则将设备参数状态锁定为 faulted，后续参数操作返回 `CAMERA_PARAMETER_FAULTED`，断开重连清除该会话故障。
 - 像素格式和触发枚举使用显式白名单；未知厂商枚举不向公共层泄露。数字 IO 选择器修改后恢复原选择器。
+- `GevSCPD` 仅在可取得正数 `GevTimestampTickFrequency`、且单 tick 可精确表示为整数纳秒时向公共层暴露；能力范围、当前值和写入值均执行检查溢出的精确换算，失败时返回稳定参数错误而不退回原生 tick。
 
 ### 线程和队列
 
@@ -57,7 +59,7 @@
 
 ### 持久化与恢复
 
-不修改配置文件、数据库或用户参数集。事务内旧快照只驻留内存；成功后返回回读值，由上层后续里程碑决定是否持久化。故障锁仅属于当前连接会话，断开销毁句柄后清除。
+不修改配置 schema、数据库或用户参数集格式。现有 `interPacketDelayNs` 值按既有字段契约解释为纳秒，不做全局乘 8 迁移；仅将 CAM01 为绕过旧缺陷临时写入的 `50` 恢复为 `400`。事务内旧快照只驻留内存；成功后返回回读值。故障锁仅属于当前连接会话，断开销毁句柄后清除。
 
 ### 错误和降级
 
@@ -76,6 +78,8 @@
 - [x] 5. 用伪 SDK 覆盖能力映射、读写顺序、回读量化、暂停恢复、写失败回滚、恢复失败锁定及错误翻译。
 - [x] 6. 运行 OFF/ON Debug/Release、CTest、格式、静态分析、SDK 边界、路径泄漏及必要负向检查。
 - [x] 7. 更新路线图、计划进度/决策/发现/证据和完成摘要，确认未开始 M3-04。
+- [x] 8. 纠正 `GevSCPD` tick 与真实纳秒的能力、读、写和回滚换算，覆盖 125 MHz、1 GHz、非法频率、步长与溢出测试。
+- [x] 9. 恢复 CAM01 的 400 ns 配置，更新 IPC/路线图说明并重新执行 Debug/Release、CTest、格式和静态分析门禁。
 
 ## 验证计划
 
@@ -129,17 +133,21 @@ ctest --preset local-windows-vs2026-debug
 - 2026-08-01：完成需求、架构、路线图、计划规范、M3-01/M3-02 计划、公共相机/Mock/Hikrobot/CMake/测试基线检查；创建计划，状态 in-progress。
 - 2026-08-01：完成公共连续浮点范围和参数错误语义、MVS 节点能力/读写映射、事务暂停回读恢复、失败回滚/faulted 锁定及 7 项参数专用伪 SDK 测试。
 - 2026-08-01：完成 OFF/ON Debug/Release、非硬件 CTest、ON/OFF 静态分析、格式、SDK 边界、路径泄漏、缺 SDK 负向配置和 diff 检查；路线图与错误码文档已更新，状态 completed。
+- 2026-08-11：确认 UI/配置的 `400 ns` 被旧实现原样写成 `GevSCPD=400`；开始按真实纳秒契约纠正，工作区原有 `config/default-config.json` 包大小、ROI、修订和时间戳修改均保留。
+- 2026-08-11：完成动态频率换算、能力/步长/溢出校验、读写回滚测试、CAM01 配置恢复和协议/路线图更新；Debug/Release 构建及最终非硬件 CTest 通过，状态 completed。
 
 ## 决策记录
 
 - DEC-001：浮点 `increment == 0` 表示 SDK 报告的连续范围，整数范围仍禁止零步长，避免伪造 MVS 未提供的曝光/增益步长。
 - DEC-002：事务和 faulted 锁位于 Hikrobot 每设备连接会话；公共层负责服务校验，适配器负责唯一能安全观察的 SDK 取流状态与原子恢复。
 - DEC-003：不为完成参数暂停而提前实现 M3-04 取帧；仅复用已有句柄 `streaming` 状态并用伪 API 验证事务边界。
+- DEC-004：不硬编码目标型号的 8 ns/tick；适配器读取 `GevTimestampTickFrequency`。无法精确映射到整数纳秒时拒绝暴露/写入该能力，避免再次伪造单位。
+- DEC-005：`interPacketDelayNs` 的字段名、类型和 schema 不变；这是实现纠错而非协议迁移。当前 CAM01 临时值 `50` 恢复为 `400`，其他持久化值不做自动换算。
 
 ## 意外发现
 
 - MVS `MVCC_FLOATVALUE` 只有当前值、最小值、最大值，没有步长字段；现有公共模型必须明确连续范围语义。
-- 公共字段 `inter_packet_delay_ns` 与 MVS `GevSCPD` 的原生 tick 单位不能在无目标相机时等同；本任务保留字段兼容性但明确真机单位未验证。
+- 公共字段 `inter_packet_delay_ns` 与 MVS `GevSCPD` 的原生 tick 单位不能等同；旧实现虽在计划中记录该限制，仍把原生 tick 直接暴露为 ns，构成单位错误，必须在适配器边界纠正。
 - 初次执行 `format-check` 时 `clang-format` 不在 PATH；定位到 Visual Studio 自带 x64 工具并显式加入 PATH 后检查通过，属于本机工具发现问题而非代码失败。
 
 ## 验证证据
@@ -154,7 +162,15 @@ ctest --preset local-windows-vs2026-debug
 | 2026-08-01 | ON/OFF `local-windows-vs2026-static-analysis` configure/build | 通过 | MSVC `/analyze`，生产目标无构建失败 |
 | 2026-08-01 | `format-check`、`hikrobot_sdk_boundary`、安装路径泄漏、`git diff --check` | 通过 | MVS 符号仍只在 Hikrobot 适配器；ON 安装树无注入路径文本 |
 | 2026-08-01 | 缺失 Development/Runtime 路径配置 | 预期失败 | 退出码 1，明确报告 `PAPERBREAK_MVS_ROOT` 目录不存在 |
+| 2026-08-11 | `PaperBreakHikrobotTests` Debug 定向运行 | 通过 | 49/49；新增 7 项覆盖 125 MHz 的 8 ns/tick、400 ns→50 tick、400 tick→3200 ns、非对齐拒绝、1 GHz、频率缺失/非法、溢出和回滚 |
+| 2026-08-11 | Debug/Release configure、build、非硬件 CTest | 通过 | 两套最终均为 30/30；Release 首轮 `unit` 聚合入口波动失败，隔离重跑及随后全量重跑通过 |
+| 2026-08-11 | `PaperBreakEdgeService --validate-config --config config/default-config.json` | 通过 | schema v3、revision 60；CAM01/CAM02 均为 400 ns |
+| 2026-08-11 | 任务 C++ 文件 clang-format、`git diff --check` | 通过 | 全仓 `format-check` 继续被未修改的 `src/console/main.cpp` 既有格式问题阻断 |
+| 2026-08-11 | `paperbreak_camera_hikrobot` 静态分析目标 | 通过 | 全仓静态分析继续被未修改的 `src/storage/src/nvme_cache.cpp` C28020 阻断 |
+| 2026-08-11 | 实体 MV-CS020-60GM 的频率、寄存器和帧率验证 | 未执行 | 未操作实体相机，不能声明真机 `GevTimestampTickFrequency`、`GevSCPD` 回读或 60.3 fps 已通过 |
 
 ## 完成摘要
 
 新增参数专用稳定业务错误和连续浮点能力语义；扩展 Hikrobot 私有 MVS API 表，映射全部 M3-03 参数能力、当前快照和写入路径。每设备互斥事务先校验并保存旧快照，必要时暂停取流，确定性写入、完整回读、恢复取流并返回实际值；失败时恢复并确认旧快照，无法恢复则锁定当前连接会话为 `CAMERA_PARAMETER_FAULTED`。新增伪 SDK 覆盖实际回读、暂停恢复、回滚/faulted、数字输出和错误翻译；OFF/ON Debug/Release、非硬件 CTest、静态分析及边界检查均通过。未访问实体相机，真实能力、上下限、传输延迟单位、写后量化和数字 IO 电平仍未验证；未开始 M3-04。
+
+2026-08-11 纠正：`inter_packet_delay_ns`/`interPacketDelayNs` 现严格表示真实纳秒。适配器读取 `GevTimestampTickFrequency`，精确换算 `GevSCPD` 能力、当前值、写入值和回滚值；125 MHz 下 400 ns 写为 50 tick，原生 400 tick 回读为 3200 ns。缺失/非法频率、非设备步长或溢出均稳定拒绝，不再退回原始 tick。CAM01 临时 50 已恢复为 400，其他用户配置修改保留。自动化和构建门禁结果见上表；实体相机未执行。
