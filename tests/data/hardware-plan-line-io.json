@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "targetModel": "MV-CS020-60GM",
+  "bindings": [
+    { "cameraId": "CAM01", "serialNumber": "TEST-SERIAL" }
+  ],
+  "parameters": {
+    "triggerMode": "continuous",
+    "lineIo": {
+      "alarmInputEnabled": true,
+      "strobeOutputEnabled": true,
+      "strobeDurationUs": 23,
+      "strobePreDelayUs": 5,
+      "strobePostDelayUs": 0
+    }
+  },
+  "capture": {
+    "durationSeconds": 1,
+    "sampleIntervalMs": 100,
+    "receiveTimeoutMs": 1000,
+    "queueCapacity": 4,
+    "framePoolCapacity": 4,
+    "frameBufferBytes": 1048576,
+    "consumerDelayMs": 0,
+    "minimumFpsRatio": 0.5
+  }
+}

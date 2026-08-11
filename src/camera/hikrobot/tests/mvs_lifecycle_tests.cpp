@@ -846,12 +846,10 @@ TEST_F(MvsLifecycleTest, MapsLineZeroEventsAndLineOneStrobeRangesAndReadback)
     EXPECT_EQ(applied.value().line_io->strobe_duration_us, 250U);
     EXPECT_EQ(applied.value().line_io->strobe_pre_delay_us, 10U);
     EXPECT_EQ(applied.value().line_io->strobe_post_delay_us, 20U);
-    EXPECT_NE(
-        std::find(context_.calls.begin(), context_.calls.end(), "register:EventLine0RisingEdge"),
-        context_.calls.end());
-    EXPECT_NE(
-        std::find(context_.calls.begin(), context_.calls.end(), "event-on:EventLine0FallingEdge"),
-        context_.calls.end());
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "register:Line0RisingEdge"),
+              context_.calls.end());
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "event-on:Line0FallingEdge"),
+              context_.calls.end());
     EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(),
                         "setes:LineSource=ExposureStartActive"),
               context_.calls.end());
@@ -872,16 +870,37 @@ TEST_F(MvsLifecycleTest, MapsLineZeroEventsAndLineOneStrobeRangesAndReadback)
               0);
 
     MV_EVENT_OUT_INFO rising{};
-    constexpr char rising_name[] = "EventLine0RisingEdge";
+    constexpr char rising_name[] = "Line0RisingEdge";
     std::memcpy(rising.EventName, rising_name, sizeof(rising_name));
-    const auto rising_callback = context_.event_callbacks.at("EventLine0RisingEdge");
+    const auto rising_callback = context_.event_callbacks.at("Line0RisingEdge");
     EXPECT_NO_THROW(rising_callback.first(&rising, rising_callback.second));
     MV_EVENT_OUT_INFO falling{};
-    constexpr char falling_name[] = "EventLine0FallingEdge";
+    constexpr char falling_name[] = "Line0FallingEdge";
     std::memcpy(falling.EventName, falling_name, sizeof(falling_name));
-    const auto falling_callback = context_.event_callbacks.at("EventLine0FallingEdge");
+    const auto falling_callback = context_.event_callbacks.at("Line0FallingEdge");
     EXPECT_NO_THROW(falling_callback.first(&falling, falling_callback.second));
     EXPECT_EQ(levels, (std::vector<bool>{true, false}));
+}
+
+TEST_F(MvsLifecycleTest, EnablesFixedLineZeroInputWithoutWritingReadOnlyLineMode)
+{
+    configure_parameter_nodes(context_);
+    configure_line_io_nodes(context_);
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    handle.set_line_input_observer([](const LineInputEvent&) {});
+    context_.calls.clear();
+
+    const auto applied =
+        handle.apply_parameters({.line_io = LineIoParameters{.alarm_input_enabled = true}});
+
+    ASSERT_TRUE(applied) << applied.error().message;
+    ASSERT_TRUE(applied.value().line_io);
+    EXPECT_TRUE(applied.value().line_io->alarm_input_enabled);
+    EXPECT_EQ(std::count(context_.calls.begin(), context_.calls.end(), "sete:LineMode"), 0);
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "getb:LineStatus"),
+              context_.calls.end());
 }
 
 TEST_F(MvsLifecycleTest, LineIoFailureRollsBackEventsAndStrobeState)
@@ -908,9 +927,8 @@ TEST_F(MvsLifecycleTest, LineIoFailureRollsBackEventsAndStrobeState)
     EXPECT_FALSE(restored.value().line_io->alarm_input_enabled);
     EXPECT_FALSE(restored.value().line_io->strobe_output_enabled);
     EXPECT_EQ(context_.integers.at("StrobeLineDuration").current, 0);
-    EXPECT_NE(
-        std::find(context_.calls.begin(), context_.calls.end(), "event-off:EventLine0RisingEdge"),
-        context_.calls.end());
+    EXPECT_NE(std::find(context_.calls.begin(), context_.calls.end(), "event-off:Line0RisingEdge"),
+              context_.calls.end());
 }
 
 TEST_F(MvsLifecycleTest, LineEventRegistrationFailureReturnsStableCameraError)
@@ -920,7 +938,7 @@ TEST_F(MvsLifecycleTest, LineEventRegistrationFailureReturnsStableCameraError)
     auto opened = DeviceHandle::open(fake_api, context_.device_info);
     ASSERT_TRUE(opened);
     auto handle = std::move(opened).value();
-    context_.fail_set_node = "EventLine0RisingEdge";
+    context_.fail_set_node = "Line0RisingEdge";
     context_.fail_set_code = MV_E_GC_ACCESS;
     context_.fail_set_remaining = 1U;
 
@@ -953,7 +971,7 @@ TEST_F(MvsLifecycleTest, CloseDisablesLineEventsBeforeStoppingAndClosingDevice)
     ASSERT_TRUE(handle.close());
 
     const auto event_off =
-        std::find(context_.calls.begin(), context_.calls.end(), "event-off:EventLine0FallingEdge");
+        std::find(context_.calls.begin(), context_.calls.end(), "event-off:Line0FallingEdge");
     const auto stop = std::find(context_.calls.begin(), context_.calls.end(), "stop");
     const auto close = std::find(context_.calls.begin(), context_.calls.end(), "close");
     ASSERT_NE(event_off, context_.calls.end());
@@ -1222,10 +1240,10 @@ TEST(MvsCallbackBoundaryTest, LineEventBoundaryParsesEdgesAndContainsExceptions)
     std::vector<bool> levels;
     LineEventCallbackBoundary boundary{[&](const bool level) { levels.push_back(level); }};
     MV_EVENT_OUT_INFO rising{};
-    constexpr char rising_name[] = "EventLine0RisingEdge";
+    constexpr char rising_name[] = "Line0RisingEdge";
     std::memcpy(rising.EventName, rising_name, sizeof(rising_name));
     MV_EVENT_OUT_INFO falling{};
-    constexpr char falling_name[] = "EventLine0FallingEdge";
+    constexpr char falling_name[] = "Line0FallingEdge";
     std::memcpy(falling.EventName, falling_name, sizeof(falling_name));
     EXPECT_NO_THROW(line_event_callback_trampoline(&rising, &boundary));
     EXPECT_NO_THROW(line_event_callback_trampoline(&falling, &boundary));

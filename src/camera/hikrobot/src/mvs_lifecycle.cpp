@@ -1196,8 +1196,10 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
     }
     if (parameters.line_io)
     {
-        constexpr const char* rising_event = "EventLine0RisingEdge";
-        constexpr const char* falling_event = "EventLine0FallingEdge";
+        // MVS 的事件订阅 API 接收 EventSelector 的 symbolic（如 ExposureEnd），
+        // 不是对应 GenICam 节点名的 "Event" + symbolic 形式。
+        constexpr const char* rising_event = "Line0RisingEdge";
+        constexpr const char* falling_event = "Line0FallingEdge";
         const auto event_error = [&](const int code, const char* event, const char* reason) {
             return Result<void>::failure(parameter_error(
                 error_kind, code, "camera.hikrobot.applyParameters", event, reason));
@@ -1226,8 +1228,9 @@ Result<void> write_parameters_locked(const MvsApi& api, void* handle,
                     check(api.set_enum_value(handle, "LineSelector", 0U), "LineSelector");
                 !selected)
                 return selected;
-            if (auto input = check(api.set_enum_value(handle, "LineMode", 0U), "LineMode"); !input)
-                return input;
+            // MV-CS020-60GM 的 Line 0 是固定输入线路。其 LineMode 可读且枚举中包含
+            // Input，但节点访问模式为只读；重复写入当前值仍会返回 MV_E_GC_ACCESS。
+            // 能力探测已确认当前模式和 Input 支持，因此这里只选择线路并读取电平。
             bool initial{};
             const int initial_code = api.get_bool_value(handle, "LineStatus", &initial);
             if (initial_code != MV_OK)
@@ -1528,8 +1531,8 @@ struct DeviceHandle::State final
         }
         if (alarm_events_enabled)
         {
-            const int falling = api.event_notification_off(handle, "EventLine0FallingEdge");
-            const int rising = api.event_notification_off(handle, "EventLine0RisingEdge");
+            const int falling = api.event_notification_off(handle, "Line0FallingEdge");
+            const int rising = api.event_notification_off(handle, "Line0RisingEdge");
             if (falling != MV_OK || rising != MV_OK)
                 return Result<void>::failure(parameter_error(
                     CameraErrorKind::parameter_write_failed, falling != MV_OK ? falling : rising,
@@ -1570,8 +1573,8 @@ struct DeviceHandle::State final
         }
         if (alarm_events_enabled)
         {
-            static_cast<void>(api.event_notification_off(handle, "EventLine0FallingEdge"));
-            static_cast<void>(api.event_notification_off(handle, "EventLine0RisingEdge"));
+            static_cast<void>(api.event_notification_off(handle, "Line0FallingEdge"));
+            static_cast<void>(api.event_notification_off(handle, "Line0RisingEdge"));
             alarm_events_enabled = false;
         }
         if (streaming)
@@ -1937,9 +1940,9 @@ void LineEventCallbackBoundary::invoke(MV_EVENT_OUT_INFO* event_info) noexcept
         const std::string_view name{
             event_info->EventName,
             static_cast<std::size_t>(end - std::begin(event_info->EventName))};
-        if (name == "EventLine0RisingEdge")
+        if (name == "Line0RisingEdge")
             handler_(true);
-        else if (name == "EventLine0FallingEdge")
+        else if (name == "Line0FallingEdge")
             handler_(false);
         else
             throw std::invalid_argument{"unexpected line event"};

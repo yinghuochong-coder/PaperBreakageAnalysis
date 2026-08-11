@@ -39,3 +39,10 @@ add_test(NAME hikrobot_hardware_tool_rejects_unbounded_plan
         -P "${PROJECT_SOURCE_DIR}/cmake/RunAndCheckExit.cmake")
 set_tests_properties(hikrobot_hardware_tool_rejects_unbounded_plan PROPERTIES
     LABELS "unit;hikrobot-sdk")
+
+add_test(NAME hikrobot_hardware_tool_accepts_line_io_plan
+    COMMAND PaperBreakCameraHardwareTest
+        --validate-plan
+        --plan "${PROJECT_SOURCE_DIR}/tests/data/hardware-plan-line-io.json")
+set_tests_properties(hikrobot_hardware_tool_accepts_line_io_plan PROPERTIES
+    LABELS "unit;hikrobot-sdk")

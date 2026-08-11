@@ -34,13 +34,14 @@ using namespace std::chrono_literals;
 using paperbreak::camera::AcquisitionQueue;
 using paperbreak::camera::AcquisitionWorker;
 using paperbreak::camera::AcquisitionWorkerOptions;
+using paperbreak::camera::CameraCapabilities;
 using paperbreak::camera::CameraParameterSnapshot;
 using paperbreak::camera::CameraSlotBinding;
-using paperbreak::camera::CameraCapabilities;
 using paperbreak::camera::FrameBufferPool;
 using paperbreak::camera::FrameDequeueStatus;
 using paperbreak::camera::ICameraDevice;
 using paperbreak::camera::ICameraProvider;
+using paperbreak::camera::LineIoParameters;
 using paperbreak::camera::TriggerMode;
 
 constexpr std::size_t maximum_cameras = 4U;
@@ -160,14 +161,11 @@ paperbreak::Result<Plan> load_plan(const std::filesystem::path& path)
                 !roi.at("offsetY").is_number_unsigned())
                 return invalid("roi 必须包含无符号整数 width、height、offsetX 和 offsetY");
             plan.parameters.roi = paperbreak::camera::Roi{
-                roi.at("width").get<std::uint32_t>(),
-                roi.at("height").get<std::uint32_t>(),
-                roi.at("offsetX").get<std::uint32_t>(),
-                roi.at("offsetY").get<std::uint32_t>()};
+                roi.at("width").get<std::uint32_t>(), roi.at("height").get<std::uint32_t>(),
+                roi.at("offsetX").get<std::uint32_t>(), roi.at("offsetY").get<std::uint32_t>()};
             if (plan.parameters.roi->width == 0U || plan.parameters.roi->width > 16384U ||
                 plan.parameters.roi->height == 0U || plan.parameters.roi->height > 16384U ||
-                plan.parameters.roi->offset_x > 16383U ||
-                plan.parameters.roi->offset_y > 16383U)
+                plan.parameters.roi->offset_x > 16383U || plan.parameters.roi->offset_y > 16383U)
                 return invalid("roi 超出硬件测试工具的安全结构上限");
         }
         if (parameters.contains("triggerMode"))
@@ -179,6 +177,28 @@ paperbreak::Result<Plan> load_plan(const std::filesystem::path& path)
         }
         if (parameters.contains("triggerSource"))
             plan.parameters.trigger_source = parameters.at("triggerSource").get<std::string>();
+        if (parameters.contains("lineIo"))
+        {
+            const auto& line_io = parameters.at("lineIo");
+            if (!line_io.is_object() || line_io.size() != 5U ||
+                !line_io.contains("alarmInputEnabled") ||
+                !line_io.at("alarmInputEnabled").is_boolean() ||
+                !line_io.contains("strobeOutputEnabled") ||
+                !line_io.at("strobeOutputEnabled").is_boolean() ||
+                !line_io.contains("strobeDurationUs") ||
+                !line_io.at("strobeDurationUs").is_number_unsigned() ||
+                !line_io.contains("strobePreDelayUs") ||
+                !line_io.at("strobePreDelayUs").is_number_unsigned() ||
+                !line_io.contains("strobePostDelayUs") ||
+                !line_io.at("strobePostDelayUs").is_number_unsigned())
+                return invalid("lineIo 必须且只能包含两个布尔启用位和三个无符号微秒值");
+            plan.parameters.line_io = LineIoParameters{
+                .alarm_input_enabled = line_io.at("alarmInputEnabled").get<bool>(),
+                .strobe_output_enabled = line_io.at("strobeOutputEnabled").get<bool>(),
+                .strobe_duration_us = line_io.at("strobeDurationUs").get<std::uint32_t>(),
+                .strobe_pre_delay_us = line_io.at("strobePreDelayUs").get<std::uint32_t>(),
+                .strobe_post_delay_us = line_io.at("strobePostDelayUs").get<std::uint32_t>()};
+        }
 
         if (plan.target_model.empty() || plan.bindings.empty() ||
             plan.bindings.size() > maximum_cameras || plan.duration_seconds == 0U ||
@@ -337,14 +357,18 @@ Json parameters_json(const CameraParameterSnapshot& value)
                          {"height", value.roi->height},
                          {"offsetX", value.roi->offset_x},
                          {"offsetY", value.roi->offset_y}};
+    if (value.line_io)
+        result["lineIo"] = {{"alarmInputEnabled", value.line_io->alarm_input_enabled},
+                            {"strobeOutputEnabled", value.line_io->strobe_output_enabled},
+                            {"strobeDurationUs", value.line_io->strobe_duration_us},
+                            {"strobePreDelayUs", value.line_io->strobe_pre_delay_us},
+                            {"strobePostDelayUs", value.line_io->strobe_post_delay_us}};
     return result;
 }
 
 template <typename T> Json range_json(const paperbreak::camera::SteppedRange<T>& value)
 {
-    return {{"minimum", value.minimum},
-            {"maximum", value.maximum},
-            {"increment", value.increment}};
+    return {{"minimum", value.minimum}, {"maximum", value.maximum}, {"increment", value.increment}};
 }
 
 Json capabilities_json(const CameraCapabilities& value)
@@ -359,6 +383,18 @@ Json capabilities_json(const CameraCapabilities& value)
                          {"offsetX", range_json(value.roi->offset_x)},
                          {"offsetY", range_json(value.roi->offset_y)}};
     }
+    Json line_io{{"alarmInputSupported", value.line_io.alarm_input_supported},
+                 {"line0RisingEdgeSupported", value.line_io.line0_rising_edge_supported},
+                 {"line0FallingEdgeSupported", value.line_io.line0_falling_edge_supported},
+                 {"strobeOutputSupported", value.line_io.strobe_output_supported},
+                 {"unsupportedReason", value.line_io.unsupported_reason}};
+    if (value.line_io.strobe_duration_us)
+        line_io["strobeDurationUs"] = range_json(*value.line_io.strobe_duration_us);
+    if (value.line_io.strobe_pre_delay_us)
+        line_io["strobePreDelayUs"] = range_json(*value.line_io.strobe_pre_delay_us);
+    if (value.line_io.strobe_post_delay_us)
+        line_io["strobePostDelayUs"] = range_json(*value.line_io.strobe_post_delay_us);
+    result["lineIo"] = std::move(line_io);
     return result;
 }
 
@@ -431,6 +467,7 @@ Json run_stage(ICameraProvider& provider, const Plan& plan, const std::size_t ca
             return stage;
         }
         auto device = std::move(created).value();
+        device->set_line_input_observer([](const paperbreak::camera::LineInputEvent&) {});
         if (auto connected = device->connect(); !connected)
         {
             stage["error"] = error_json(connected.error());
@@ -445,9 +482,8 @@ Json run_stage(ICameraProvider& provider, const Plan& plan, const std::size_t ca
             cleanup();
             return stage;
         }
-        capability_records.push_back(
-            {{"cameraId", plan.bindings[index].camera_id},
-             {"capabilities", capabilities_json(capabilities.value())}});
+        capability_records.push_back({{"cameraId", plan.bindings[index].camera_id},
+                                      {"capabilities", capabilities_json(capabilities.value())}});
         auto applied = device->apply_parameters(plan.parameters);
         if (!applied)
         {
@@ -568,11 +604,13 @@ int main(int argc, char** argv)
     {
         std::cout
             << "PaperBreakCameraHardwareTest --probe --output <record.json>\n"
-               "PaperBreakCameraHardwareTest --run --plan <plan.json> --output <record.json>\n";
+               "PaperBreakCameraHardwareTest --run --plan <plan.json> --output <record.json>\n"
+               "PaperBreakCameraHardwareTest --validate-plan --plan <plan.json>\n";
         return 0;
     }
     bool probe = false;
     bool run = false;
+    bool validate_plan = false;
     std::filesystem::path plan_path;
     std::filesystem::path output_path;
     for (int index = 1; index < argc; ++index)
@@ -582,6 +620,8 @@ int main(int argc, char** argv)
             probe = true;
         else if (argument == "--run")
             run = true;
+        else if (argument == "--validate-plan")
+            validate_plan = true;
         else if (argument == "--plan" && index + 1 < argc)
             plan_path = argv[++index];
         else if (argument == "--output" && index + 1 < argc)
@@ -592,19 +632,27 @@ int main(int argc, char** argv)
             return 2;
         }
     }
-    if (probe == run || output_path.empty() || (run && plan_path.empty()))
+    const int selected_modes =
+        static_cast<int>(probe) + static_cast<int>(run) + static_cast<int>(validate_plan);
+    if (selected_modes != 1 || ((run || validate_plan) && plan_path.empty()) ||
+        ((probe || run) && output_path.empty()) || (validate_plan && !output_path.empty()))
     {
-        std::cerr << "HW_PLAN_INVALID: 必须选择 --probe 或 --run，并提供所需路径\n";
+        std::cerr << "HW_PLAN_INVALID: 必须选择一种模式，并提供该模式所需路径\n";
         return 2;
     }
 
     std::optional<Plan> approved_plan;
-    if (run)
+    if (run || validate_plan)
     {
         auto loaded = load_plan(plan_path);
         if (!loaded)
             return print_error(loaded.error(), 2);
         approved_plan.emplace(std::move(loaded).value());
+    }
+    if (validate_plan)
+    {
+        std::cout << "HW_PLAN_VALID\n";
+        return 0;
     }
 
     auto provider = paperbreak::camera::hikrobot::create_hikrobot_camera_provider();

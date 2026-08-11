@@ -4,7 +4,7 @@
 
 本目录提供 M3-05 的真机验证方法和空白记录输入。自动化测试、SDK 链接 smoke 或 Mock 结果不能代替实体相机证据。M3 路线图退出门禁要求自动化适配层测试通过，并由至少一台 `MV-CS020-60GM` 完成功能验证。四路最终吞吐、物理恢复、服务重启以及 M4 真实预览/日志并发属于 M5/M9 前的生产等价验证，不反向阻塞可与 M4 并行的 M3，但缺失项不得宣称已通过。
 
-`PaperBreakCameraHardwareTest` 随所有生产配置构建。它通过公开相机接口工作，工具源码不直接调用 MVS。`--probe` 只枚举；`--run` 必须显式提供计划，才会打开设备、写入参数、回读、取流和发软件触发命令。输出记录若已存在会拒绝覆盖。
+`PaperBreakCameraHardwareTest` 随所有生产配置构建。它通过公开相机接口工作，工具源码不直接调用 MVS。`--probe` 只枚举；`--validate-plan` 只校验计划、不访问相机；`--run` 必须显式提供计划，才会打开设备、写入参数、回读、取流和发软件触发命令。输出记录若已存在会拒绝覆盖。
 
 ## 构建
 
@@ -50,10 +50,17 @@ PaperBreakCameraHardwareTest.exe --probe --output records\probe-<rig>-<UTC>.json
 
 - `CAM01` 起连续排列，最多四路，序列号唯一；
 - 可选 `roi` 必须完整提供 `width`、`height`、`offsetX`、`offsetY`；工具先执行安全结构上限校验，再由实体设备能力校验范围、步进和组合；
+- 可选 `lineIo` 必须完整提供 `alarmInputEnabled`、`strobeOutputEnabled`、`strobeDurationUs`、`strobePreDelayUs` 和 `strobePostDelayUs`；运行记录会保存设备能力范围、请求值、实际回读及带 MVS 原生码和节点名的结构化失败；
 - 运行 1～3600 秒，资源样本不超过 3601；
 - 队列/池容量最多 256，缓冲字节数必须覆盖实际 payload；
 - `minimumFpsRatio` 是目标帧率验收比例，不得通过扩大队列掩盖丢帧；
 - 连续吞吐先使用 `continuous`；软件触发另建 `software` 计划；实际硬件触发需现场触发源，不能用软件命令冒充。
+
+计划提交审批前可执行无硬件校验：
+
+```powershell
+PaperBreakCameraHardwareTest.exe --validate-plan --plan hardware-test-plan.approved.json
+```
 
 ## 2. 参数与逐路吞吐
 
