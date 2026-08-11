@@ -454,6 +454,18 @@ struct EventRuntimeImpl final
         }
     }
 
+    void notify_detector_failure(const AlgorithmDetectorFailureStateChange& change) noexcept
+    {
+        try
+        {
+            if (options.detector_failure_state_observer)
+                options.detector_failure_state_observer(change);
+        }
+        catch (...)
+        {
+        }
+    }
+
     void publish_lifecycle(const storage::EventMetadataRecord& event) noexcept
     {
         try
@@ -1346,17 +1358,28 @@ struct EventRuntimeImpl final
                 if (!detection)
                 {
                     ++diagnostic_failures;
-                    ++lane.detector_failures;
+                    const auto total_failures = lane.detector_failures.fetch_add(1U) + 1U;
                     const auto failures = lane.consecutive_detector_failures.fetch_add(1U) + 1U;
                     detector_error = detection.error();
                     detector_error->source_id = lane.camera_id;
                     if (failures >= options.consecutive_failure_limit)
-                        if (auto degraded = enter_degraded(lane, "consecutive-detector-failures"))
-                            report(*degraded);
+                        notify_detector_failure({.camera_id = lane.camera_id,
+                                                 .active = true,
+                                                 .consecutive_failures = failures,
+                                                 .detector_failures = total_failures,
+                                                 .failure_limit = options.consecutive_failure_limit,
+                                                 .last_error = detector_error});
                 }
                 else
                 {
-                    lane.consecutive_detector_failures.store(0U);
+                    const auto recovered_failures = lane.consecutive_detector_failures.exchange(0U);
+                    if (recovered_failures >= options.consecutive_failure_limit)
+                        notify_detector_failure(
+                            {.camera_id = lane.camera_id,
+                             .active = false,
+                             .consecutive_failures = 0U,
+                             .detector_failures = lane.detector_failures.load(),
+                             .failure_limit = options.consecutive_failure_limit});
                     completed_detection = std::move(detection).value();
                     if (completed_detection->triggered)
                         ++diagnostic_candidates;
@@ -1889,12 +1912,21 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
 
     std::unique_ptr<EventPipelineState> previous;
     std::vector<AlgorithmBacklogStateChange> removed_backlogs;
+    std::vector<AlgorithmDetectorFailureStateChange> recovered_detector_failures;
     const auto backlog_window_start = impl_->now();
     {
         std::scoped_lock lock{impl_->mutex};
         for (const auto& old_lane : impl_->pipeline->lanes)
         {
             std::scoped_lock old_lane_lock{old_lane->mutex};
+            if (old_lane->consecutive_detector_failures.load() >=
+                impl_->options.consecutive_failure_limit)
+                recovered_detector_failures.push_back(
+                    {.camera_id = old_lane->camera_id,
+                     .active = false,
+                     .consecutive_failures = 0U,
+                     .detector_failures = old_lane->detector_failures.load(),
+                     .failure_limit = impl_->options.consecutive_failure_limit});
             if (old_lane->backlog_active && find_lane(*next, old_lane->camera_id) == nullptr)
                 removed_backlogs.push_back({.camera_id = old_lane->camera_id,
                                             .active = false,
@@ -1949,6 +1981,8 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
     }
     for (const auto& change : removed_backlogs)
         impl_->notify_backlog(change);
+    for (const auto& change : recovered_detector_failures)
+        impl_->notify_detector_failure(change);
     return Result<void>::success();
 }
 

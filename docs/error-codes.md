@@ -158,10 +158,10 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `ALGORITHM_INIT_FAILED` | Error | 视原因 | 新算法实例初始化/验证失败；保持旧实例或禁用检测并报警 |
 | `ALGORITHM_PLUGIN_LOAD_FAILED` | Error | 否 | 编译期插件未注册、工厂失败或插件身份无效；候选配置不提交，旧实例和旧配置继续生效 |
 | `ALGORITHM_NOT_READY` | Error | 视状态 | 检测器尚未装载或已停止接收；不调用空实例，不影响采集与人工触发 |
-| `ALGORITHM_PROCESS_FAILED` | Error | 否 | 单帧处理异常；跳过该帧，持续失败时降级算法 |
+| `ALGORITHM_PROCESS_FAILED` | Error | 否 | 单帧处理异常时跳过该帧；连续失败达到门限后按相机持续更新活动报警，但后续帧仍继续检测，首次成功后清除活动报警 |
 | `ALGORITHM_PROCESS_TIMEOUT` | Error | 否 | 同步检测调用返回后确认超过软件预算；丢弃迟到结果并计数，不声称已安全抢占调用 |
 | `ALGORITHM_QUEUE_BACKLOG` | Warning | 是 | 每相机容量 8 的待检测队列已满；丢弃最旧待检测帧、接收最新帧并计数，持续积压时降级 |
-| `ALGORITHM_DEGRADED` | Error | 否 | 连续处理失败或持续队列积压达到有界门限；自动视觉检测切换到 `manual-trigger-only`，采集、缓存和人工触发继续 |
+| `ALGORITHM_DEGRADED` | Error | 否 | 持续队列积压或算法结果队列拒绝达到保护条件；来源相机的自动视觉检测切换到 `manual-trigger-only`，采集、缓存和人工触发继续 |
 
 ### 4.5 事件与存储
 

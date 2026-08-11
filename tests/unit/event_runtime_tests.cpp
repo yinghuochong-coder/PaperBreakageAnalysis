@@ -676,7 +676,7 @@ TEST(EventRuntimeIntegration, DropsOldestOnBacklogAndKeepsSubmissionNonBlocking)
     EXPECT_EQ(snapshot.algorithm_state, AlgorithmRuntimeState::active);
 }
 
-TEST(EventRuntimeIntegration, ConsecutiveDetectorFailuresDegradeButManualTriggerStillWorks)
+TEST(EventRuntimeIntegration, ConsecutiveDetectorFailuresKeepDetectingAndAlarmUntilRecovery)
 {
     TemporaryDirectory temporary;
     const auto event_root = temporary.path() / "events";
@@ -690,44 +690,61 @@ TEST(EventRuntimeIntegration, ConsecutiveDetectorFailuresDegradeButManualTrigger
     configuration.algorithm.enabled = true;
     configuration.algorithm.type = "failing-runtime-test";
     configuration.algorithm.consecutive_frames = 1U;
-    auto behavior = std::make_shared<DetectorBehavior>(configuration.algorithm.type, 0ms, 2U);
+    auto behavior = std::make_shared<DetectorBehavior>(configuration.algorithm.type, 0ms, 3U);
     std::atomic_uint64_t degraded_errors{};
-    auto runtime =
-        EventRuntime::create({.configuration = configuration,
-                              .event_root = event_root,
-                              .database = shared_database,
-                              .consecutive_failure_limit = 2U,
-                              .detector_registry_configurer = test_detector_registration(behavior),
-                              .error_observer = [&](const Error& error) {
-                                  if (error.business_code == "ALGORITHM_DEGRADED")
-                                      ++degraded_errors;
-                              }});
+    std::atomic_uint64_t active_alarm_updates{};
+    std::atomic_uint64_t recovered_alarms{};
+    std::atomic_uint64_t last_consecutive_failures{};
+    std::atomic_uint64_t active_updates_with_error{};
+    std::atomic_uint64_t observed_failure_limit{};
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration,
+         .event_root = event_root,
+         .database = shared_database,
+         .consecutive_failure_limit = 2U,
+         .detector_registry_configurer = test_detector_registration(behavior),
+         .error_observer =
+             [&](const Error& error) {
+                 if (error.business_code == "ALGORITHM_DEGRADED")
+                     ++degraded_errors;
+             },
+         .detector_failure_state_observer =
+             [&](const AlgorithmDetectorFailureStateChange& change) {
+                 if (change.active)
+                 {
+                     ++active_alarm_updates;
+                     last_consecutive_failures.store(change.consecutive_failures);
+                     if (change.last_error)
+                         ++active_updates_with_error;
+                     observed_failure_limit.store(change.failure_limit);
+                 }
+                 else
+                 {
+                     ++recovered_alarms;
+                 }
+             }});
     ASSERT_TRUE(runtime) << runtime.error().message;
     ASSERT_TRUE(runtime.value()->start());
 
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms)));
-    for (std::size_t attempt = 0U;
-         attempt < 100U && runtime.value()->snapshot().detector_process_calls < 1U; ++attempt)
-        std::this_thread::sleep_for(2ms);
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 200ms)));
-    for (std::size_t attempt = 0U; attempt < 100U && runtime.value()->snapshot().algorithm_state !=
-                                                         AlgorithmRuntimeState::manual_trigger_only;
-         ++attempt)
-        std::this_thread::sleep_for(2ms);
+    for (std::uint64_t sequence = 1U; sequence <= 4U; ++sequence)
+    {
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(sequence, std::chrono::milliseconds{sequence * 100U})));
+        ASSERT_TRUE(wait_until(
+            [&] { return runtime.value()->snapshot().detector_process_calls >= sequence; }));
+    }
 
-    auto degraded = runtime.value()->snapshot();
-    EXPECT_EQ(degraded.algorithm_state, AlgorithmRuntimeState::manual_trigger_only);
-    EXPECT_EQ(degraded.detector_failures, 2U);
-    EXPECT_EQ(degraded_errors.load(), 1U);
-
-    auto requested = runtime.value()->request_manual_trigger("CAM01");
-    ASSERT_TRUE(requested);
-    EXPECT_TRUE(requested.value());
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 300ms)));
-    for (std::size_t attempt = 0U;
-         attempt < 100U && runtime.value()->snapshot().events_started == 0U; ++attempt)
-        std::this_thread::sleep_for(2ms);
-    EXPECT_EQ(runtime.value()->snapshot().events_started, 1U);
+    const auto recovered = runtime.value()->snapshot();
+    EXPECT_EQ(recovered.algorithm_state, AlgorithmRuntimeState::active);
+    EXPECT_EQ(recovered.detector_process_calls, 4U);
+    EXPECT_EQ(recovered.detector_failures, 3U);
+    EXPECT_EQ(recovered.consecutive_detector_failures, 0U);
+    EXPECT_EQ(degraded_errors.load(), 0U);
+    EXPECT_EQ(active_alarm_updates.load(), 2U);
+    EXPECT_EQ(last_consecutive_failures.load(), 3U);
+    EXPECT_EQ(active_updates_with_error.load(), 2U);
+    EXPECT_EQ(observed_failure_limit.load(), 2U);
+    EXPECT_EQ(recovered_alarms.load(), 1U);
 
     runtime.value()->request_stop();
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
@@ -1224,7 +1241,7 @@ TEST(EventRuntimeLanes, FiveBadBacklogWindowsDegradeOnlyTheOverloadedCamera)
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }
 
-TEST(EventRuntimeLanes, AggregatesPartialAndFullDegradationAndReconfigureRecovers)
+TEST(EventRuntimeLanes, DetectorFailureAlarmsRemainLaneLocalAndReconfigureClearsThem)
 {
     TemporaryDirectory temporary;
     const auto event_root = temporary.path() / "events";
@@ -1236,55 +1253,47 @@ TEST(EventRuntimeLanes, AggregatesPartialAndFullDegradationAndReconfigureRecover
     std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
     auto configuration = four_camera_runtime_config();
     auto behavior = std::make_shared<ControlledDetectorBehavior>();
-    behavior->failures_remaining["CAM01"] = 1U;
-    behavior->triggered_cameras.insert("CAM02");
+    behavior->failures_remaining = {{"CAM01", 1U}, {"CAM02", 1U}, {"CAM03", 1U}, {"CAM04", 1U}};
+    std::atomic_uint64_t active_alarm_updates{};
+    std::atomic_uint64_t recovered_alarms{};
     auto runtime = EventRuntime::create(
         {.configuration = configuration,
          .event_root = event_root,
          .database = shared_database,
          .consecutive_failure_limit = 1U,
-         .detector_registry_configurer = controlled_detector_registration(behavior)});
+         .detector_registry_configurer = controlled_detector_registration(behavior),
+         .detector_failure_state_observer = [&](const AlgorithmDetectorFailureStateChange& change) {
+             if (change.active)
+                 ++active_alarm_updates;
+             else
+                 ++recovered_alarms;
+         }});
     ASSERT_TRUE(runtime);
     ASSERT_TRUE(runtime.value()->start());
 
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms, "CAM01")));
-    ASSERT_TRUE(wait_until([&] {
-        return runtime.value()->snapshot().algorithm_state ==
-               AlgorithmRuntimeState::partially_degraded;
-    }));
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms, "CAM02")));
-    ASSERT_TRUE(wait_until([&] {
-        auto lane = runtime.value()->algorithm_snapshot("CAM02");
-        return lane && lane.value().metrics.candidates_created == 1U;
-    }));
-
+    for (const auto* camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
+        ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms, camera_id)));
+    ASSERT_TRUE(
+        wait_until([&] { return runtime.value()->snapshot().detector_process_calls == 4U; }));
+    EXPECT_EQ(runtime.value()->snapshot().algorithm_state, AlgorithmRuntimeState::active);
+    EXPECT_EQ(active_alarm_updates.load(), 4U);
+    for (const auto& lane : runtime.value()->algorithm_snapshots())
     {
-        std::scoped_lock lock{behavior->mutex};
-        behavior->failures_remaining["CAM02"] = 1U;
-        behavior->failures_remaining["CAM03"] = 1U;
-        behavior->failures_remaining["CAM04"] = 1U;
-        behavior->triggered_cameras.clear();
+        EXPECT_EQ(lane.state, AlgorithmRuntimeState::active);
+        EXPECT_EQ(lane.metrics.detector_failures, 1U);
+        EXPECT_EQ(lane.metrics.consecutive_detector_failures, 1U);
     }
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 200ms, "CAM02")));
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms, "CAM03")));
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms, "CAM04")));
-    ASSERT_TRUE(wait_until([&] {
-        return runtime.value()->snapshot().algorithm_state ==
-               AlgorithmRuntimeState::manual_trigger_only;
-    }));
 
-    auto manual = runtime.value()->request_manual_trigger("CAM01");
-    ASSERT_TRUE(manual);
-    ASSERT_TRUE(manual.value());
     ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 200ms, "CAM01")));
-    ASSERT_TRUE(wait_until([&] {
-        const auto snapshot = runtime.value()->snapshot();
-        return snapshot.events_started >= 1U && snapshot.candidates_created >= 2U;
-    }));
+    ASSERT_TRUE(wait_until([&] { return recovered_alarms.load() == 1U; }));
+    const auto recovered_cam01 = runtime.value()->algorithm_snapshot("CAM01");
+    ASSERT_TRUE(recovered_cam01);
+    EXPECT_EQ(recovered_cam01.value().metrics.consecutive_detector_failures, 0U);
 
     configuration.config_revision += 1U;
     ASSERT_TRUE(runtime.value()->reconfigure(configuration));
     EXPECT_EQ(runtime.value()->snapshot().algorithm_state, AlgorithmRuntimeState::active);
+    EXPECT_EQ(recovered_alarms.load(), 4U);
     for (const auto& lane : runtime.value()->algorithm_snapshots())
         EXPECT_EQ(lane.state, AlgorithmRuntimeState::active);
     runtime.value()->request_stop();

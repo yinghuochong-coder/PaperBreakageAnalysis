@@ -228,7 +228,7 @@ PreviewRuntime::submit(frame, ...);      // 仅启用预览时
 | `EventTransactionWriter::persist()` | 同上 | 写事务目录、校验文件与 manifest，原子提交事件目录 |
 | `EventRuntimeImpl::persistence_completed()` | `event_runtime.cpp` | 将已提交目录索引入 SQLite、释放 NVMe 租约、调用 committed observer |
 
-`EventRuntime` 把自动算法连续失败或持续队列积压视为降级条件；达到阈值后进入 `manual-trigger-only`，但保留人工触发路径。
+`EventRuntime` 在自动算法连续失败达到门限后，按相机持续刷新 `ALGORITHM_PROCESS_FAILED` 活动报警，但仍对后续帧调用检测器；首次成功会清除该报警。持续队列积压或算法结果队列拒绝仍属于保护性降级条件，只把来源 Lane 切换到 `manual-trigger-only`，并保留采集、缓存和人工触发路径。
 
 ### 6.5 IPC、配置和业务命令
 

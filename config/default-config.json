@@ -34,7 +34,7 @@
       "lineIo": {
         "alarmActiveLevel": "High",
         "alarmInputEnabled": true,
-        "strobeDurationUs": 23,
+        "strobeDurationUs": 10,
         "strobeOutputEnabled": true,
         "strobePostDelayUs": 0,
         "strobePreDelayUs": 5
@@ -87,7 +87,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 61,
+  "configRevision": 68,
   "configSchemaVersion": 3,
   "event": {
     "generatePreviewVideo": true,
@@ -115,7 +115,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-11T05:08:05.960Z",
+  "modifiedAt": "2026-08-11T05:51:03.723Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

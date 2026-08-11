@@ -45,6 +45,16 @@ struct AlgorithmBacklogStateChange final
     std::uint64_t skipped_frames{};
 };
 
+struct AlgorithmDetectorFailureStateChange final
+{
+    std::string camera_id;
+    bool active{};
+    std::uint64_t consecutive_failures{};
+    std::uint64_t detector_failures{};
+    std::size_t failure_limit{};
+    std::optional<Error> last_error;
+};
+
 struct EventRuntimeOptions final
 {
     config::EdgeConfig configuration;
@@ -64,6 +74,7 @@ struct EventRuntimeOptions final
     std::size_t backlog_recovery_window_limit{5U};
     std::function<Result<void>(algorithm::DetectorPluginRegistry&)> detector_registry_configurer;
     std::function<void(const Error&)> error_observer;
+    std::function<void(const AlgorithmDetectorFailureStateChange&)> detector_failure_state_observer;
     std::function<void(const AlgorithmBacklogStateChange&)> backlog_state_observer;
     std::function<void(const storage::EventMetadataRecord&)> lifecycle_observer;
     std::function<void(const storage::EventMetadataRecord&)> committed_observer;

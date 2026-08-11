@@ -2077,6 +2077,43 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                                           level, error.business_code + ": " + error.message));
                  }
              },
+         .detector_failure_state_observer =
+             [weak_event_alarms](
+                 const paperbreak::service::AlgorithmDetectorFailureStateChange& change) {
+                 if (auto alarm_registry = weak_event_alarms.lock())
+                 {
+                     if (change.active)
+                     {
+                         std::vector<paperbreak::ErrorDetail> details{
+                             {"failureLimit", std::to_string(change.failure_limit)},
+                             {"consecutiveFailures", std::to_string(change.consecutive_failures)},
+                             {"detectorFailures", std::to_string(change.detector_failures)}};
+                         if (change.last_error)
+                         {
+                             details.push_back(
+                                 {"lastBusinessCode", change.last_error->business_code});
+                             const auto reason =
+                                 std::ranges::find_if(change.last_error->details,
+                                                      [](const paperbreak::ErrorDetail& detail) {
+                                                          return detail.key == "reason";
+                                                      });
+                             if (reason != change.last_error->details.end())
+                                 details.push_back(*reason);
+                         }
+                         static_cast<void>(alarm_registry->raise_alarm(
+                             {.code = "ALGORITHM_PROCESS_FAILED",
+                              .severity = paperbreak::Severity::error,
+                              .source = change.camera_id,
+                              .message = "算法检测连续失败，自动检测仍在继续",
+                              .details = std::move(details)}));
+                     }
+                     else
+                     {
+                         static_cast<void>(
+                             alarm_registry->clear("ALGORITHM_PROCESS_FAILED", change.camera_id));
+                     }
+                 }
+             },
          .backlog_state_observer =
              [weak_event_alarms](const paperbreak::service::AlgorithmBacklogStateChange& change) {
                  if (auto alarm_registry = weak_event_alarms.lock())
