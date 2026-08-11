@@ -659,6 +659,24 @@ int main(int argc, char* argv[])
             main_window.findChild<QCheckBox*>(QStringLiteral("camera-reverse-x"));
         auto* const reverse_y =
             main_window.findChild<QCheckBox*>(QStringLiteral("camera-reverse-y"));
+        auto* const line_input_panel =
+            main_window.findChild<QWidget*>(QStringLiteral("camera-line-input-panel"));
+        auto* const line_output_panel =
+            main_window.findChild<QWidget*>(QStringLiteral("camera-line-output-panel"));
+        auto* const alarm_input_enabled =
+            main_window.findChild<QCheckBox*>(QStringLiteral("camera-alarm-input-enabled"));
+        auto* const strobe_output_enabled =
+            main_window.findChild<QCheckBox*>(QStringLiteral("camera-strobe-output-enabled"));
+        auto* const line_input_actual =
+            main_window.findChild<QLabel*>(QStringLiteral("camera-line-input-actual"));
+        auto* const line_output_actual =
+            main_window.findChild<QLabel*>(QStringLiteral("camera-line-output-actual"));
+        const bool line_io_panels_split =
+            line_input_panel && line_output_panel && line_input_panel != line_output_panel &&
+            alarm_input_enabled && alarm_input_enabled->parentWidget() == line_input_panel &&
+            line_input_actual && line_input_actual->parentWidget() == line_input_panel &&
+            strobe_output_enabled && strobe_output_enabled->parentWidget() == line_output_panel &&
+            line_output_actual && line_output_actual->parentWidget() == line_output_panel;
         const bool first_camera_mirroring_loaded =
             reverse_x && reverse_y && reverse_x->isChecked() && !reverse_y->isChecked();
         const bool camera_discover_above_list =
@@ -878,7 +896,7 @@ int main(int argc, char* argv[])
                    main_window.camera_configuration_ready() && camera_layout_responsive &&
                    preview_panes_stable_and_cycle && camera_banner_removed &&
                    fixed_acquisition_controls_removed &&
-                   camera_discover_above_list && first_camera_status_only &&
+                   camera_discover_above_list && line_io_panels_split && first_camera_status_only &&
                    selected_camera_status_only && first_camera_mirroring_loaded &&
                    selected_camera_mirroring_loaded && roi_capabilities_loaded &&
                    roi_offset_aligned && empty_configuration_kept_discovery &&

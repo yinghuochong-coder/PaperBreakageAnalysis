@@ -220,7 +220,8 @@ class MainWindow final : public QMainWindow
     QSpinBox* camera_strobe_pre_delay_{};
     QSpinBox* camera_strobe_post_delay_{};
     QLabel* camera_strobe_source_{};
-    QLabel* camera_line_io_actual_{};
+    QLabel* camera_line_input_actual_{};
+    QLabel* camera_line_output_actual_{};
     CameraUiActions camera_actions_;
     ThemeUiActions theme_actions_;
     OperationsUiActions operations_actions_;
