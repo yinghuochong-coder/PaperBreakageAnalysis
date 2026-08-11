@@ -254,6 +254,7 @@ class MainWindow final : public QMainWindow
     QComboBox* algorithm_camera_selector_{};
     QCheckBox* algorithm_enabled_{};
     QComboBox* algorithm_type_{};
+    QCheckBox* algorithm_full_frame_{};
     QSpinBox* algorithm_roi_width_{};
     QSpinBox* algorithm_roi_height_{};
     QSpinBox* algorithm_roi_x_{};

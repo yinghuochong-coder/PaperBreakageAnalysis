@@ -454,11 +454,23 @@ class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
                                            {"detectorFailures", 2},
                                            {"consecutiveDetectorFailures", 0},
                                            {"consecutiveBacklogEvents", 3},
+                                           {"backlogActive", true},
+                                           {"consecutiveBadBacklogWindows", 2},
+                                           {"consecutiveHealthyBacklogWindows", 0},
                                            {"resultQueueRejected", 4},
                                            {"processCalls", 39},
                                            {"lastProcessingTimeUs", 100},
                                            {"averageProcessingTimeUs", 90},
                                            {"maximumProcessingTimeUs", 180},
+                                           {"lastQueueWaitTimeUs", 1200},
+                                           {"averageQueueWaitTimeUs", 800},
+                                           {"maximumQueueWaitTimeUs", 2400},
+                                           {"lastEndToEndTimeUs", 10800},
+                                           {"averageEndToEndTimeUs", 9900},
+                                           {"maximumEndToEndTimeUs", 15000},
+                                           {"inputFps", 60.0},
+                                           {"processedFps", 59.0},
+                                           {"skippedRatio", 0.025},
                                            {"candidatesCreated", 4},
                                            {"confirmedEvents", 2},
                                            {"rejectedCandidates", 1}}}};
@@ -1376,6 +1388,13 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
     EXPECT_EQ(latest.runtime.metrics.queue_capacity, 8U);
     EXPECT_EQ(latest.runtime.metrics.maximum_processing_time_us, 180);
     EXPECT_EQ(latest.runtime.metrics.consecutive_backlog_events, 3U);
+    EXPECT_TRUE(latest.runtime.metrics.backlog_active);
+    EXPECT_EQ(latest.runtime.metrics.consecutive_bad_backlog_windows, 2U);
+    EXPECT_EQ(latest.runtime.metrics.average_queue_wait_time_us, 800);
+    EXPECT_EQ(latest.runtime.metrics.maximum_end_to_end_time_us, 15000);
+    EXPECT_DOUBLE_EQ(latest.runtime.metrics.input_fps, 60.0);
+    EXPECT_DOUBLE_EQ(latest.runtime.metrics.processed_fps, 59.0);
+    EXPECT_DOUBLE_EQ(latest.runtime.metrics.skipped_ratio, 0.025);
     EXPECT_EQ(latest.runtime.metrics.result_queue_rejected, 4U);
 
     auto changed = latest.configuration;

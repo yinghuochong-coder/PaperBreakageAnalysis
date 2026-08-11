@@ -82,6 +82,12 @@ struct AlgorithmResultEnvelope final
     std::optional<algorithm::DetectionResult> detection;
 };
 
+struct QueuedAlgorithmFrame final
+{
+    camera::FrameView frame;
+    std::chrono::steady_clock::time_point enqueued_at;
+};
+
 struct Lane final
 {
     std::string camera_id;
@@ -90,7 +96,7 @@ struct Lane final
     std::optional<algorithm::DetectorInfo> detector_info;
     mutable std::mutex mutex;
     std::condition_variable condition;
-    std::deque<camera::FrameView> frames;
+    std::deque<QueuedAlgorithmFrame> frames;
     std::optional<camera::MonotonicTime> in_flight_time;
     std::jthread worker;
     bool stop_requested{};
@@ -107,10 +113,26 @@ struct Lane final
     std::atomic_uint64_t detector_failures{};
     std::atomic_uint64_t consecutive_detector_failures{};
     std::atomic_uint64_t consecutive_backlog_events{};
+    bool backlog_active{};
+    std::uint64_t consecutive_bad_backlog_windows{};
+    std::uint64_t consecutive_healthy_backlog_windows{};
+    std::optional<std::chrono::steady_clock::time_point> backlog_window_start;
+    std::uint64_t window_submitted{};
+    std::uint64_t window_processed{};
+    std::uint64_t window_skipped{};
     std::atomic_uint64_t detector_process_calls{};
     std::atomic_int64_t last_algorithm_processing_us{};
     std::atomic_int64_t total_algorithm_processing_us{};
     std::atomic_int64_t maximum_algorithm_processing_us{};
+    std::atomic_int64_t last_queue_wait_us{};
+    std::atomic_int64_t total_queue_wait_us{};
+    std::atomic_int64_t maximum_queue_wait_us{};
+    std::atomic_int64_t last_end_to_end_us{};
+    std::atomic_int64_t total_end_to_end_us{};
+    std::atomic_int64_t maximum_end_to_end_us{};
+    std::atomic<double> input_fps{};
+    std::atomic<double> processed_fps{};
+    std::atomic<double> skipped_ratio{};
     std::atomic_uint64_t result_queue_rejected{};
     std::atomic_uint64_t candidates_created{};
     std::atomic_uint64_t confirmed_events{};
@@ -369,6 +391,12 @@ std::string_view to_string(const AlgorithmRuntimeState state) noexcept
 
 struct EventRuntimeImpl final
 {
+    struct BacklogWindowOutcome final
+    {
+        bool recovered{};
+        std::optional<Error> degraded_error;
+    };
+
     struct PendingEvent final
     {
         storage::EventManifestMetadata metadata;
@@ -403,6 +431,23 @@ struct EventRuntimeImpl final
         {
             if (options.error_observer)
                 options.error_observer(error);
+        }
+        catch (...)
+        {
+        }
+    }
+
+    [[nodiscard]] std::chrono::steady_clock::time_point now() const
+    {
+        return options.monotonic_now ? options.monotonic_now() : std::chrono::steady_clock::now();
+    }
+
+    void notify_backlog(const AlgorithmBacklogStateChange& change) noexcept
+    {
+        try
+        {
+            if (options.backlog_state_observer)
+                options.backlog_state_observer(change);
         }
         catch (...)
         {
@@ -453,7 +498,66 @@ struct EventRuntimeImpl final
             {"failureLimit", std::to_string(options.consecutive_failure_limit)});
         error.details.push_back(
             {"backlogLimit", std::to_string(options.consecutive_backlog_limit)});
+        error.details.push_back(
+            {"backlogWindowMs", std::to_string(options.backlog_window.count())});
+        error.details.push_back(
+            {"backlogWindowLimit", std::to_string(options.backlog_degrade_window_limit)});
         return error;
+    }
+
+    [[nodiscard]] BacklogWindowOutcome advance_backlog_windows(
+        Lane& lane, const std::chrono::steady_clock::time_point current)
+    {
+        BacklogWindowOutcome outcome;
+        if (!lane.backlog_window_start)
+        {
+            lane.backlog_window_start = current;
+            return outcome;
+        }
+        const auto seconds = std::chrono::duration<double>{options.backlog_window}.count();
+        while (current - *lane.backlog_window_start >= options.backlog_window)
+        {
+            lane.input_fps.store(static_cast<double>(lane.window_submitted) / seconds,
+                                 std::memory_order_relaxed);
+            lane.processed_fps.store(static_cast<double>(lane.window_processed) / seconds,
+                                     std::memory_order_relaxed);
+            lane.skipped_ratio.store(lane.window_submitted == 0U
+                                         ? 0.0
+                                         : static_cast<double>(lane.window_skipped) /
+                                               static_cast<double>(lane.window_submitted),
+                                     std::memory_order_relaxed);
+
+            const bool bad = lane.window_skipped >= options.consecutive_backlog_limit;
+            if (bad)
+            {
+                ++lane.consecutive_bad_backlog_windows;
+                lane.consecutive_healthy_backlog_windows = 0U;
+            }
+            else
+            {
+                lane.consecutive_bad_backlog_windows = 0U;
+                if (lane.window_skipped == 0U &&
+                    lane.frames.size() * 4U < options.frame_queue_capacity)
+                    ++lane.consecutive_healthy_backlog_windows;
+                else
+                    lane.consecutive_healthy_backlog_windows = 0U;
+            }
+            if (lane.consecutive_bad_backlog_windows >= options.backlog_degrade_window_limit)
+                outcome.degraded_error = enter_degraded(lane, "sustained-queue-backlog");
+            if (lane.backlog_active &&
+                lane.consecutive_healthy_backlog_windows >= options.backlog_recovery_window_limit)
+            {
+                lane.backlog_active = false;
+                lane.consecutive_backlog_events.store(0U);
+                outcome.recovered = true;
+            }
+
+            lane.window_submitted = 0U;
+            lane.window_processed = 0U;
+            lane.window_skipped = 0U;
+            *lane.backlog_window_start += options.backlog_window;
+        }
+        return outcome;
     }
 
     static void record_processing_time(Lane& lane, const std::chrono::microseconds elapsed) noexcept
@@ -465,6 +569,19 @@ struct EventRuntimeImpl final
         while (maximum < elapsed.count() &&
                !lane.maximum_algorithm_processing_us.compare_exchange_weak(
                    maximum, elapsed.count(), std::memory_order_relaxed))
+        {
+        }
+    }
+
+    static void record_latency(std::atomic_int64_t& last, std::atomic_int64_t& total,
+                               std::atomic_int64_t& maximum,
+                               const std::chrono::microseconds elapsed) noexcept
+    {
+        last.store(elapsed.count(), std::memory_order_relaxed);
+        total.fetch_add(elapsed.count(), std::memory_order_relaxed);
+        auto observed = maximum.load(std::memory_order_relaxed);
+        while (observed < elapsed.count() &&
+               !maximum.compare_exchange_weak(observed, elapsed.count(), std::memory_order_relaxed))
         {
         }
     }
@@ -487,29 +604,54 @@ struct EventRuntimeImpl final
             .has_current_frame = lane.latest_frame.has_value(),
             .latest_sequence_number = lane.latest_frame ? lane.latest_frame->sequence_number() : 0U,
             .detector_info = lane.detector_info,
-            .metrics = {.frame_queue_depth = lane.frames.size(),
-                        .frame_queue_capacity = options.frame_queue_capacity,
-                        .frame_queue_high_watermark = lane.frame_high_watermark,
-                        .submitted_frames = lane.submitted_frames.load(),
-                        .processed_frames = lane.processed_frames.load(),
-                        .skipped_frames = lane.skipped_frames.load(),
-                        .detector_failures = lane.detector_failures.load(),
-                        .consecutive_detector_failures = lane.consecutive_detector_failures.load(),
-                        .consecutive_backlog_events = lane.consecutive_backlog_events.load(),
-                        .detector_process_calls = process_calls,
-                        .last_algorithm_processing_time =
-                            std::chrono::microseconds{lane.last_algorithm_processing_us.load()},
-                        .average_algorithm_processing_time =
-                            std::chrono::microseconds{
-                                process_calls == 0U
-                                    ? 0
-                                    : total_processing / static_cast<std::int64_t>(process_calls)},
-                        .maximum_algorithm_processing_time =
-                            std::chrono::microseconds{lane.maximum_algorithm_processing_us.load()},
-                        .result_queue_rejected = lane.result_queue_rejected.load(),
-                        .candidates_created = lane.candidates_created.load(),
-                        .confirmed_events = lane.confirmed_events.load(),
-                        .rejected_candidates = lane.rejected_candidates.load()}};
+            .metrics = {
+                .frame_queue_depth = lane.frames.size(),
+                .frame_queue_capacity = options.frame_queue_capacity,
+                .frame_queue_high_watermark = lane.frame_high_watermark,
+                .submitted_frames = lane.submitted_frames.load(),
+                .processed_frames = lane.processed_frames.load(),
+                .skipped_frames = lane.skipped_frames.load(),
+                .detector_failures = lane.detector_failures.load(),
+                .consecutive_detector_failures = lane.consecutive_detector_failures.load(),
+                .consecutive_backlog_events = lane.consecutive_backlog_events.load(),
+                .backlog_active = lane.backlog_active,
+                .consecutive_bad_backlog_windows = lane.consecutive_bad_backlog_windows,
+                .consecutive_healthy_backlog_windows = lane.consecutive_healthy_backlog_windows,
+                .detector_process_calls = process_calls,
+                .last_algorithm_processing_time =
+                    std::chrono::microseconds{lane.last_algorithm_processing_us.load()},
+                .average_algorithm_processing_time =
+                    std::chrono::microseconds{process_calls == 0U
+                                                  ? 0
+                                                  : total_processing /
+                                                        static_cast<std::int64_t>(process_calls)},
+                .maximum_algorithm_processing_time =
+                    std::chrono::microseconds{lane.maximum_algorithm_processing_us.load()},
+                .last_queue_wait_time = std::chrono::microseconds{lane.last_queue_wait_us.load()},
+                .average_queue_wait_time =
+                    std::chrono::microseconds{
+                        lane.processed_frames.load() == 0U
+                            ? 0
+                            : lane.total_queue_wait_us.load() /
+                                  static_cast<std::int64_t>(lane.processed_frames.load())},
+                .maximum_queue_wait_time =
+                    std::chrono::microseconds{lane.maximum_queue_wait_us.load()},
+                .last_end_to_end_time = std::chrono::microseconds{lane.last_end_to_end_us.load()},
+                .average_end_to_end_time =
+                    std::chrono::microseconds{
+                        lane.processed_frames.load() == 0U
+                            ? 0
+                            : lane.total_end_to_end_us.load() /
+                                  static_cast<std::int64_t>(lane.processed_frames.load())},
+                .maximum_end_to_end_time =
+                    std::chrono::microseconds{lane.maximum_end_to_end_us.load()},
+                .input_fps = lane.input_fps.load(),
+                .processed_fps = lane.processed_fps.load(),
+                .skipped_ratio = lane.skipped_ratio.load(),
+                .result_queue_rejected = lane.result_queue_rejected.load(),
+                .candidates_created = lane.candidates_created.load(),
+                .confirmed_events = lane.confirmed_events.load(),
+                .rejected_candidates = lane.rejected_candidates.load()}};
     }
 
     void persistence_completed(storage::EventPersistenceCompletion completion)
@@ -1126,7 +1268,7 @@ struct EventRuntimeImpl final
             std::optional<camera::MonotonicTime> earliest = lane->in_flight_time;
             if (!lane->frames.empty())
             {
-                const auto queued = lane->frames.front().received_monotonic_time();
+                const auto queued = lane->frames.front().frame.received_monotonic_time();
                 earliest = earliest ? std::min(*earliest, queued) : queued;
             }
             if (earliest)
@@ -1151,9 +1293,15 @@ struct EventRuntimeImpl final
             options.register_thread
                 ? options.register_thread(algorithm_worker_thread_name(lane.camera_id))
                 : nullptr;
+        auto diagnostic_window_started = std::chrono::steady_clock::now();
+        std::uint64_t diagnostic_calls = 0U;
+        std::uint64_t diagnostic_failures = 0U;
+        std::uint64_t diagnostic_candidates = 0U;
+        std::int64_t diagnostic_total_us = 0;
+        std::int64_t diagnostic_maximum_us = 0;
         while (true)
         {
-            std::optional<camera::FrameView> frame;
+            std::optional<QueuedAlgorithmFrame> queued_frame;
             bool manual = false;
             {
                 std::unique_lock lock{lane.mutex};
@@ -1161,11 +1309,11 @@ struct EventRuntimeImpl final
                                     [&] { return lane.stop_requested || !lane.frames.empty(); });
                 if (lane.frames.empty() && lane.stop_requested)
                     break;
-                frame.emplace(std::move(lane.frames.front()));
+                queued_frame.emplace(std::move(lane.frames.front()));
                 lane.frames.pop_front();
-                lane.in_flight_time = frame->received_monotonic_time();
+                lane.in_flight_time = queued_frame->frame.received_monotonic_time();
                 if (lane.manual_pending && lane.manual_target_sequence &&
-                    frame->sequence_number() == *lane.manual_target_sequence)
+                    queued_frame->frame.sequence_number() == *lane.manual_target_sequence)
                 {
                     lane.manual_pending = false;
                     lane.manual_target_sequence.reset();
@@ -1173,21 +1321,31 @@ struct EventRuntimeImpl final
                 }
             }
             notify_result_progress(state);
+            const auto processing_started = now();
+            record_latency(lane.last_queue_wait_us, lane.total_queue_wait_us,
+                           lane.maximum_queue_wait_us,
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               processing_started - queued_frame->enqueued_at));
+            auto& frame = queued_frame->frame;
 
             std::optional<algorithm::DetectionResult> completed_detection;
             std::optional<Error> detector_error;
             if (manual)
-                completed_detection = manual_detection(*frame);
+                completed_detection = manual_detection(frame);
             else if (state.configuration.algorithm.enabled && lane.detector &&
                      !lane.degraded.load(std::memory_order_acquire))
             {
-                const auto processing_started = std::chrono::steady_clock::now();
-                auto detection = lane.detector->process(*frame);
-                record_processing_time(lane,
-                                       std::chrono::duration_cast<std::chrono::microseconds>(
-                                           std::chrono::steady_clock::now() - processing_started));
+                const auto detector_started = now();
+                auto detection = lane.detector->process(frame);
+                const auto detector_elapsed =
+                    std::chrono::duration_cast<std::chrono::microseconds>(now() - detector_started);
+                record_processing_time(lane, detector_elapsed);
+                ++diagnostic_calls;
+                diagnostic_total_us += detector_elapsed.count();
+                diagnostic_maximum_us = std::max(diagnostic_maximum_us, detector_elapsed.count());
                 if (!detection)
                 {
+                    ++diagnostic_failures;
                     ++lane.detector_failures;
                     const auto failures = lane.consecutive_detector_failures.fetch_add(1U) + 1U;
                     detector_error = detection.error();
@@ -1200,25 +1358,51 @@ struct EventRuntimeImpl final
                 {
                     lane.consecutive_detector_failures.store(0U);
                     completed_detection = std::move(detection).value();
-                    if (options.diagnostics.enabled && options.diagnostics.enabled() &&
-                        options.diagnostics.record)
-                        options.diagnostics.record(
-                            "operation=algorithm.detect result=success cameraId=" + lane.camera_id +
-                            " sequenceNumber=" + std::to_string(frame->sequence_number()) +
-                            " durationUs=" +
-                            std::to_string(completed_detection->processing_time.count()) +
-                            " confidence=" + std::to_string(completed_detection->confidence) +
-                            " candidate=" + (completed_detection->triggered ? "true" : "false") +
-                            " businessCode=OK");
+                    if (completed_detection->triggered)
+                        ++diagnostic_candidates;
                 }
             }
 
+            const auto diagnostic_now = std::chrono::steady_clock::now();
+            if (diagnostic_now - diagnostic_window_started >= 5s)
+            {
+                if (options.diagnostics.enabled && options.diagnostics.enabled() &&
+                    options.diagnostics.record)
+                    options.diagnostics.record(
+                        "operation=algorithm.detect-summary cameraId=" + lane.camera_id +
+                        " windowMs=" +
+                        std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           diagnostic_now - diagnostic_window_started)
+                                           .count()) +
+                        " calls=" + std::to_string(diagnostic_calls) +
+                        " failures=" + std::to_string(diagnostic_failures) +
+                        " candidates=" + std::to_string(diagnostic_candidates) + " averageUs=" +
+                        std::to_string(diagnostic_calls == 0U
+                                           ? 0
+                                           : diagnostic_total_us /
+                                                 static_cast<std::int64_t>(diagnostic_calls)) +
+                        " maximumUs=" + std::to_string(diagnostic_maximum_us));
+                diagnostic_window_started = diagnostic_now;
+                diagnostic_calls = 0U;
+                diagnostic_failures = 0U;
+                diagnostic_candidates = 0U;
+                diagnostic_total_us = 0;
+                diagnostic_maximum_us = 0;
+            }
+
             auto delivery_errors = enqueue_result(
-                state, lane, {.frame = *frame, .detection = std::move(completed_detection)});
+                state, lane, {.frame = frame, .detection = std::move(completed_detection)});
+            const auto completed_at = now();
+            if (completed_at >= frame.received_monotonic_time())
+                record_latency(lane.last_end_to_end_us, lane.total_end_to_end_us,
+                               lane.maximum_end_to_end_us,
+                               std::chrono::duration_cast<std::chrono::microseconds>(
+                                   completed_at - frame.received_monotonic_time()));
             {
                 std::scoped_lock lock{lane.mutex};
                 lane.in_flight_time.reset();
                 ++lane.processed_frames;
+                ++lane.window_processed;
             }
             notify_result_progress(state);
             if (detector_error)
@@ -1403,7 +1587,10 @@ Result<std::shared_ptr<EventRuntime>> EventRuntime::create(EventRuntimeOptions o
         options.result_queue_capacity > algorithm_result_queue_default_capacity ||
         options.persistence_capacity == 0U || options.persistence_capacity > 64U ||
         options.consecutive_failure_limit == 0U || options.consecutive_failure_limit > 1000U ||
-        options.consecutive_backlog_limit == 0U || options.consecutive_backlog_limit > 1000U)
+        options.consecutive_backlog_limit == 0U || options.consecutive_backlog_limit > 1000U ||
+        options.backlog_window.count() <= 0 || options.backlog_window > 60s ||
+        options.backlog_degrade_window_limit == 0U || options.backlog_degrade_window_limit > 60U ||
+        options.backlog_recovery_window_limit == 0U || options.backlog_recovery_window_limit > 60U)
         return Result<std::shared_ptr<EventRuntime>>::failure(runtime_error(
             "SYS_CONFIG_INVALID", Severity::error, "事件运行时配置无效", "event.runtime.create"));
     auto pipeline =
@@ -1506,10 +1693,13 @@ Result<void> EventRuntime::start()
 Result<void> EventRuntime::submit_frame(camera::FrameView frame)
 {
     bool backlog_started = false;
+    bool backlog_recovered = false;
     std::string source_id = frame.camera_id();
     std::optional<Error> degraded_error;
     std::optional<Error> backlog_error;
+    std::optional<AlgorithmBacklogStateChange> backlog_change;
     std::vector<Error> delivery_errors;
+    const auto submitted_at = impl_->now();
     std::unique_lock lock{impl_->mutex};
     if (!impl_->accepting)
     {
@@ -1529,6 +1719,9 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
         return Result<void>::failure(std::move(error));
     }
     std::unique_lock lane_lock{lane->mutex};
+    auto window_outcome = impl_->advance_backlog_windows(*lane, submitted_at);
+    backlog_recovered = window_outcome.recovered;
+    degraded_error = std::move(window_outcome.degraded_error);
     auto cached = lane->ring->push(frame);
     if (!cached)
     {
@@ -1541,16 +1734,17 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
         lane->manual_target_sequence = frame.sequence_number();
     bool enqueue = true;
     std::optional<camera::FrameView> skipped_frame;
+    ++lane->window_submitted;
     if (lane->frames.size() >= impl_->options.frame_queue_capacity)
     {
         const auto oldest =
-            std::ranges::find_if(lane->frames, [&](const camera::FrameView& pending) {
+            std::ranges::find_if(lane->frames, [&](const QueuedAlgorithmFrame& pending) {
                 return !lane->manual_target_sequence ||
-                       pending.sequence_number() != *lane->manual_target_sequence;
+                       pending.frame.sequence_number() != *lane->manual_target_sequence;
             });
         if (oldest != lane->frames.end())
         {
-            skipped_frame.emplace(std::move(*oldest));
+            skipped_frame.emplace(std::move(oldest->frame));
             lane->frames.erase(oldest);
         }
         else
@@ -1559,13 +1753,17 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
             skipped_frame = frame;
         }
         ++lane->skipped_frames;
-        const auto backlog = lane->consecutive_backlog_events.fetch_add(1U) + 1U;
-        backlog_started = backlog == 1U;
-        if (backlog >= impl_->options.consecutive_backlog_limit)
+        ++lane->window_skipped;
+        lane->consecutive_backlog_events.fetch_add(1U);
+        backlog_started = !lane->backlog_active;
+        lane->backlog_active = true;
+        if (lane->window_skipped >= impl_->options.consecutive_backlog_limit &&
+            impl_->options.backlog_degrade_window_limit == 1U)
+        {
+            lane->consecutive_bad_backlog_windows = 1U;
             degraded_error = impl_->enter_degraded(*lane, "sustained-queue-backlog");
+        }
     }
-    else
-        lane->consecutive_backlog_events.store(0U);
     lane->latest_submitted_sequence =
         std::max(lane->latest_submitted_sequence, frame.sequence_number());
     ++lane->submitted_frames;
@@ -1574,7 +1772,7 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
             *impl_->pipeline, *lane, {.frame = *skipped_frame, .detection = std::nullopt});
     if (enqueue)
     {
-        lane->frames.push_back(std::move(frame));
+        lane->frames.push_back({.frame = std::move(frame), .enqueued_at = submitted_at});
         lane->frame_high_watermark = std::max(lane->frame_high_watermark, lane->frames.size());
         impl_->notify_result_progress(*impl_->pipeline);
         lane->condition.notify_one();
@@ -1591,8 +1789,17 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
         error.details.push_back({"overflowAction", "drop-oldest"});
         backlog_error = std::move(error);
     }
+    if (backlog_started || backlog_recovered)
+        backlog_change =
+            AlgorithmBacklogStateChange{.camera_id = source_id,
+                                        .active = backlog_started,
+                                        .queue_depth = lane->frames.size(),
+                                        .queue_capacity = impl_->options.frame_queue_capacity,
+                                        .skipped_frames = lane->skipped_frames.load()};
     lane_lock.unlock();
     lock.unlock();
+    if (backlog_change)
+        impl_->notify_backlog(*backlog_change);
     if (backlog_error)
         impl_->report(*backlog_error);
     if (degraded_error)
@@ -1681,8 +1888,20 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
     }
 
     std::unique_ptr<EventPipelineState> previous;
+    std::vector<AlgorithmBacklogStateChange> removed_backlogs;
+    const auto backlog_window_start = impl_->now();
     {
         std::scoped_lock lock{impl_->mutex};
+        for (const auto& old_lane : impl_->pipeline->lanes)
+        {
+            std::scoped_lock old_lane_lock{old_lane->mutex};
+            if (old_lane->backlog_active && find_lane(*next, old_lane->camera_id) == nullptr)
+                removed_backlogs.push_back({.camera_id = old_lane->camera_id,
+                                            .active = false,
+                                            .queue_depth = 0U,
+                                            .queue_capacity = impl_->options.frame_queue_capacity,
+                                            .skipped_frames = old_lane->skipped_frames.load()});
+        }
         for (auto& lane : next->lanes)
         {
             const auto* old_lane = find_lane(*impl_->pipeline, lane->camera_id);
@@ -1696,6 +1915,9 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
                 lane->processed_frames.store(old_lane->processed_frames.load());
                 lane->skipped_frames.store(old_lane->skipped_frames.load());
                 lane->detector_failures.store(old_lane->detector_failures.load());
+                lane->consecutive_backlog_events.store(old_lane->consecutive_backlog_events.load());
+                lane->backlog_active = old_lane->backlog_active;
+                lane->backlog_window_start = backlog_window_start;
                 lane->detector_process_calls.store(old_lane->detector_process_calls.load());
                 lane->last_algorithm_processing_us.store(
                     old_lane->last_algorithm_processing_us.load());
@@ -1703,6 +1925,15 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
                     old_lane->total_algorithm_processing_us.load());
                 lane->maximum_algorithm_processing_us.store(
                     old_lane->maximum_algorithm_processing_us.load());
+                lane->last_queue_wait_us.store(old_lane->last_queue_wait_us.load());
+                lane->total_queue_wait_us.store(old_lane->total_queue_wait_us.load());
+                lane->maximum_queue_wait_us.store(old_lane->maximum_queue_wait_us.load());
+                lane->last_end_to_end_us.store(old_lane->last_end_to_end_us.load());
+                lane->total_end_to_end_us.store(old_lane->total_end_to_end_us.load());
+                lane->maximum_end_to_end_us.store(old_lane->maximum_end_to_end_us.load());
+                lane->input_fps.store(old_lane->input_fps.load());
+                lane->processed_fps.store(old_lane->processed_fps.load());
+                lane->skipped_ratio.store(old_lane->skipped_ratio.load());
                 lane->result_queue_rejected.store(old_lane->result_queue_rejected.load());
                 lane->candidates_created.store(old_lane->candidates_created.load());
                 lane->confirmed_events.store(old_lane->confirmed_events.load());
@@ -1716,6 +1947,8 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
         if (restart_workers)
             impl_->release_start_gate(*impl_->pipeline);
     }
+    for (const auto& change : removed_backlogs)
+        impl_->notify_backlog(change);
     return Result<void>::success();
 }
 
@@ -1864,8 +2097,18 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
     std::int64_t last_processing{};
     std::int64_t total_processing{};
     std::int64_t maximum_processing{};
+    std::int64_t last_queue_wait{};
+    std::int64_t total_queue_wait{};
+    std::int64_t maximum_queue_wait{};
+    std::int64_t last_end_to_end{};
+    std::int64_t total_end_to_end{};
+    std::int64_t maximum_end_to_end{};
+    double input_fps{};
+    double processed_fps{};
+    double skipped_fps{};
     std::uint64_t result_rejected{};
     std::size_t degraded_lanes{};
+    std::size_t backlog_active_lanes{};
     for (const auto& lane : impl_->pipeline->lanes)
     {
         std::scoped_lock lane_lock{lane->mutex};
@@ -1885,7 +2128,19 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
         total_processing += lane->total_algorithm_processing_us.load();
         maximum_processing =
             std::max(maximum_processing, lane->maximum_algorithm_processing_us.load());
+        last_queue_wait = std::max(last_queue_wait, lane->last_queue_wait_us.load());
+        total_queue_wait += lane->total_queue_wait_us.load();
+        maximum_queue_wait = std::max(maximum_queue_wait, lane->maximum_queue_wait_us.load());
+        last_end_to_end = std::max(last_end_to_end, lane->last_end_to_end_us.load());
+        total_end_to_end += lane->total_end_to_end_us.load();
+        maximum_end_to_end = std::max(maximum_end_to_end, lane->maximum_end_to_end_us.load());
+        const auto lane_input_fps = lane->input_fps.load();
+        input_fps += lane_input_fps;
+        processed_fps += lane->processed_fps.load();
+        skipped_fps += lane_input_fps * lane->skipped_ratio.load();
         result_rejected += lane->result_queue_rejected.load();
+        if (lane->backlog_active)
+            ++backlog_active_lanes;
         if (lane->degraded.load(std::memory_order_acquire))
             ++degraded_lanes;
     }
@@ -1931,6 +2186,7 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
             .detector_failures = detector_failures,
             .consecutive_detector_failures = consecutive_failures,
             .consecutive_backlog_events = consecutive_backlogs,
+            .backlog_active_lanes = backlog_active_lanes,
             .detector_process_calls = process_calls,
             .result_queue_rejected = result_rejected,
             .last_algorithm_processing_time = std::chrono::microseconds{last_processing},
@@ -1940,6 +2196,19 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
                                               : total_processing /
                                                     static_cast<std::int64_t>(process_calls)},
             .maximum_algorithm_processing_time = std::chrono::microseconds{maximum_processing},
+            .last_queue_wait_time = std::chrono::microseconds{last_queue_wait},
+            .average_queue_wait_time =
+                std::chrono::microseconds{
+                    processed == 0U ? 0 : total_queue_wait / static_cast<std::int64_t>(processed)},
+            .maximum_queue_wait_time = std::chrono::microseconds{maximum_queue_wait},
+            .last_end_to_end_time = std::chrono::microseconds{last_end_to_end},
+            .average_end_to_end_time =
+                std::chrono::microseconds{
+                    processed == 0U ? 0 : total_end_to_end / static_cast<std::int64_t>(processed)},
+            .maximum_end_to_end_time = std::chrono::microseconds{maximum_end_to_end},
+            .input_fps = input_fps,
+            .processed_fps = processed_fps,
+            .skipped_ratio = input_fps <= 0.0 ? 0.0 : skipped_fps / input_fps,
             .algorithm_state = state,
             .events_started = impl_->events_started.load(),
             .candidates_created = candidates.events_created,

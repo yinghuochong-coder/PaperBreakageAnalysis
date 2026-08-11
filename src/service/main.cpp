@@ -2052,8 +2052,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
          .error_observer =
              [weak_event_alarms, weak_event_logging](const paperbreak::Error& error) {
                  const bool algorithm_error = error.business_code.starts_with("ALGORITHM_");
-                 const bool algorithm_alarm = error.business_code == "ALGORITHM_QUEUE_BACKLOG" ||
-                                              error.business_code == "ALGORITHM_DEGRADED";
+                 const bool algorithm_alarm = error.business_code == "ALGORITHM_DEGRADED";
                  if (auto alarm_registry = weak_event_alarms.lock();
                      (!algorithm_error || algorithm_alarm) && alarm_registry)
                  {
@@ -2067,13 +2066,38 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                  }
                  if (auto log_runtime = weak_event_logging.lock())
                  {
+                     const auto level = error.severity == paperbreak::Severity::critical
+                                            ? paperbreak::logging::Level::critical
+                                        : error.severity == paperbreak::Severity::warning
+                                            ? paperbreak::logging::Level::warning
+                                            : paperbreak::logging::Level::error;
                      static_cast<void>(
                          log_runtime->log(algorithm_error ? paperbreak::logging::Category::algorithm
                                                           : paperbreak::logging::Category::event,
-                                          error.severity == paperbreak::Severity::critical
-                                              ? paperbreak::logging::Level::critical
-                                              : paperbreak::logging::Level::error,
-                                          error.business_code + ": " + error.message));
+                                          level, error.business_code + ": " + error.message));
+                 }
+             },
+         .backlog_state_observer =
+             [weak_event_alarms](const paperbreak::service::AlgorithmBacklogStateChange& change) {
+                 if (auto alarm_registry = weak_event_alarms.lock())
+                 {
+                     if (change.active)
+                     {
+                         static_cast<void>(alarm_registry->raise_alarm(
+                             {.code = "ALGORITHM_QUEUE_BACKLOG",
+                              .severity = paperbreak::Severity::warning,
+                              .source = change.camera_id,
+                              .message = "算法队列积压，已跳过最旧待检测帧",
+                              .details = {
+                                  {"queueDepth", std::to_string(change.queue_depth)},
+                                  {"queueCapacity", std::to_string(change.queue_capacity)},
+                                  {"skippedFrames", std::to_string(change.skipped_frames)}}}));
+                     }
+                     else
+                     {
+                         static_cast<void>(
+                             alarm_registry->clear("ALGORITHM_QUEUE_BACKLOG", change.camera_id));
+                     }
                  }
              },
          .lifecycle_observer =

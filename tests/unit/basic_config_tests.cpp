@@ -175,6 +175,56 @@ TEST(BasicConfig, AcceptsCompleteVersionTwoAtUnicodeAndSpacePath)
     EXPECT_EQ(result.value().config_revision, 1U);
 }
 
+TEST(BasicConfig, AllowsAlgorithmFullFrameAcrossDifferentCameraGeometries)
+{
+    const TemporaryDirectory directory;
+    auto contents = replace_once(
+        valid_config(), "\"cameras\": []",
+        R"("cameras": [{"id":"CAM01","enabled":true,"serialNumber":"MOCK-01","location":"入口","exposureUs":100.0,"gainDb":2.0,"frameRate":60.0,"roi":{"width":1624,"height":1240,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0},{"id":"CAM02","enabled":true,"serialNumber":"MOCK-02","location":"出口","exposureUs":100.0,"gainDb":2.0,"frameRate":60.0,"roi":{"width":800,"height":600,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}])");
+    contents =
+        replace_once(contents, R"("roi": { "width": 1, "height": 1, "offsetX": 0, "offsetY": 0 })",
+                     R"("roi": { "width": 0, "height": 0, "offsetX": 0, "offsetY": 0 })");
+
+    const auto parsed = paperbreak::config::parse_config(contents, directory.path());
+    ASSERT_TRUE(parsed) << parsed.error().message;
+    EXPECT_EQ(parsed.value().algorithm.roi.width, 0U);
+    EXPECT_EQ(parsed.value().algorithm.roi.height, 0U);
+    const auto serialized = paperbreak::config::serialize_config(parsed.value());
+    EXPECT_NE(serialized.find("\"width\": 0"), std::string::npos);
+}
+
+TEST(BasicConfig, RejectsMalformedOrOutOfCameraAlgorithmRoiAndKeepsCameraRoiNonzero)
+{
+    const TemporaryDirectory directory;
+    const auto with_camera = replace_once(
+        valid_config(), "\"cameras\": []",
+        R"("cameras": [{"id":"CAM01","enabled":true,"serialNumber":"MOCK-01","location":"入口","exposureUs":100.0,"gainDb":2.0,"frameRate":60.0,"roi":{"width":800,"height":600,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}])");
+    const auto algorithm_roi = R"("roi": { "width": 1, "height": 1, "offsetX": 0, "offsetY": 0 })";
+
+    const std::vector<std::string> invalid_algorithm_rois{
+        R"("roi": { "width": 0, "height": 1, "offsetX": 0, "offsetY": 0 })",
+        R"("roi": { "width": 0, "height": 0, "offsetX": 1, "offsetY": 0 })",
+        R"("roi": { "width": 801, "height": 600, "offsetX": 0, "offsetY": 0 })",
+        R"("roi": { "width": 800, "height": 600, "offsetX": 1, "offsetY": 0 })",
+    };
+    for (const auto& roi : invalid_algorithm_rois)
+    {
+        const auto parsed = paperbreak::config::parse_config(
+            replace_once(with_camera, algorithm_roi, roi), directory.path());
+        EXPECT_FALSE(parsed);
+        if (!parsed)
+            EXPECT_EQ(parsed.error().business_code, "SYS_CONFIG_INVALID");
+    }
+
+    const auto zero_camera =
+        replace_once(with_camera, R"("roi":{"width":800,"height":600,"offsetX":0,"offsetY":0})",
+                     R"("roi":{"width":0,"height":0,"offsetX":0,"offsetY":0})");
+    const auto parsed_camera = paperbreak::config::parse_config(zero_camera, directory.path());
+    EXPECT_FALSE(parsed_camera);
+    if (!parsed_camera)
+        EXPECT_EQ(parsed_camera.error().business_code, "SYS_CONFIG_INVALID");
+}
+
 TEST(BasicConfig, DefaultsLegacyCameraMirroringOffAndSerializesExplicitValues)
 {
     const TemporaryDirectory directory;

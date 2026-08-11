@@ -16,10 +16,10 @@
     "modelReference": "",
     "modelVersion": "",
     "roi": {
-      "height": 1240,
+      "height": 0,
       "offsetX": 0,
       "offsetY": 0,
-      "width": 1624
+      "width": 0
     },
     "type": "classical-vision"
   },
@@ -76,10 +76,10 @@
       "reverseX": false,
       "reverseY": false,
       "roi": {
-        "height": 600,
+        "height": 1240,
         "offsetX": 0,
         "offsetY": 0,
-        "width": 800
+        "width": 1624
       },
       "serialNumber": "DB2180723",
       "triggerDelayUs": 0,
@@ -87,7 +87,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 60,
+  "configRevision": 61,
   "configSchemaVersion": 3,
   "event": {
     "generatePreviewVideo": true,
@@ -109,13 +109,13 @@
   },
   "logging": {
     "directory": "data/logs",
-    "level": "debug",
+    "level": "info",
     "maximumFileSizeMiB": 10,
     "maximumFilesPerDay": 5,
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-11T02:19:10.643Z",
+  "modifiedAt": "2026-08-11T05:08:05.960Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",
@@ -125,7 +125,7 @@
   },
   "preview": {
     "enabled": true,
-    "fps": 3.0,
+    "fps": 2.0,
     "jpegQuality": 80,
     "maxHeight": 720,
     "maxWidth": 1280

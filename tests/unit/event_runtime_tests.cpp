@@ -588,7 +588,7 @@ TEST(EventRuntimeNvme, FailedEventPersistenceKeepsLeaseProtected)
         const auto event_snapshot = runtime.value()->snapshot();
         const auto nvme_snapshot = nvme.value()->snapshot();
         if (event_snapshot.event_failures > 0U && nvme_snapshot.active_event_leases == 1U &&
-            nvme_snapshot.protected_blocks > 0U)
+            nvme_snapshot.protected_blocks > 0U && errors.load() > 0U)
         {
             failed_and_protected = true;
             break;
@@ -991,6 +991,7 @@ TEST(EventRuntimeLanes, BacklogAndDegradationArePrivateToTheSourceLane)
          .database = shared_database,
          .frame_queue_capacity = 1U,
          .consecutive_backlog_limit = 2U,
+         .backlog_degrade_window_limit = 1U,
          .detector_registry_configurer = controlled_detector_registration(behavior)});
     ASSERT_TRUE(runtime);
     ASSERT_TRUE(runtime.value()->start());
@@ -1020,6 +1021,199 @@ TEST(EventRuntimeLanes, BacklogAndDegradationArePrivateToTheSourceLane)
     EXPECT_EQ(cam02.value().metrics.consecutive_backlog_events, 0U);
     EXPECT_EQ(runtime.value()->snapshot().algorithm_state,
               AlgorithmRuntimeState::partially_degraded);
+
+    {
+        std::scoped_lock lock{behavior->mutex};
+        behavior->release_cam01 = true;
+    }
+    behavior->condition.notify_all();
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeLanes, BacklogActivatesOnceAndRecoversAfterHealthyWindows)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto behavior = std::make_shared<ControlledDetectorBehavior>();
+    behavior->hold_cam01 = true;
+    std::atomic_int64_t elapsed_ms{};
+    std::mutex observer_mutex;
+    std::vector<AlgorithmBacklogStateChange> changes;
+    std::vector<Error> errors;
+    auto runtime = EventRuntime::create(
+        {.configuration = four_camera_runtime_config(),
+         .event_root = event_root,
+         .database = shared_database,
+         .frame_queue_capacity = 1U,
+         .consecutive_backlog_limit = 8U,
+         .backlog_window = 1s,
+         .detector_registry_configurer = controlled_detector_registration(behavior),
+         .error_observer =
+             [&](const Error& error) {
+                 std::scoped_lock lock{observer_mutex};
+                 errors.push_back(error);
+             },
+         .backlog_state_observer =
+             [&](const AlgorithmBacklogStateChange& change) {
+                 std::scoped_lock lock{observer_mutex};
+                 changes.push_back(change);
+             },
+         .monotonic_now =
+             [&] {
+                 return std::chrono::steady_clock::time_point{
+                     std::chrono::milliseconds{elapsed_ms.load()}};
+             }});
+    ASSERT_TRUE(runtime);
+    ASSERT_TRUE(runtime.value()->start());
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 0ms, "CAM01")));
+    ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{behavior->mutex};
+        return behavior->active_calls == 1U;
+    }));
+    for (std::uint64_t sequence = 2U; sequence <= 4U; ++sequence)
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(sequence, std::chrono::milliseconds{sequence - 1U}, "CAM01")));
+    {
+        std::scoped_lock lock{observer_mutex};
+        ASSERT_EQ(changes.size(), 1U);
+        EXPECT_TRUE(changes.front().active);
+        EXPECT_EQ(std::ranges::count_if(errors,
+                                        [](const Error& error) {
+                                            return error.business_code == "ALGORITHM_QUEUE_BACKLOG";
+                                        }),
+                  1);
+    }
+
+    elapsed_ms.store(250);
+    {
+        std::scoped_lock lock{behavior->mutex};
+        behavior->release_cam01 = true;
+    }
+    behavior->condition.notify_all();
+    ASSERT_TRUE(wait_until([&] {
+        const auto lane = runtime.value()->algorithm_snapshot("CAM01");
+        return lane && lane.value().metrics.processed_frames == 2U;
+    }));
+    const auto latency = runtime.value()->algorithm_snapshot("CAM01");
+    ASSERT_TRUE(latency);
+    EXPECT_EQ(latency.value().metrics.last_queue_wait_time, 250ms);
+    EXPECT_EQ(latency.value().metrics.average_queue_wait_time, 125ms);
+    EXPECT_EQ(latency.value().metrics.maximum_queue_wait_time, 250ms);
+    EXPECT_EQ(latency.value().metrics.last_end_to_end_time, 247ms);
+    EXPECT_EQ(latency.value().metrics.average_end_to_end_time, std::chrono::microseconds{248500});
+    EXPECT_EQ(latency.value().metrics.maximum_end_to_end_time, 250ms);
+    for (std::uint64_t window = 1U; window <= 6U; ++window)
+    {
+        elapsed_ms.store(static_cast<std::int64_t>(window * 1000U));
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(4U + window, std::chrono::milliseconds{(4U + window) * 100U}, "CAM01")));
+        ASSERT_TRUE(wait_until([&] {
+            const auto lane = runtime.value()->algorithm_snapshot("CAM01");
+            return lane && lane.value().metrics.processed_frames == 2U + window;
+        }));
+    }
+    const auto recovered = runtime.value()->algorithm_snapshot("CAM01");
+    ASSERT_TRUE(recovered);
+    EXPECT_FALSE(recovered.value().metrics.backlog_active);
+    EXPECT_EQ(recovered.value().metrics.consecutive_backlog_events, 0U);
+    EXPECT_DOUBLE_EQ(recovered.value().metrics.input_fps, 1.0);
+    EXPECT_DOUBLE_EQ(recovered.value().metrics.processed_fps, 1.0);
+    EXPECT_DOUBLE_EQ(recovered.value().metrics.skipped_ratio, 0.0);
+    {
+        std::scoped_lock lock{observer_mutex};
+        ASSERT_EQ(changes.size(), 2U);
+        EXPECT_FALSE(changes.back().active);
+        EXPECT_EQ(changes.back().camera_id, "CAM01");
+    }
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeLanes, FiveBadBacklogWindowsDegradeOnlyTheOverloadedCamera)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto behavior = std::make_shared<ControlledDetectorBehavior>();
+    behavior->hold_cam01 = true;
+    std::atomic_int64_t elapsed_ms{};
+    std::atomic_uint64_t backlog_warnings{};
+    std::atomic_uint64_t degraded_errors{};
+    std::atomic_uint64_t backlog_activations{};
+    auto runtime = EventRuntime::create(
+        {.configuration = four_camera_runtime_config(),
+         .event_root = event_root,
+         .database = shared_database,
+         .frame_queue_capacity = 1U,
+         .consecutive_backlog_limit = 8U,
+         .backlog_window = 1s,
+         .backlog_degrade_window_limit = 5U,
+         .detector_registry_configurer = controlled_detector_registration(behavior),
+         .error_observer =
+             [&](const Error& error) {
+                 if (error.business_code == "ALGORITHM_QUEUE_BACKLOG")
+                     ++backlog_warnings;
+                 if (error.business_code == "ALGORITHM_DEGRADED")
+                     ++degraded_errors;
+             },
+         .backlog_state_observer =
+             [&](const AlgorithmBacklogStateChange& change) {
+                 if (change.active)
+                     ++backlog_activations;
+             },
+         .monotonic_now =
+             [&] {
+                 return std::chrono::steady_clock::time_point{
+                     std::chrono::milliseconds{elapsed_ms.load()}};
+             }});
+    ASSERT_TRUE(runtime);
+    ASSERT_TRUE(runtime.value()->start());
+    std::uint64_t sequence = 1U;
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(sequence++, 100ms, "CAM01")));
+    ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{behavior->mutex};
+        return behavior->active_calls == 1U;
+    }));
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(sequence++, 200ms, "CAM01")));
+    for (std::uint64_t window = 0U; window < 5U; ++window)
+    {
+        const std::uint64_t additional_drops = window == 0U ? 8U : 7U;
+        for (std::uint64_t drop = 0U; drop < additional_drops; ++drop)
+            ASSERT_TRUE(runtime.value()->submit_frame(
+                frame(sequence++, std::chrono::milliseconds{sequence * 100U}, "CAM01")));
+        elapsed_ms.store(static_cast<std::int64_t>((window + 1U) * 1000U));
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(sequence++, std::chrono::milliseconds{sequence * 100U}, "CAM01")));
+    }
+    const auto cam01 = runtime.value()->algorithm_snapshot("CAM01");
+    ASSERT_TRUE(cam01);
+    EXPECT_EQ(cam01.value().state, AlgorithmRuntimeState::manual_trigger_only);
+    EXPECT_EQ(cam01.value().metrics.consecutive_bad_backlog_windows, 5U);
+    EXPECT_EQ(backlog_warnings.load(), 1U);
+    EXPECT_EQ(backlog_activations.load(), 1U);
+    EXPECT_EQ(degraded_errors.load(), 1U);
+
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms, "CAM02")));
+    ASSERT_TRUE(wait_until([&] {
+        const auto lane = runtime.value()->algorithm_snapshot("CAM02");
+        return lane && lane.value().metrics.processed_frames == 1U;
+    }));
+    const auto cam02 = runtime.value()->algorithm_snapshot("CAM02");
+    ASSERT_TRUE(cam02);
+    EXPECT_EQ(cam02.value().state, AlgorithmRuntimeState::active);
+    EXPECT_EQ(cam02.value().metrics.skipped_frames, 0U);
 
     {
         std::scoped_lock lock{behavior->mutex};
@@ -1346,6 +1540,11 @@ TEST(EventRuntimeLanes, PublishesAggregateAndPerCameraMonitoringMetrics)
         names.insert(point.name);
     EXPECT_TRUE(names.contains("algorithm.state"));
     EXPECT_TRUE(names.contains("algorithm.result_queue.capacity"));
+    EXPECT_TRUE(names.contains("algorithm.queue_wait.average_ms"));
+    EXPECT_TRUE(names.contains("algorithm.end_to_end.maximum_ms"));
+    EXPECT_TRUE(names.contains("algorithm.input_fps"));
+    EXPECT_TRUE(names.contains("algorithm.processed_fps"));
+    EXPECT_TRUE(names.contains("algorithm.skipped_ratio"));
     for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
     {
         const std::string prefix = "algorithm." + std::string{camera_id};
@@ -1354,6 +1553,11 @@ TEST(EventRuntimeLanes, PublishesAggregateAndPerCameraMonitoringMetrics)
         EXPECT_TRUE(names.contains(prefix + ".skipped_frames_total"));
         EXPECT_TRUE(names.contains(prefix + ".failures_total"));
         EXPECT_TRUE(names.contains(prefix + ".frame_duration.average_ms"));
+        EXPECT_TRUE(names.contains(prefix + ".queue_wait.average_ms"));
+        EXPECT_TRUE(names.contains(prefix + ".end_to_end.maximum_ms"));
+        EXPECT_TRUE(names.contains(prefix + ".input_fps"));
+        EXPECT_TRUE(names.contains(prefix + ".processed_fps"));
+        EXPECT_TRUE(names.contains(prefix + ".skipped_ratio"));
     }
     runtime.value()->request_stop();
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));

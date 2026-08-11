@@ -433,6 +433,12 @@ TEST(PipelinePreviewRuntime, DoesNotEncodeWithoutSubscribersAndSamplesAtConfigur
     ASSERT_TRUE(wait_preview([&] { return runtime.snapshot().encoded == 1U; }));
     EXPECT_EQ(encoder_ptr->calls.load(), 1U);
     EXPECT_GE(runtime.snapshot().frames_skipped_by_rate, 1U);
+    EXPECT_EQ(runtime.snapshot().encoding_attempts, 1U);
+    EXPECT_GE(runtime.snapshot().last_encoding_time.count(), 0);
+    EXPECT_GE(runtime.snapshot().average_encoding_time.count(), 0);
+    EXPECT_GE(runtime.snapshot().maximum_encoding_time, runtime.snapshot().last_encoding_time);
+    ASSERT_EQ(runtime.snapshot().cameras.size(), 1U);
+    EXPECT_EQ(runtime.snapshot().cameras.front().encoding_attempts, 1U);
     runtime.request_stop();
     EXPECT_TRUE(runtime.join(std::chrono::steady_clock::now() + 1s));
 }
@@ -459,6 +465,7 @@ TEST(PipelinePreviewRuntime, ReplacesPendingFramesDeliversToFourSubscribersAndSu
         return deliveries.size() >= 4U;
     }));
     EXPECT_GT(runtime.snapshot().frames_replaced_before_encoding, 0U);
+    EXPECT_GT(runtime.snapshot().average_encoding_time, 20ms);
     {
         std::scoped_lock lock{deliveries_mutex};
         for (const auto& delivery : deliveries)

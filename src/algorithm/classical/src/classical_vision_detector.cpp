@@ -316,15 +316,43 @@ class ClassicalVisionDetector final : public IBreakDetector
                 image(cv::Rect{static_cast<int>(region.offset_x), static_cast<int>(region.offset_y),
                                static_cast<int>(region.width), static_cast<int>(region.height)});
 
+            const bool has_background = !background_.empty();
+            if (has_background && (background_.rows != roi.rows || background_.cols != roi.cols))
+                return Result<DetectionResult>::failure(
+                    process_error(lifecycle_config_.camera_id, "frame-geometry-changed"));
+            const auto pixel_threshold = static_cast<std::uint8_t>(std::clamp(
+                std::lround(config_.background_pixel_change_threshold * 255.0), 1L, 255L));
+            std::uint64_t grayscale_sum{};
+            std::uint64_t paper_pixels{};
+            std::uint64_t background_difference_sum{};
+            std::uint64_t changed_pixels{};
+            for (int row = 0; row < roi.rows; ++row)
+            {
+                const auto* source = roi.ptr<std::uint8_t>(row);
+                const auto* background =
+                    has_background ? background_.ptr<std::uint8_t>(row) : nullptr;
+                for (int column = 0; column < roi.cols; ++column)
+                {
+                    const auto value = source[column];
+                    grayscale_sum += value;
+                    paper_pixels += value >= config_.paper_grayscale_threshold ? 1U : 0U;
+                    if (background != nullptr)
+                    {
+                        const auto difference = static_cast<std::uint8_t>(std::abs(
+                            static_cast<int>(value) - static_cast<int>(background[column])));
+                        background_difference_sum += difference;
+                        changed_pixels += difference >= pixel_threshold ? 1U : 0U;
+                    }
+                }
+            }
+
             auto result = base_result(frame, region);
-            result.mean_grayscale = cv::mean(roi)[0] / 255.0;
+            result.mean_grayscale =
+                static_cast<double>(grayscale_sum) / (static_cast<double>(pixels) * 255.0);
             if (previous_mean_)
                 result.mean_grayscale_change = std::abs(result.mean_grayscale - *previous_mean_);
 
-            cv::compare(roi, cv::Scalar{static_cast<double>(config_.paper_grayscale_threshold)},
-                        binary_mask_, cv::CMP_GE);
-            result.paper_ratio =
-                static_cast<double>(cv::countNonZero(binary_mask_)) / static_cast<double>(pixels);
+            result.paper_ratio = static_cast<double>(paper_pixels) / static_cast<double>(pixels);
 
             double background_mean_change{};
             double background_changed_ratio{};
@@ -333,19 +361,12 @@ class ClassicalVisionDetector final : public IBreakDetector
             {
                 roi.copyTo(background_);
             }
-            else if (config_.enable_background_compare && !background_.empty())
+            else if (config_.enable_background_compare && has_background)
             {
-                if (background_.rows != roi.rows || background_.cols != roi.cols)
-                    return Result<DetectionResult>::failure(
-                        process_error(lifecycle_config_.camera_id, "frame-geometry-changed"));
-                cv::absdiff(roi, background_, difference_);
-                background_mean_change = cv::mean(difference_)[0] / 255.0;
-                const auto pixel_threshold = std::clamp(
-                    std::lround(config_.background_pixel_change_threshold * 255.0), 1L, 255L);
-                cv::compare(difference_, cv::Scalar{static_cast<double>(pixel_threshold)},
-                            binary_mask_, cv::CMP_GE);
-                background_changed_ratio = static_cast<double>(cv::countNonZero(binary_mask_)) /
-                                           static_cast<double>(pixels);
+                background_mean_change = static_cast<double>(background_difference_sum) /
+                                         (static_cast<double>(pixels) * 255.0);
+                background_changed_ratio =
+                    static_cast<double>(changed_pixels) / static_cast<double>(pixels);
             }
 
             result.change_score = std::max(result.mean_grayscale_change, background_mean_change);
@@ -451,8 +472,6 @@ class ClassicalVisionDetector final : public IBreakDetector
         last_sequence_number_.reset();
         last_frame_time_.reset();
         background_.release();
-        difference_.release();
-        binary_mask_.release();
     }
 
     DetectorConfig lifecycle_config_;
@@ -462,8 +481,6 @@ class ClassicalVisionDetector final : public IBreakDetector
     std::optional<std::uint64_t> last_sequence_number_;
     std::optional<camera::MonotonicTime> last_frame_time_;
     cv::Mat background_;
-    cv::Mat difference_;
-    cv::Mat binary_mask_;
 };
 
 } // namespace

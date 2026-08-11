@@ -1,0 +1,172 @@
+# M6-03/M6-04：算法积压与全帧性能跟进 ExecPlan
+
+## 元数据
+
+- 状态：implementation-complete（硬件性能验收待执行）
+- 负责人：Codex
+- 创建日期：2026-08-11
+- 最后更新：2026-08-11
+- 路线图条目：M6-03 候选确认、故障隔离与降级；M6-04 算法配置与可视化
+- 关联需求：算法处理与积压指标、固定容量 drop-oldest、预览不得阻塞检测、最多四路相机
+
+## 目的与可观察结果
+
+在不降低相机采集率、算法输入分辨率或检测阈值的前提下，减少传统视觉单帧内存扫描和短时资源竞争；算法配置可以对不同分辨率相机表达“各自全帧”；运行时能够区分瞬时积压与持续积压、自动清除恢复后的 Warning，并公开队列等待、端到端帧龄及吞吐指标。当前双相机 60 FPS 场景的硬件验收以 30 分钟无算法跳帧、CAM01 P99 不超过 13.3 ms 为目标，但只有实际执行硬件测试后才能标记通过。
+
+## 范围
+
+### 范围内
+
+- `classical-vision` 原型检测器的等价融合扫描与固定工作区复用。
+- 算法 ROI 的零尺寸全帧语义、配置校验、IPC/Console 编辑与文档。
+- 每相机 Lane 的队列等待、端到端帧龄、输入/处理速率、跳帧率指标。
+- 一秒固定窗口的积压去重、持续降级和健康恢复通知；服务报警注册表的自动清除。
+- 预览编码耗时指标和 Windows 预览线程较低优先级。
+- 当前部署配置的 `info` 日志等级与 2 FPS 预览。
+- 单元、模拟、构建、静态分析和格式验证。
+
+### 范围外
+
+- 算法抽样、降采样、缩小检测区域、阈值调整或正式算法验收。
+- 修改算法队列容量 8 或 `drop-oldest` 策略。
+- 冻结数据集、召回率/精确率验收、ETW 根因定论及未实际执行的实体相机测试。
+- 后续里程碑功能或无关重构。
+
+## 当前基线
+
+- `src/algorithm/classical/src/classical_vision_detector.cpp` 对全 ROI 依次执行 mean、compare/count、absdiff/mean/compare/count 和可选 addWeighted。
+- `src/service/core/src/event_runtime.cpp` 每相机一个容量 8 Lane；队列满时 drop-oldest，单次未满就清零连续积压，导致交替满载时重复 Warning 且难以触发持续降级。
+- `src/pipeline/src/preview.cpp` 单线程执行 OpenCV resize/JPEG，没有编码耗时快照或 Windows 优先级提示。
+- 算法插件已经接受 0×0 为全帧，但配置解析和 Console SpinBox 禁止零尺寸；全局 1624×1240 ROI 使 800×600 的 CAM02 处理失败。
+- 2026-08-11 日志证据：CAM01 60 秒处理 56.95 FPS，平均 9.43 ms、P99 21.30 ms、最大 90.96 ms，29 帧序列缺口和 14 次积压起始报警。
+- 任务开始时 `git status --short` 无输出，没有已知用户未提交修改。
+
+## 前置条件与假设
+
+- 以当前 Windows 目标和本机 CMake 预设为自动验证环境；Hikrobot SDK 和实体相机性能窗口不保证可用。
+- 检测保真优先：保持每个采集帧都提交算法，不主动采样。
+- 算法和预览数值优化必须保持现有结果语义；浮点聚合允许由求和顺序导致的机器精度误差，测试使用严格小容差。
+- M6-00 仍 blocked，传统视觉实现继续标记 prototype。
+
+## 设计说明
+
+- 为算法配置使用独立 ROI 解析器：0×0 且偏移为 0 表示按相机实际几何全帧；其他组合仍按 1～16384 的显式 ROI 校验。相机采集 ROI 继续调用原解析器，不接受零尺寸。显式算法 ROI 在配置整体依赖校验时必须适配每台启用相机的已配置采集 ROI 尺寸。
+- 传统视觉检测器逐行读取 Mono8 ROI，在一次扫描中累计像素和、纸张像素数、背景绝对差和变化像素数；只有已初始化背景且本帧最终不异常时执行一次原地 EMA 更新。首帧背景初始化仍复制一次 ROI，不在每帧申请大块内存。
+- Lane 在入队时保留提交单调时刻，worker 出队记录队列等待，完成时记录从帧接收到算法完成的端到端帧龄。累计计数派生自固定一秒窗口，不建立无界样本队列。
+- 每 Lane 使用固定五槽的一秒积压窗口。首次 drop 激活 Warning；某一秒至少 8 次 drop 记为坏窗口，连续 5 个坏窗口进入 `manual-trigger-only`；连续 5 个无 drop 且采样时队列深度不超过容量 25% 的健康窗口发布恢复并清除 Warning。降级仍只由成功事务式重配置恢复。
+- 错误观察者之外增加窄的积压状态观察者，服务装配据其 active/recovered 变化调用报警 raise/clear，避免使用日志文本推断恢复。
+
+### 线程和队列
+
+| 通道 | 生产者 | 消费者 | 容量 | 满载策略 | 停止/排空行为 | 指标 |
+| --- | --- | --- | ---: | --- | --- | --- |
+| `algorithm.frames[i]` | 相机帧分发 | 每相机算法 worker | 8/相机 | drop-oldest，保留最新帧 | 停止新提交后限时排空 | 深度、高水位、提交、处理、跳帧、队列等待、帧龄、FPS、跳帧率、积压窗口 |
+| `algorithm.results` | 算法 worker | 事件线程 | 256 | 拒绝并降级来源 Lane | 算法生产端关闭后排空 | 既有指标不变 |
+| `preview.latest[i]` | 帧分发 | 预览 worker | 1/相机 | latest-wins | 停止时丢弃 | 增加编码 last/avg/max |
+
+### 持久化与恢复
+
+- 主配置 JSON 仍为 schema v3；零尺寸是现有 `algorithm.roi` 字段的向后兼容语义扩展，不迁移相机配置或历史配置。
+- 报警历史继续由现有有界 `AlarmRegistry` 管理；恢复仅把活动积压报警移入历史，不删除记录。
+
+### 错误和降级
+
+- 保留 `ALGORITHM_QUEUE_BACKLOG`、`ALGORITHM_DEGRADED`、`ALGORITHM_PROCESS_FAILED` 和 `ALGORITHM_PROCESS_TIMEOUT`。
+- `ALGORITHM_QUEUE_BACKLOG` 只在 inactive→active 时报告；active→recovered 通过观察者清除活动报警。
+- 持续积压只降级来源相机；采集、内存环、预览和人工触发继续可用。
+- 显式算法 ROI 不适配启用相机时返回 `SYS_CONFIG_INVALID` 并携带相机及 ROI 原因，不启动错误检测器。
+
+## 实施步骤
+
+- [x] 1. 分离算法 ROI 解析/依赖校验，增加全帧 Console 交互和配置测试。
+- [x] 2. 将传统视觉统计改为等价融合扫描，补齐全帧、stride、背景和阈值回归测试。
+- [x] 3. 扩展 Lane 指标与一秒固定窗口积压状态机，接入报警恢复并增加确定性时钟测试缝。
+- [x] 4. 扩展 IPC/Console 指标展示，增加预览编码耗时与 Windows 低优先级提示。
+- [x] 5. 将部署配置改为 info/2 FPS，更新配置、架构和计划证据。
+- [x] 6. 运行任务文件格式、Debug/Release 构建、两套 CTest、静态分析和差异检查；记录不能执行的硬件/ETW 项。
+
+## 验证计划
+
+### 自动化测试
+
+- 配置：算法 0×0 全帧合法；半零、非零偏移全帧、越过任一启用相机非法；相机 ROI 0×0 仍非法。
+- 算法：已知小图与参考实现的灰度、纸幅率、背景变化、区域变化、触发类型一致；覆盖 padded stride、全帧和显式 ROI。
+- 运行时：瞬时 drop 只报警一次并恢复；五个坏窗口降级；健康窗口清除 Warning；不同 Lane 隔离；等待/帧龄/FPS/跳帧率有界且一致。
+- 预览：成功/失败编码耗时和已有计数一致，停止路径不变。
+
+### 构建与测试命令
+
+```powershell
+cmake --preset local-windows-vs2026-debug
+cmake --build --preset local-windows-vs2026-debug
+ctest --preset local-windows-vs2026-debug
+cmake --preset local-windows-vs2026-release
+cmake --build --preset local-windows-vs2026-release
+ctest --preset local-windows-vs2026-release
+```
+
+另运行仓库已有格式检查、MSVC 静态分析目标和 `git diff --check`；只报告实际执行结果。
+
+### 人工或硬件验证
+
+- 环境：当前 i7-14700F 工控机、CAM01 1624×1240@60、CAM02 800×600@60、预览 2 FPS、Console 连接。
+- 步骤：运行 30 分钟，记录 per-Lane 输入/处理 FPS、P99、队列高水位、跳帧和报警；必要时采集 ETW CPU sampling/context switch/hard fault。
+- 预期：无算法跳帧和积压报警，CAM01 P99 ≤13.3 ms，高水位 ≤6，CAM02 不再 ROI 失败。
+- 证据保存位置：后续硬件验证报告；本次不可用时明确标记未执行。
+
+## 回滚与恢复
+
+- 代码按步骤形成可审查差异；若融合扫描数值回归，恢复该检测器实现而保留独立的 ROI 正确性修复。
+- schema 版本不变，旧的非零算法 ROI 配置继续有效；回滚程序仍能读取任务后配置，前提是部署未使用 0×0。若已使用，回滚前通过正常配置事务改回显式合法 ROI，不直接删除历史。
+- 报警恢复只改变活动状态，不删除历史数据，无持久化回滚。
+
+## 验收标准
+
+- [x] 全帧算法 ROI 对不同分辨率相机正确，采集 ROI 合同不变。
+- [x] 融合扫描回归测试通过且无每帧大块分配。
+- [x] 新指标经 IPC/Console 可见，积压 Warning 可去重和恢复，持续积压确定性降级。
+- [x] 预览编码耗时可观察且线程优先级不高于算法。
+- [x] 部署配置、相关文档和自动化测试同步。
+- [x] Debug/Release 构建及非硬件测试通过，所有限制如实记录。
+- [ ] 实体相机 30 分钟指标只有实际执行后才可勾选。
+
+## 进度记录
+
+- 2026-08-11：创建计划，状态 in-progress；完成只读日志与代码基线分析。
+- 2026-08-11：完成融合扫描、全帧 ROI、Lane 指标与积压状态机、预览调度与指标、IPC/Console、配置、文档及自动化测试。
+- 2026-08-11：Debug/Release 构建和各 30 项非硬件 CTest 通过；定向修改文件通过 MSVC 静态分析。硬件 30 分钟运行和 ETW 未执行。
+
+## 决策记录
+
+- DEC-001：保持算法队列容量 8 和 drop-oldest；扩容不能提升吞吐且增加旧帧延迟。
+- DEC-002：使用算法专用 0×0 全帧语义，不把零尺寸放宽到相机采集 ROI。
+- DEC-003：不通过采样或降分辨率换性能；先融合等价统计并隔离低优先级预览负载。
+- DEC-004：不调用进程全局 `cv::setNumThreads`，避免预览设置影响算法 Lane。
+- DEC-005：瞬时积压可恢复，持续五秒严重积压才永久降级，避免一次 OS 抖动关闭自动检测。
+
+## 意外发现
+
+- CAM02 已因全局 ROI 大于帧尺寸连续三次失败并降级，这与 CAM01 队列积压是两个独立故障。
+- 现有 `consecutive_backlog_events` 在任一未满提交时清零，交替 drop/处理会重复报警却无法累计为持续过载。
+- Release 全量测试首次暴露 NVMe 测试的既有观察者竞态：测试只等待内部失败计数，可能在观察者回调执行前结束；改为同时等待观察者错误计数后，Debug/Release 均稳定通过。
+- 全仓 `format-check` 被未修改的 `src/console/main.cpp` 既有格式差异阻断；本任务修改的 C++ 文件已逐一使用仓库配置的 clang-format 格式化。
+- 全量 MSVC 静态分析被未修改的 `src/storage/src/nvme_cache.cpp:73` 既有 C28020 阻断；本任务修改的算法、配置、预览、Console、`service_core` 和服务入口均完成编译分析，服务入口在关闭项目引用的定向命令中仅因缺少存储链接符号而链接失败。
+
+## 验证证据
+
+| 日期 | 命令/场景 | 结果 | 证据或限制 |
+| --- | --- | --- | --- |
+| 2026-08-11 | 只读分析服务日志 10:14:30～10:15:30 | CAM01 56.95 FPS，平均 9.43 ms，P99 21.30 ms，峰值 90.96 ms，跳过 29 帧 | 非受控现场日志，不替代性能验收 |
+| 2026-08-11 | `cmake --build --preset local-windows-vs2026-debug -- /m:4` | 通过 | Debug 全量构建成功 |
+| 2026-08-11 | `ctest --preset local-windows-vs2026-debug --output-on-failure` | 30/30 通过 | 全部非硬件测试 |
+| 2026-08-11 | `cmake --build --preset local-windows-vs2026-release -- /m:4` | 通过 | Release 全量构建成功 |
+| 2026-08-11 | `ctest --preset local-windows-vs2026-release --output-on-failure` | 30/30 通过 | 全部非硬件测试 |
+| 2026-08-11 | `PaperBreakEdgeService.exe --validate-config --config config/default-config.json` | 通过 | schema v3、revision 60，默认全帧算法 ROI 有效 |
+| 2026-08-11 | MSVC 静态分析预设全量构建 | 部分通过、全量被阻断 | 未修改的 `nvme_cache.cpp:73` 报 C28020；本任务修改目标及 `service_core` 定向分析通过 |
+| 2026-08-11 | 全仓 `format-check` | 被既有差异阻断 | 未修改的 `src/console/main.cpp` 不符合格式；本任务修改文件已单独格式化 |
+| 2026-08-11 | 修改 C++ 文件 `clang-format --dry-run --Werror`、`git diff --check` | 通过 | 新增 Markdown 另检查了行尾空白 |
+| 2026-08-11 | 双实体相机 60 FPS 连续运行 30 分钟及 ETW | 未执行 | 无可用的受控实体相机运行证据，不声称达到 P99、跳帧和高水位目标 |
+
+## 完成摘要
+
+软件实现与非硬件验证已完成。算法队列仍保持每 Lane 容量 8 和 drop-oldest；传统视觉统计改为保真融合扫描；0×0 算法 ROI 可按相机使用全帧；积压报警可去重、健康恢复，并在五个连续坏窗口后只降级来源 Lane；新增性能指标已贯通 IPC/Console，预览线程降为较低优先级且记录编码耗时。剩余工作是目标机双实体相机 30 分钟性能验收和必要的 ETW 根因采样；全仓格式和全量静态分析另受上述两个既有问题阻断。

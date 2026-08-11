@@ -36,6 +36,21 @@
         "offsetY": { "type": "integer", "minimum": 0, "maximum": 16383 }
       }
     },
+    "algorithmRoi": {
+      "anyOf": [
+        { "$ref": "#/$defs/roi" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["width", "height", "offsetX", "offsetY"],
+          "properties": {
+            "width": { "const": 0 },
+            "height": { "const": 0 },
+            "offsetX": { "const": 0 },
+            "offsetY": { "const": 0 }
+          }
+        }
+      ]
+    },
     "lineIo": {
       "type": "object", "additionalProperties": false,
       "required": ["alarmInputEnabled", "alarmActiveLevel", "strobeOutputEnabled", "strobeDurationUs", "strobePreDelayUs", "strobePostDelayUs"],
@@ -116,7 +131,7 @@
       "required": ["enabled", "type", "roi", "candidateThreshold", "confirmationThreshold", "consecutiveFrames", "cooldownMs", "modelReference", "modelVersion", "device", "debugOverlay"],
       "properties": {
         "enabled": { "type": "boolean" }, "type": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "roi": { "$ref": "#/$defs/roi" },
+        "roi": { "$ref": "#/$defs/algorithmRoi" },
         "candidateThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
         "confirmationThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
         "consecutiveFrames": { "type": "integer", "minimum": 1, "maximum": 1000 },

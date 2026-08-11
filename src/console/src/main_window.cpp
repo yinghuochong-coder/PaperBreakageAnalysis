@@ -874,12 +874,10 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             camera_line0_alarm_->setObjectName(QStringLiteral("camera-line0-alarm-status"));
             camera_line_input_actual_ =
                 make_child<QLabel>(line_input_panel, QStringLiteral("未连接/不可用"));
-            camera_line_input_actual_->setObjectName(
-                QStringLiteral("camera-line-input-actual"));
+            camera_line_input_actual_->setObjectName(QStringLiteral("camera-line-input-actual"));
             camera_line_input_actual_->setWordWrap(true);
             camera_line_input_actual_->setProperty("role", "muted");
-            line_input_form->addRow(QStringLiteral("报警输入启用"),
-                                    camera_alarm_input_enabled_);
+            line_input_form->addRow(QStringLiteral("报警输入启用"), camera_alarm_input_enabled_);
             line_input_form->addRow(QStringLiteral("报警有效电平"), camera_alarm_active_level_);
             line_input_form->addRow(QStringLiteral("原始电平"), camera_line0_raw_);
             line_input_form->addRow(QStringLiteral("断纸报警状态"), camera_line0_alarm_);
@@ -906,12 +904,10 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                 input->setRange(0, 60000000);
             camera_line_output_actual_ =
                 make_child<QLabel>(line_output_panel, QStringLiteral("未连接/不可用"));
-            camera_line_output_actual_->setObjectName(
-                QStringLiteral("camera-line-output-actual"));
+            camera_line_output_actual_->setObjectName(QStringLiteral("camera-line-output-actual"));
             camera_line_output_actual_->setWordWrap(true);
             camera_line_output_actual_->setProperty("role", "muted");
-            line_output_form->addRow(QStringLiteral("频闪输出启用"),
-                                     camera_strobe_output_enabled_);
+            line_output_form->addRow(QStringLiteral("频闪输出启用"), camera_strobe_output_enabled_);
             line_output_form->addRow(QStringLiteral("线路源"), camera_strobe_source_);
             line_output_form->addRow(QStringLiteral("持续时间 (us)"), camera_strobe_duration_);
             line_output_form->addRow(QStringLiteral("前置时间 (us)"), camera_strobe_pre_delay_);
@@ -1079,6 +1075,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             algorithm_type_->addItem(QStringLiteral("模拟检测器（原型）"), QStringLiteral("mock"));
             algorithm_type_->addItem(QStringLiteral("传统视觉（原型）"),
                                      QStringLiteral("classical-vision"));
+            algorithm_full_frame_ =
+                make_child<QCheckBox>(algorithm_editor_, QStringLiteral("按每台相机使用完整画面"));
             algorithm_roi_width_ = make_child<QSpinBox>(algorithm_editor_);
             algorithm_roi_height_ = make_child<QSpinBox>(algorithm_editor_);
             algorithm_roi_x_ = make_child<QSpinBox>(algorithm_editor_);
@@ -1113,6 +1111,7 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                 make_child<QCheckBox>(algorithm_editor_, QStringLiteral("启用调试可视化数据"));
             form->addRow(QStringLiteral("启用"), algorithm_enabled_);
             form->addRow(QStringLiteral("检测器类型"), algorithm_type_);
+            form->addRow(QStringLiteral("ROI 模式"), algorithm_full_frame_);
             form->addRow(QStringLiteral("ROI 宽"), algorithm_roi_width_);
             form->addRow(QStringLiteral("ROI 高"), algorithm_roi_height_);
             form->addRow(QStringLiteral("ROI X"), algorithm_roi_x_);
@@ -1126,6 +1125,13 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             form->addRow(QStringLiteral("设备"), algorithm_device_);
             form->addRow(QStringLiteral("调试"), algorithm_debug_overlay_);
             algorithm_editor_->setEnabled(false);
+            QObject::connect(algorithm_full_frame_, &QCheckBox::toggled, this,
+                             [this](const bool full_frame) {
+                                 algorithm_roi_width_->setEnabled(!full_frame);
+                                 algorithm_roi_height_->setEnabled(!full_frame);
+                                 algorithm_roi_x_->setEnabled(!full_frame);
+                                 algorithm_roi_y_->setEnabled(!full_frame);
+                             });
             content_layout->addWidget(algorithm_editor_);
 
             auto* actions = make_child<QWidget>(content);
@@ -1200,13 +1206,22 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             QObject::connect(algorithm_save_, &QPushButton::clicked, this, [this] {
                 if (!algorithm_actions_.update_configuration)
                     return;
+                const bool full_frame = algorithm_full_frame_->isChecked();
                 show_algorithm_result(algorithm_actions_.update_configuration(
                     {.enabled = algorithm_enabled_->isChecked(),
                      .type = algorithm_type_->currentData().toString().toStdString(),
-                     .roi = {.width = static_cast<std::uint32_t>(algorithm_roi_width_->value()),
-                             .height = static_cast<std::uint32_t>(algorithm_roi_height_->value()),
-                             .offset_x = static_cast<std::uint32_t>(algorithm_roi_x_->value()),
-                             .offset_y = static_cast<std::uint32_t>(algorithm_roi_y_->value())},
+                     .roi = {.width = full_frame ? 0U
+                                                 : static_cast<std::uint32_t>(
+                                                       algorithm_roi_width_->value()),
+                             .height = full_frame ? 0U
+                                                  : static_cast<std::uint32_t>(
+                                                        algorithm_roi_height_->value()),
+                             .offset_x =
+                                 full_frame ? 0U
+                                            : static_cast<std::uint32_t>(algorithm_roi_x_->value()),
+                             .offset_y = full_frame ? 0U
+                                                    : static_cast<std::uint32_t>(
+                                                          algorithm_roi_y_->value())},
                      .candidate_threshold = algorithm_candidate_threshold_->value(),
                      .confirmation_threshold = algorithm_confirmation_threshold_->value(),
                      .consecutive_frames =
@@ -2510,14 +2525,11 @@ void MainWindow::populate_camera_editor(const CameraParameterValue& value)
         if (actual_parameters.line_io_available)
         {
             const auto& actual = actual_parameters.line_io;
-            camera_line_input_actual_->setText(
-                QStringLiteral("启用=%1")
-                    .arg(actual.alarm_input_enabled ? QStringLiteral("是")
-                                                    : QStringLiteral("否")));
+            camera_line_input_actual_->setText(QStringLiteral("启用=%1").arg(
+                actual.alarm_input_enabled ? QStringLiteral("是") : QStringLiteral("否")));
             camera_line_output_actual_->setText(
                 QStringLiteral("启用=%1；持续/前置/后置=%2/%3/%4 us")
-                    .arg(actual.strobe_output_enabled ? QStringLiteral("是")
-                                                      : QStringLiteral("否"))
+                    .arg(actual.strobe_output_enabled ? QStringLiteral("是") : QStringLiteral("否"))
                     .arg(actual.strobe_duration_us)
                     .arg(actual.strobe_pre_delay_us)
                     .arg(actual.strobe_post_delay_us));
@@ -2921,8 +2933,10 @@ void MainWindow::apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapsho
             type = algorithm_type_->count() - 1;
         }
         algorithm_type_->setCurrentIndex(type);
-        algorithm_roi_width_->setValue(static_cast<int>(value.roi.width));
-        algorithm_roi_height_->setValue(static_cast<int>(value.roi.height));
+        const bool full_frame = value.roi.width == 0U && value.roi.height == 0U;
+        algorithm_full_frame_->setChecked(full_frame);
+        algorithm_roi_width_->setValue(static_cast<int>(std::max(1U, value.roi.width)));
+        algorithm_roi_height_->setValue(static_cast<int>(std::max(1U, value.roi.height)));
         algorithm_roi_x_->setValue(static_cast<int>(value.roi.offset_x));
         algorithm_roi_y_->setValue(static_cast<int>(value.roi.offset_y));
         algorithm_candidate_threshold_->setValue(value.candidate_threshold);
@@ -2996,6 +3010,11 @@ void MainWindow::apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapsho
                    QString::number(metrics.consecutive_detector_failures), QStringLiteral("次")},
         std::tuple{QStringLiteral("连续积压"), QString::number(metrics.consecutive_backlog_events),
                    QStringLiteral("次")},
+        std::tuple{QStringLiteral("积压活动"),
+                   metrics.backlog_active ? QStringLiteral("是") : QStringLiteral("否"),
+                   QStringLiteral("状态")},
+        std::tuple{QStringLiteral("连续坏窗口"),
+                   QString::number(metrics.consecutive_bad_backlog_windows), QStringLiteral("秒")},
         std::tuple{QStringLiteral("结果拒绝"), QString::number(metrics.result_queue_rejected),
                    QStringLiteral("次")},
         std::tuple{QStringLiteral("处理调用"), QString::number(metrics.process_calls),
@@ -3006,6 +3025,24 @@ void MainWindow::apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapsho
                    QString::number(metrics.average_processing_time_us), QStringLiteral("us")},
         std::tuple{QStringLiteral("最大处理耗时"),
                    QString::number(metrics.maximum_processing_time_us), QStringLiteral("us")},
+        std::tuple{QStringLiteral("最近队列等待"), QString::number(metrics.last_queue_wait_time_us),
+                   QStringLiteral("us")},
+        std::tuple{QStringLiteral("平均队列等待"),
+                   QString::number(metrics.average_queue_wait_time_us), QStringLiteral("us")},
+        std::tuple{QStringLiteral("最大队列等待"),
+                   QString::number(metrics.maximum_queue_wait_time_us), QStringLiteral("us")},
+        std::tuple{QStringLiteral("最近端到端帧龄"),
+                   QString::number(metrics.last_end_to_end_time_us), QStringLiteral("us")},
+        std::tuple{QStringLiteral("平均端到端帧龄"),
+                   QString::number(metrics.average_end_to_end_time_us), QStringLiteral("us")},
+        std::tuple{QStringLiteral("最大端到端帧龄"),
+                   QString::number(metrics.maximum_end_to_end_time_us), QStringLiteral("us")},
+        std::tuple{QStringLiteral("输入速率"), QString::number(metrics.input_fps, 'f', 2),
+                   QStringLiteral("FPS")},
+        std::tuple{QStringLiteral("处理速率"), QString::number(metrics.processed_fps, 'f', 2),
+                   QStringLiteral("FPS")},
+        std::tuple{QStringLiteral("窗口跳帧率"),
+                   QString::number(metrics.skipped_ratio * 100.0, 'f', 2), QStringLiteral("%")},
         std::tuple{QStringLiteral("候选"), QString::number(metrics.candidates_created),
                    QStringLiteral("个")},
         std::tuple{QStringLiteral("确认"), QString::number(metrics.confirmed_events),
@@ -3515,10 +3552,9 @@ bool MainWindow::camera_configuration_ready() const noexcept
     return camera_selector_ && camera_exposure_ && camera_gain_ && camera_fps_ &&
            camera_roi_width_ && camera_roi_height_ && camera_roi_x_ && camera_roi_y_ &&
            camera_reverse_x_ && camera_reverse_y_ && camera_packet_size_ && camera_packet_delay_ &&
-           camera_line_input_actual_ && camera_line_output_actual_ &&
-           discovered_devices_ && camera_bind_slot_ &&
-           camera_bind_location_ && camera_bind_button_ && camera_configuration_value_ &&
-           camera_operation_value_ &&
+           camera_line_input_actual_ && camera_line_output_actual_ && discovered_devices_ &&
+           camera_bind_slot_ && camera_bind_location_ && camera_bind_button_ &&
+           camera_configuration_value_ && camera_operation_value_ &&
            findChild<QWidget*>(QStringLiteral("camera-device-sidebar")) &&
            findChild<QWidget*>(QStringLiteral("camera-control-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-acquisition-panel")) &&
@@ -3572,13 +3608,13 @@ bool MainWindow::operations_pages_ready() const noexcept
 bool MainWindow::algorithm_page_ready() const noexcept
 {
     return algorithm_camera_selector_ && algorithm_editor_ && algorithm_enabled_ &&
-           algorithm_type_ && algorithm_roi_width_ && algorithm_roi_height_ && algorithm_roi_x_ &&
-           algorithm_roi_y_ && algorithm_candidate_threshold_ &&
-           algorithm_confirmation_threshold_ && algorithm_consecutive_frames_ &&
-           algorithm_cooldown_ms_ && algorithm_model_reference_ && algorithm_model_version_ &&
-           algorithm_device_ && algorithm_debug_overlay_ && algorithm_save_ && algorithm_test_ &&
-           algorithm_runtime_status_ && algorithm_metrics_ && algorithm_test_result_ &&
-           algorithm_test_preview_ && algorithm_debug_metrics_ &&
+           algorithm_type_ && algorithm_full_frame_ && algorithm_roi_width_ &&
+           algorithm_roi_height_ && algorithm_roi_x_ && algorithm_roi_y_ &&
+           algorithm_candidate_threshold_ && algorithm_confirmation_threshold_ &&
+           algorithm_consecutive_frames_ && algorithm_cooldown_ms_ && algorithm_model_reference_ &&
+           algorithm_model_version_ && algorithm_device_ && algorithm_debug_overlay_ &&
+           algorithm_save_ && algorithm_test_ && algorithm_runtime_status_ && algorithm_metrics_ &&
+           algorithm_test_result_ && algorithm_test_preview_ && algorithm_debug_metrics_ &&
            findChild<QLabel*>(QStringLiteral("algorithm-prototype-notice"));
 }
 

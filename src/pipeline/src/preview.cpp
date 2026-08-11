@@ -3,6 +3,8 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <Windows.h>
+
 #include <algorithm>
 #include <cmath>
 #include <condition_variable>
@@ -108,8 +110,12 @@ struct PreviewRuntime::CameraSlot final
     std::optional<camera::MonotonicTime> last_sample;
     std::uint64_t sampled{};
     std::uint64_t replaced_before_encoding{};
+    std::uint64_t encoding_attempts{};
     std::uint64_t encoded{};
     std::uint64_t deliveries{};
+    std::int64_t last_encoding_time_us{};
+    std::int64_t total_encoding_time_us{};
+    std::int64_t maximum_encoding_time_us{};
     std::optional<camera::WallClockTime> last_delivery_time;
 };
 
@@ -276,6 +282,17 @@ void PreviewRuntime::run(const std::stop_token token) noexcept
 {
     const auto thread_registration =
         options_.register_thread ? options_.register_thread("preview-encoder") : nullptr;
+    if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) == 0 &&
+        options_.diagnostics.enabled && options_.diagnostics.enabled() &&
+        options_.diagnostics.record)
+        options_.diagnostics.record(
+            "operation=preview.thread-priority result=failure target=below-normal");
+    auto diagnostic_window_started = std::chrono::steady_clock::now();
+    std::uint64_t diagnostic_attempts = 0U;
+    std::uint64_t diagnostic_failures = 0U;
+    std::int64_t diagnostic_total_us = 0;
+    std::int64_t diagnostic_maximum_us = 0;
+    std::string diagnostic_last_failure_code;
     while (!token.stop_requested())
     {
         {
@@ -303,18 +320,65 @@ void PreviewRuntime::run(const std::stop_token token) noexcept
             if (!pending)
                 continue;
             pending_slots_.fetch_sub(1U, std::memory_order_acq_rel);
+            const auto encoding_started = std::chrono::steady_clock::now();
             auto encoded = encoder_->encode(pending->frame, options_.encoding);
+            const auto encoding_elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - encoding_started);
+            encoding_attempts_.fetch_add(1U, std::memory_order_relaxed);
+            last_encoding_time_us_.store(encoding_elapsed.count(), std::memory_order_relaxed);
+            total_encoding_time_us_.fetch_add(encoding_elapsed.count(), std::memory_order_relaxed);
+            auto maximum = maximum_encoding_time_us_.load(std::memory_order_relaxed);
+            while (maximum < encoding_elapsed.count() &&
+                   !maximum_encoding_time_us_.compare_exchange_weak(
+                       maximum, encoding_elapsed.count(), std::memory_order_relaxed))
+            {
+            }
+            ++diagnostic_attempts;
+            diagnostic_total_us += encoding_elapsed.count();
+            diagnostic_maximum_us = std::max(diagnostic_maximum_us, encoding_elapsed.count());
+            {
+                std::scoped_lock lock{slot.mutex};
+                ++slot.encoding_attempts;
+                slot.last_encoding_time_us = encoding_elapsed.count();
+                slot.total_encoding_time_us += encoding_elapsed.count();
+                slot.maximum_encoding_time_us =
+                    std::max(slot.maximum_encoding_time_us, encoding_elapsed.count());
+            }
             if (!encoded)
             {
                 encoding_failures_.fetch_add(1U, std::memory_order_relaxed);
+                ++diagnostic_failures;
+                diagnostic_last_failure_code = encoded.error().business_code;
+            }
+            const auto diagnostic_now = std::chrono::steady_clock::now();
+            if (diagnostic_now - diagnostic_window_started >= std::chrono::seconds{5})
+            {
                 if (options_.diagnostics.enabled && options_.diagnostics.enabled() &&
                     options_.diagnostics.record)
                     options_.diagnostics.record(
-                        "operation=preview.encode result=failure cameraId=" + camera_id +
-                        " sequenceNumber=" + std::to_string(pending->frame.sequence_number()) +
-                        " businessCode=" + encoded.error().business_code);
-                continue;
+                        "operation=preview.encode-summary windowMs=" +
+                        std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           diagnostic_now - diagnostic_window_started)
+                                           .count()) +
+                        " attempts=" + std::to_string(diagnostic_attempts) +
+                        " failures=" + std::to_string(diagnostic_failures) + " averageUs=" +
+                        std::to_string(diagnostic_attempts == 0U
+                                           ? 0
+                                           : diagnostic_total_us /
+                                                 static_cast<std::int64_t>(diagnostic_attempts)) +
+                        " maximumUs=" + std::to_string(diagnostic_maximum_us) +
+                        " lastFailureCode=" +
+                        (diagnostic_last_failure_code.empty() ? "none"
+                                                              : diagnostic_last_failure_code));
+                diagnostic_window_started = diagnostic_now;
+                diagnostic_attempts = 0U;
+                diagnostic_failures = 0U;
+                diagnostic_total_us = 0;
+                diagnostic_maximum_us = 0;
+                diagnostic_last_failure_code.clear();
             }
+            if (!encoded)
+                continue;
             encoded_.fetch_add(1U, std::memory_order_relaxed);
             {
                 std::scoped_lock lock{slot.mutex};
@@ -327,14 +391,6 @@ void PreviewRuntime::run(const std::stop_token token) noexcept
                     if (selected.contains(camera_id))
                         subscribers.push_back(subscriber_id);
             }
-            if (options_.diagnostics.enabled && options_.diagnostics.enabled() &&
-                options_.diagnostics.record)
-                options_.diagnostics.record(
-                    "operation=preview.encode result=success cameraId=" + camera_id +
-                    " sequenceNumber=" + std::to_string(pending->frame.sequence_number()) +
-                    " sourceBytes=" + std::to_string(pending->frame.bytes().size()) +
-                    " jpegBytes=" + std::to_string(encoded.value().size()) +
-                    " subscriberCount=" + std::to_string(subscribers.size()));
             for (const auto subscriber_id : subscribers)
             {
                 try
@@ -385,13 +441,27 @@ PreviewRuntimeSnapshot PreviewRuntime::snapshot() const noexcept
     {
         CameraSlot& slot = *cameras_.at(camera_id);
         std::scoped_lock lock{slot.mutex};
-        camera_statistics.push_back({.camera_id = camera_id,
-                                     .sampled = slot.sampled,
-                                     .replaced_before_encoding = slot.replaced_before_encoding,
-                                     .encoded = slot.encoded,
-                                     .deliveries = slot.deliveries,
-                                     .last_delivery_time = slot.last_delivery_time});
+        const auto average_encoding_time =
+            slot.encoding_attempts == 0U
+                ? 0
+                : slot.total_encoding_time_us / static_cast<std::int64_t>(slot.encoding_attempts);
+        camera_statistics.push_back(
+            {.camera_id = camera_id,
+             .sampled = slot.sampled,
+             .replaced_before_encoding = slot.replaced_before_encoding,
+             .encoding_attempts = slot.encoding_attempts,
+             .encoded = slot.encoded,
+             .deliveries = slot.deliveries,
+             .last_encoding_time = std::chrono::microseconds{slot.last_encoding_time_us},
+             .average_encoding_time = std::chrono::microseconds{average_encoding_time},
+             .maximum_encoding_time = std::chrono::microseconds{slot.maximum_encoding_time_us},
+             .last_delivery_time = slot.last_delivery_time});
     }
+    const auto encoding_attempts = encoding_attempts_.load(std::memory_order_relaxed);
+    const auto average_encoding_time =
+        encoding_attempts == 0U ? 0
+                                : total_encoding_time_us_.load(std::memory_order_relaxed) /
+                                      static_cast<std::int64_t>(encoding_attempts);
     std::scoped_lock lock{lifecycle_mutex_};
     return {.started = started_ && !completed_,
             .subscriptions = subscriptions,
@@ -402,8 +472,14 @@ PreviewRuntimeSnapshot PreviewRuntime::snapshot() const noexcept
             .frames_skipped_by_rate = frames_skipped_by_rate_.load(std::memory_order_relaxed),
             .frames_replaced_before_encoding =
                 frames_replaced_before_encoding_.load(std::memory_order_relaxed),
+            .encoding_attempts = encoding_attempts,
             .encoded = encoded_.load(std::memory_order_relaxed),
             .encoding_failures = encoding_failures_.load(std::memory_order_relaxed),
+            .last_encoding_time =
+                std::chrono::microseconds{last_encoding_time_us_.load(std::memory_order_relaxed)},
+            .average_encoding_time = std::chrono::microseconds{average_encoding_time},
+            .maximum_encoding_time = std::chrono::microseconds{maximum_encoding_time_us_.load(
+                std::memory_order_relaxed)},
             .deliveries = deliveries_.load(std::memory_order_relaxed),
             .delivery_failures = delivery_failures_.load(std::memory_order_relaxed),
             .rejected_unknown_camera = rejected_unknown_camera_.load(std::memory_order_relaxed),

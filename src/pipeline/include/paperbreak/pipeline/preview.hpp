@@ -91,8 +91,12 @@ struct PreviewRuntimeSnapshot final
         std::string camera_id;
         std::uint64_t sampled{};
         std::uint64_t replaced_before_encoding{};
+        std::uint64_t encoding_attempts{};
         std::uint64_t encoded{};
         std::uint64_t deliveries{};
+        std::chrono::microseconds last_encoding_time{};
+        std::chrono::microseconds average_encoding_time{};
+        std::chrono::microseconds maximum_encoding_time{};
         std::optional<camera::WallClockTime> last_delivery_time;
     };
 
@@ -103,8 +107,12 @@ struct PreviewRuntimeSnapshot final
     std::uint64_t frames_skipped_without_subscribers{};
     std::uint64_t frames_skipped_by_rate{};
     std::uint64_t frames_replaced_before_encoding{};
+    std::uint64_t encoding_attempts{};
     std::uint64_t encoded{};
     std::uint64_t encoding_failures{};
+    std::chrono::microseconds last_encoding_time{};
+    std::chrono::microseconds average_encoding_time{};
+    std::chrono::microseconds maximum_encoding_time{};
     std::uint64_t deliveries{};
     std::uint64_t delivery_failures{};
     std::uint64_t rejected_unknown_camera{};
@@ -165,8 +173,12 @@ class PreviewRuntime final
     std::atomic<std::uint64_t> frames_skipped_without_subscribers_{};
     std::atomic<std::uint64_t> frames_skipped_by_rate_{};
     std::atomic<std::uint64_t> frames_replaced_before_encoding_{};
+    std::atomic<std::uint64_t> encoding_attempts_{};
     std::atomic<std::uint64_t> encoded_{};
     std::atomic<std::uint64_t> encoding_failures_{};
+    std::atomic_int64_t last_encoding_time_us_{};
+    std::atomic_int64_t total_encoding_time_us_{};
+    std::atomic_int64_t maximum_encoding_time_us_{};
     std::atomic<std::uint64_t> deliveries_{};
     std::atomic<std::uint64_t> delivery_failures_{};
     std::atomic<std::uint64_t> rejected_unknown_camera_{};

@@ -181,6 +181,47 @@ Result<RoiConfig> parse_roi(const Json& value, const std::string_view pointer)
                                        .offset_y = y.value()});
 }
 
+Result<RoiConfig> parse_algorithm_roi(const Json& value, const std::string_view pointer)
+{
+    if (auto fields = exact_fields(value, pointer, {"width", "height", "offsetX", "offsetY"});
+        !fields)
+    {
+        return Result<RoiConfig>::failure(fields.error());
+    }
+    auto width = unsigned_field<std::uint32_t>(value, "width", pointer, 0U, 16384U);
+    auto height = unsigned_field<std::uint32_t>(value, "height", pointer, 0U, 16384U);
+    auto x = unsigned_field<std::uint32_t>(value, "offsetX", pointer, 0U, 16383U);
+    auto y = unsigned_field<std::uint32_t>(value, "offsetY", pointer, 0U, 16383U);
+    if (!width)
+        return Result<RoiConfig>::failure(width.error());
+    if (!height)
+        return Result<RoiConfig>::failure(height.error());
+    if (!x)
+        return Result<RoiConfig>::failure(x.error());
+    if (!y)
+        return Result<RoiConfig>::failure(y.error());
+
+    const bool full_frame = width.value() == 0U && height.value() == 0U;
+    if ((width.value() == 0U) != (height.value() == 0U) ||
+        (full_frame && (x.value() != 0U || y.value() != 0U)))
+    {
+        return Result<RoiConfig>::failure(
+            invalid_config("算法全帧 ROI 必须同时使用零宽高和零偏移", "config.validateDependency",
+                           std::string{pointer}, "algorithm-full-frame-shape"));
+    }
+    if (!full_frame && (static_cast<std::uint64_t>(x.value()) + width.value() > 16384U ||
+                        static_cast<std::uint64_t>(y.value()) + height.value() > 16384U))
+    {
+        return Result<RoiConfig>::failure(invalid_config("算法 ROI 偏移与尺寸超过安全上限",
+                                                         "config.validateDependency",
+                                                         std::string{pointer}, "roi-extent"));
+    }
+    return Result<RoiConfig>::success({.width = width.value(),
+                                       .height = height.value(),
+                                       .offset_x = x.value(),
+                                       .offset_y = y.value()});
+}
+
 Result<std::string> validate_path(const Json& object, const std::string_view name,
                                   const std::string_view pointer,
                                   const std::filesystem::path& config_directory)
@@ -671,7 +712,7 @@ Result<EdgeConfig> parse_algorithm(const Json& root, EdgeConfig result)
         return Result<EdgeConfig>::failure(fields.error());
     auto algorithm_enabled = bool_field(algorithm, "enabled", "/algorithm");
     auto algorithm_type = string_field(algorithm, "type", "/algorithm", 64U);
-    auto algorithm_roi = parse_roi(algorithm.at("roi"), "/algorithm/roi");
+    auto algorithm_roi = parse_algorithm_roi(algorithm.at("roi"), "/algorithm/roi");
     auto candidate_threshold =
         finite_field(algorithm, "candidateThreshold", "/algorithm", 0.0, 1.0);
     auto confirmation_threshold =
@@ -721,6 +762,26 @@ Result<EdgeConfig> parse_algorithm(const Json& root, EdgeConfig result)
                         .model_version = std::move(model_version).value(),
                         .device = std::move(device).value(),
                         .debug_overlay = overlay.value()};
+
+    const bool full_frame = result.algorithm.roi.width == 0U;
+    if (!full_frame)
+    {
+        for (const auto& camera : result.cameras)
+        {
+            if (!camera.enabled)
+                continue;
+            const auto& roi = result.algorithm.roi;
+            const bool fits = roi.offset_x <= camera.roi.width &&
+                              roi.offset_y <= camera.roi.height &&
+                              roi.width <= camera.roi.width - roi.offset_x &&
+                              roi.height <= camera.roi.height - roi.offset_y;
+            if (!fits)
+                return Result<EdgeConfig>::failure(
+                    invalid_config("算法 ROI 超出启用相机 " + camera.id + " 的采集画面",
+                                   "config.validateDependency", "/algorithm/roi",
+                                   "roi-out-of-camera:" + camera.id));
+        }
+    }
 
     return Result<EdgeConfig>::success(std::move(result));
 }

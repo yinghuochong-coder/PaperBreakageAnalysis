@@ -161,6 +161,22 @@ TEST(AlgorithmClassicalVision, HonorsSubRoiAndPaddedStride)
     EXPECT_DOUBLE_EQ(result.value().paper_ratio, 1.0);
 }
 
+TEST(AlgorithmClassicalVision, FullFrameSentinelHonorsPaddedStride)
+{
+    DetectorPluginRegistry registry;
+    auto host = make_host(config(1U, {integer("roi_offset_x", 0), integer("roi_offset_y", 0),
+                                      integer("roi_width", 0), integer("roi_height", 0)}),
+                          registry);
+    const std::vector<std::uint8_t> pixels{0U, 255U, 77U, 77U, 255U, 255U, 77U, 77U};
+
+    auto result = host->process(make_frame(1U, 1ms, 2U, 2U, 4U, pixels));
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result.value().evaluated_region.width, 2U);
+    EXPECT_EQ(result.value().evaluated_region.height, 2U);
+    EXPECT_NEAR(result.value().mean_grayscale, 191.25 / 255.0, 1e-12);
+    EXPECT_DOUBLE_EQ(result.value().paper_ratio, 0.75);
+}
+
 TEST(AlgorithmClassicalVision, DetectsMissingPaperWithAreaAndConfidence)
 {
     DetectorPluginRegistry registry;
@@ -242,6 +258,30 @@ TEST(AlgorithmClassicalVision, DetectsLocalizedBackgroundChange)
     EXPECT_NEAR(result.value().change_score, 25.0 / 255.0, 1e-9);
     EXPECT_DOUBLE_EQ(result.value().area_ratio, 0.25);
     EXPECT_NEAR(result.value().confidence, 25.0 / 255.0, 1e-9);
+}
+
+TEST(AlgorithmClassicalVision, FusedStatisticsPreserveBackgroundLearningAndThresholdBoundary)
+{
+    DetectorPluginRegistry registry;
+    auto host = make_host(
+        config(1U, {boolean("enable_paper_ratio", false), boolean("enable_mean_change", false),
+                    real("maximum_background_change", 0.50),
+                    real("background_pixel_change_threshold", 10.0 / 255.0),
+                    real("background_learning_rate", 0.50)}),
+        registry);
+    ASSERT_TRUE(host->process(uniform_frame(1U, 1ms, 100U, 2U, 2U)));
+
+    auto learned = host->process(uniform_frame(2U, 2ms, 110U, 2U, 2U));
+    ASSERT_TRUE(learned);
+    EXPECT_FALSE(learned.value().anomalous);
+    EXPECT_NEAR(learned.value().change_score, 10.0 / 255.0, 1e-12);
+    EXPECT_DOUBLE_EQ(learned.value().area_ratio, 1.0);
+
+    auto updated = host->process(uniform_frame(3U, 3ms, 110U, 2U, 2U));
+    ASSERT_TRUE(updated);
+    EXPECT_FALSE(updated.value().anomalous);
+    EXPECT_NEAR(updated.value().change_score, 5.0 / 255.0, 1e-12);
+    EXPECT_DOUBLE_EQ(updated.value().area_ratio, 0.0);
 }
 
 TEST(AlgorithmClassicalVision, ResetAndHotUpdateRebuildTemporalState)

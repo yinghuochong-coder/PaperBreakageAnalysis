@@ -36,6 +36,15 @@ enum class AlgorithmRuntimeState
 
 [[nodiscard]] std::string_view to_string(AlgorithmRuntimeState state) noexcept;
 
+struct AlgorithmBacklogStateChange final
+{
+    std::string camera_id;
+    bool active{};
+    std::size_t queue_depth{};
+    std::size_t queue_capacity{};
+    std::uint64_t skipped_frames{};
+};
+
 struct EventRuntimeOptions final
 {
     config::EdgeConfig configuration;
@@ -48,9 +57,14 @@ struct EventRuntimeOptions final
     std::size_t result_queue_capacity{algorithm_result_queue_default_capacity};
     std::size_t persistence_capacity{8U};
     std::size_t consecutive_failure_limit{3U};
+    /// Drops required in one fixed window for that window to be unhealthy.
     std::size_t consecutive_backlog_limit{8U};
+    std::chrono::milliseconds backlog_window{1000};
+    std::size_t backlog_degrade_window_limit{5U};
+    std::size_t backlog_recovery_window_limit{5U};
     std::function<Result<void>(algorithm::DetectorPluginRegistry&)> detector_registry_configurer;
     std::function<void(const Error&)> error_observer;
+    std::function<void(const AlgorithmBacklogStateChange&)> backlog_state_observer;
     std::function<void(const storage::EventMetadataRecord&)> lifecycle_observer;
     std::function<void(const storage::EventMetadataRecord&)> committed_observer;
     ThreadRegistrationFactory register_thread;
@@ -58,6 +72,8 @@ struct EventRuntimeOptions final
     std::function<Result<void>(std::string_view)> thread_start_gate;
     /// Test seam used to hold the result consumer while exercising bounded overflow behavior.
     std::function<void()> result_consumer_start_gate;
+    /// Test seam for deterministic rate/backlog windows; production uses steady_clock::now().
+    std::function<std::chrono::steady_clock::time_point()> monotonic_now;
     DebugDiagnosticSink diagnostics;
 };
 
@@ -72,10 +88,22 @@ struct AlgorithmLaneMetrics final
     std::uint64_t detector_failures{};
     std::uint64_t consecutive_detector_failures{};
     std::uint64_t consecutive_backlog_events{};
+    bool backlog_active{};
+    std::uint64_t consecutive_bad_backlog_windows{};
+    std::uint64_t consecutive_healthy_backlog_windows{};
     std::uint64_t detector_process_calls{};
     std::chrono::microseconds last_algorithm_processing_time{};
     std::chrono::microseconds average_algorithm_processing_time{};
     std::chrono::microseconds maximum_algorithm_processing_time{};
+    std::chrono::microseconds last_queue_wait_time{};
+    std::chrono::microseconds average_queue_wait_time{};
+    std::chrono::microseconds maximum_queue_wait_time{};
+    std::chrono::microseconds last_end_to_end_time{};
+    std::chrono::microseconds average_end_to_end_time{};
+    std::chrono::microseconds maximum_end_to_end_time{};
+    double input_fps{};
+    double processed_fps{};
+    double skipped_ratio{};
     std::uint64_t result_queue_rejected{};
     std::uint64_t candidates_created{};
     std::uint64_t confirmed_events{};
@@ -107,11 +135,21 @@ struct EventRuntimeSnapshot final
     std::uint64_t detector_failures{};
     std::uint64_t consecutive_detector_failures{};
     std::uint64_t consecutive_backlog_events{};
+    std::size_t backlog_active_lanes{};
     std::uint64_t detector_process_calls{};
     std::uint64_t result_queue_rejected{};
     std::chrono::microseconds last_algorithm_processing_time{};
     std::chrono::microseconds average_algorithm_processing_time{};
     std::chrono::microseconds maximum_algorithm_processing_time{};
+    std::chrono::microseconds last_queue_wait_time{};
+    std::chrono::microseconds average_queue_wait_time{};
+    std::chrono::microseconds maximum_queue_wait_time{};
+    std::chrono::microseconds last_end_to_end_time{};
+    std::chrono::microseconds average_end_to_end_time{};
+    std::chrono::microseconds maximum_end_to_end_time{};
+    double input_fps{};
+    double processed_fps{};
+    double skipped_ratio{};
     AlgorithmRuntimeState algorithm_state{AlgorithmRuntimeState::disabled};
     std::uint64_t events_started{};
     std::uint64_t candidates_created{};

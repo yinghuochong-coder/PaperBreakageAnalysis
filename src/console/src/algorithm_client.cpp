@@ -102,11 +102,25 @@ AlgorithmRuntimeValue runtime_value(const Json& value)
                 metrics.value("consecutiveDetectorFailures", std::uint64_t{}),
             .consecutive_backlog_events =
                 metrics.value("consecutiveBacklogEvents", std::uint64_t{}),
+            .backlog_active = metrics.value("backlogActive", false),
+            .consecutive_bad_backlog_windows =
+                metrics.value("consecutiveBadBacklogWindows", std::uint64_t{}),
+            .consecutive_healthy_backlog_windows =
+                metrics.value("consecutiveHealthyBacklogWindows", std::uint64_t{}),
             .result_queue_rejected = metrics.value("resultQueueRejected", std::uint64_t{}),
             .process_calls = metrics.value("processCalls", std::uint64_t{}),
             .last_processing_time_us = metrics.value("lastProcessingTimeUs", std::int64_t{}),
             .average_processing_time_us = metrics.value("averageProcessingTimeUs", std::int64_t{}),
             .maximum_processing_time_us = metrics.value("maximumProcessingTimeUs", std::int64_t{}),
+            .last_queue_wait_time_us = metrics.value("lastQueueWaitTimeUs", std::int64_t{}),
+            .average_queue_wait_time_us = metrics.value("averageQueueWaitTimeUs", std::int64_t{}),
+            .maximum_queue_wait_time_us = metrics.value("maximumQueueWaitTimeUs", std::int64_t{}),
+            .last_end_to_end_time_us = metrics.value("lastEndToEndTimeUs", std::int64_t{}),
+            .average_end_to_end_time_us = metrics.value("averageEndToEndTimeUs", std::int64_t{}),
+            .maximum_end_to_end_time_us = metrics.value("maximumEndToEndTimeUs", std::int64_t{}),
+            .input_fps = metrics.value("inputFps", 0.0),
+            .processed_fps = metrics.value("processedFps", 0.0),
+            .skipped_ratio = metrics.value("skippedRatio", 0.0),
             .candidates_created = metrics.value("candidatesCreated", std::uint64_t{}),
             .confirmed_events = metrics.value("confirmedEvents", std::uint64_t{}),
             .rejected_candidates = metrics.value("rejectedCandidates", std::uint64_t{})}};
