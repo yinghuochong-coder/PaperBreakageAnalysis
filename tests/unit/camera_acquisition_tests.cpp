@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -13,6 +14,7 @@
 #include <mutex>
 #include <set>
 #include <stop_token>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -52,6 +54,11 @@ bool wait_until(const std::function<bool()>& predicate,
     return predicate();
 }
 
+bool has_text(const std::string_view text, const std::string_view expected) noexcept
+{
+    return text.find(expected) != std::string_view::npos;
+}
+
 enum class CaptureAction
 {
     success,
@@ -59,6 +66,10 @@ enum class CaptureAction
     permanent_error,
     slow_success,
     geometry_change,
+    natural_sentinel,
+    unwritten_sentinel,
+    partial_write,
+    all_zero,
 };
 
 class ScriptedCameraDevice final : public ICameraDevice
@@ -103,6 +114,11 @@ class ScriptedCameraDevice final : public ICameraDevice
                                                              std::chrono::milliseconds) override
     {
         const auto call = capture_calls_.fetch_add(1U);
+        if (std::ranges::all_of(destination.writable_bytes(),
+                                [](const std::byte value) { return value == std::byte{0xa5}; }))
+        {
+            sentinel_prefill_calls_.fetch_add(1U);
+        }
         CaptureAction action = CaptureAction::timeout;
         if (call < actions_.size())
         {
@@ -136,6 +152,41 @@ class ScriptedCameraDevice final : public ICameraDevice
             static_cast<void>(destination.set_size(6U));
             return Result<CapturedFrameMetadata>::success({.camera_frame_number = 43U,
                                                            .geometry = {3U, 2U, 3U},
+                                                           .pixel_format = PixelFormat::mono8});
+        }
+
+        if (action == CaptureAction::unwritten_sentinel)
+        {
+            static_cast<void>(destination.set_size(4U));
+            return Result<CapturedFrameMetadata>::success({.camera_frame_number = 42U + call,
+                                                           .geometry = {2U, 2U, 2U},
+                                                           .pixel_format = PixelFormat::mono8});
+        }
+        if (action == CaptureAction::natural_sentinel)
+        {
+            std::ranges::copy(
+                std::array{std::byte{0x11}, std::byte{0xa5}, std::byte{0x22}, std::byte{0x33}},
+                destination.writable_bytes().begin());
+            static_cast<void>(destination.set_size(4U));
+            return Result<CapturedFrameMetadata>::success({.camera_frame_number = 42U + call,
+                                                           .geometry = {2U, 2U, 2U},
+                                                           .pixel_format = PixelFormat::mono8});
+        }
+        if (action == CaptureAction::partial_write)
+        {
+            std::fill_n(destination.writable_bytes().begin(), 2U, std::byte{0x11});
+            static_cast<void>(destination.set_size(4U));
+            return Result<CapturedFrameMetadata>::success({.camera_frame_number = 42U + call,
+                                                           .geometry = {2U, 2U, 2U},
+                                                           .pixel_format = PixelFormat::mono8});
+        }
+        if (action == CaptureAction::all_zero)
+        {
+            std::fill(destination.writable_bytes().begin(), destination.writable_bytes().end(),
+                      std::byte{0});
+            static_cast<void>(destination.set_size(4U));
+            return Result<CapturedFrameMetadata>::success({.camera_frame_number = 42U + call,
+                                                           .geometry = {2U, 2U, 2U},
                                                            .pixel_format = PixelFormat::mono8});
         }
 
@@ -174,6 +225,10 @@ class ScriptedCameraDevice final : public ICameraDevice
     {
         return trigger_calls_.load();
     }
+    [[nodiscard]] std::size_t sentinel_prefill_calls() const noexcept
+    {
+        return sentinel_prefill_calls_.load();
+    }
 
   private:
     CameraDeviceDescriptor descriptor_{"Mock", "MOCK-0001", "192.0.2.1", "mock0"};
@@ -181,6 +236,7 @@ class ScriptedCameraDevice final : public ICameraDevice
     bool repeat_last_{};
     std::atomic<std::size_t> capture_calls_{};
     std::atomic<std::size_t> trigger_calls_{};
+    std::atomic<std::size_t> sentinel_prefill_calls_{};
 };
 } // namespace
 
@@ -384,6 +440,129 @@ TEST(CameraAcquisitionWorker, ContinuesAfterTimeoutAndPublishesCompleteMetadata)
     EXPECT_EQ(dequeued.packet->buffer->size(), 4U);
     EXPECT_NE(dequeued.packet->received_monotonic_time, MonotonicTime{});
     EXPECT_NE(dequeued.packet->received_wall_clock_time, WallClockTime{});
+}
+
+TEST(CameraAcquisitionWorker, ClassifiesStartupBuffersAndSuppressesOnlyUnwrittenPayload)
+{
+    ScriptedCameraDevice device{{CaptureAction::success, CaptureAction::natural_sentinel,
+                                 CaptureAction::unwritten_sentinel, CaptureAction::partial_write,
+                                 CaptureAction::all_zero, CaptureAction::permanent_error}};
+    FrameBufferPool pool{6U, 4U};
+    AcquisitionQueue queue{4U};
+    std::vector<std::string> records;
+    AcquisitionWorker worker{
+        device,
+        pool,
+        queue,
+        {.camera_id = "CAM01",
+         .receive_timeout = 10ms,
+         .diagnostics = {.enabled = [] { return true; },
+                         .record =
+                             [&](std::string record) {
+                                 if (has_text(record, "operation=frame.startupBufferProbe"))
+                                     records.push_back(std::move(record));
+                             }}}};
+
+    ASSERT_TRUE(worker.start());
+    ASSERT_TRUE(worker.join(std::chrono::steady_clock::now() + 1s));
+
+    ASSERT_EQ(records.size(), 5U);
+    EXPECT_TRUE(has_text(records[0], "probeAttempt=1 classification=normal"));
+    EXPECT_TRUE(has_text(records[0], "zeroBytes=0 sentinelBytes=0"));
+    EXPECT_TRUE(has_text(records[0], "minimumByte=90 maximumByte=90 payloadBytes=4"));
+    EXPECT_TRUE(has_text(records[1], "probeAttempt=2 classification=normal"));
+    EXPECT_TRUE(has_text(records[1], "zeroBytes=0 sentinelBytes=1"));
+    EXPECT_TRUE(has_text(records[1], "leadingSentinelBytes=0 trailingSentinelBytes=0"));
+    EXPECT_TRUE(has_text(records[2], "probeAttempt=3 classification=unwritten-sentinel"));
+    EXPECT_TRUE(has_text(records[2], "zeroBytes=0 sentinelBytes=4"));
+    EXPECT_TRUE(has_text(records[2], "leadingSentinelBytes=4 trailingSentinelBytes=4"));
+    EXPECT_TRUE(has_text(records[2], "minimumByte=165 maximumByte=165 payloadBytes=4"));
+    EXPECT_TRUE(has_text(records[3], "probeAttempt=4 classification=partial-write-suspected"));
+    EXPECT_TRUE(has_text(records[3], "zeroBytes=0 sentinelBytes=2"));
+    EXPECT_TRUE(has_text(records[3], "leadingSentinelBytes=0 trailingSentinelBytes=2"));
+    EXPECT_TRUE(has_text(records[4], "probeAttempt=5 classification=all-zero-overwritten"));
+    EXPECT_TRUE(has_text(records[4], "zeroBytes=4 sentinelBytes=0"));
+    EXPECT_TRUE(has_text(records[4], "minimumByte=0 maximumByte=0 payloadBytes=4"));
+    EXPECT_TRUE(std::ranges::all_of(records, [](const std::string& record) {
+        return has_text(record, "cameraFrameNumber=") && has_text(record, "lostPacketFlag=false");
+    }));
+
+    const auto snapshot = worker.snapshot();
+    EXPECT_EQ(snapshot.frames_received, 4U);
+    EXPECT_EQ(snapshot.incomplete_frames, 1U);
+    EXPECT_EQ(snapshot.bytes_received, 16U);
+    EXPECT_EQ(device.sentinel_prefill_calls(), 6U);
+    EXPECT_EQ(queue.snapshot().enqueued, 4U);
+
+    auto normal = queue.wait_pop({}, 0ms);
+    auto natural_sentinel = queue.wait_pop({}, 0ms);
+    auto partial = queue.wait_pop({}, 0ms);
+    auto all_zero = queue.wait_pop({}, 0ms);
+    ASSERT_EQ(normal.status, FrameDequeueStatus::frame);
+    ASSERT_EQ(natural_sentinel.status, FrameDequeueStatus::frame);
+    ASSERT_EQ(partial.status, FrameDequeueStatus::frame);
+    ASSERT_EQ(all_zero.status, FrameDequeueStatus::frame);
+    EXPECT_EQ(normal.packet->sequence_number, 1U);
+    EXPECT_EQ(natural_sentinel.packet->sequence_number, 2U);
+    EXPECT_EQ(partial.packet->sequence_number, 3U);
+    EXPECT_EQ(all_zero.packet->sequence_number, 4U);
+    EXPECT_TRUE(std::ranges::all_of(all_zero.packet->buffer->bytes(),
+                                    [](const std::byte value) { return value == std::byte{0}; }));
+    EXPECT_EQ(queue.wait_pop({}, 0ms).status, FrameDequeueStatus::timeout);
+}
+
+TEST(CameraAcquisitionWorker, LimitsStartupProbeToFirstEightCaptureAttempts)
+{
+    ScriptedCameraDevice device{{CaptureAction::success, CaptureAction::success,
+                                 CaptureAction::success, CaptureAction::success,
+                                 CaptureAction::success, CaptureAction::success,
+                                 CaptureAction::success, CaptureAction::success,
+                                 CaptureAction::success, CaptureAction::permanent_error}};
+    FrameBufferPool pool{10U, 4U};
+    AcquisitionQueue queue{9U};
+    std::size_t startup_probe_records = 0U;
+    AcquisitionWorker worker{
+        device,
+        pool,
+        queue,
+        {.camera_id = "CAM01",
+         .receive_timeout = 10ms,
+         .diagnostics = {.enabled = [] { return true; },
+                         .record =
+                             [&](const std::string& record) {
+                                 if (has_text(record, "operation=frame.startupBufferProbe"))
+                                     ++startup_probe_records;
+                             }}}};
+
+    ASSERT_TRUE(worker.start());
+    ASSERT_TRUE(worker.join(std::chrono::steady_clock::now() + 1s));
+    EXPECT_EQ(startup_probe_records, 8U);
+    EXPECT_EQ(device.sentinel_prefill_calls(), 8U);
+    EXPECT_EQ(worker.snapshot().frames_received, 9U);
+    EXPECT_EQ(queue.snapshot().enqueued, 9U);
+}
+
+TEST(CameraAcquisitionWorker, DisabledDiagnosticsPerformNoStartupProbeWork)
+{
+    ScriptedCameraDevice device{{CaptureAction::success, CaptureAction::permanent_error}};
+    FrameBufferPool pool{2U, 4U};
+    AcquisitionQueue queue{1U};
+    std::size_t diagnostic_records = 0U;
+    AcquisitionWorker worker{
+        device,
+        pool,
+        queue,
+        {.camera_id = "CAM01",
+         .receive_timeout = 10ms,
+         .diagnostics = {.enabled = [] { return false; },
+                         .record = [&](std::string) { ++diagnostic_records; }}}};
+
+    ASSERT_TRUE(worker.start());
+    ASSERT_TRUE(worker.join(std::chrono::steady_clock::now() + 1s));
+    EXPECT_EQ(device.sentinel_prefill_calls(), 0U);
+    EXPECT_EQ(diagnostic_records, 0U);
+    EXPECT_EQ(worker.snapshot().frames_received, 1U);
+    EXPECT_EQ(queue.snapshot().enqueued, 1U);
 }
 
 TEST(CameraAcquisitionWorker, PublishesRecentFrameRateAndBandwidthWithoutQueueLock)

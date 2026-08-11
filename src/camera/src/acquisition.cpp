@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cctype>
 #include <exception>
+#include <limits>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace paperbreak::camera
@@ -17,6 +19,94 @@ Error acquisition_error(std::string code, const Severity severity, std::string m
                             std::move(operation), false);
     error.source_id = camera_id;
     return error;
+}
+
+constexpr std::size_t startup_probe_attempt_limit = 8U;
+constexpr std::byte startup_probe_sentinel{0xa5};
+
+enum class StartupBufferClassification
+{
+    all_zero_overwritten,
+    unwritten_sentinel,
+    partial_write_suspected,
+    normal,
+};
+
+struct StartupBufferStatistics final
+{
+    std::size_t zero_bytes{};
+    std::size_t sentinel_bytes{};
+    std::size_t leading_sentinel_bytes{};
+    std::size_t trailing_sentinel_bytes{};
+    unsigned int minimum_byte{};
+    unsigned int maximum_byte{};
+    StartupBufferClassification classification{StartupBufferClassification::normal};
+};
+
+StartupBufferStatistics inspect_startup_buffer(const std::span<const std::byte> payload) noexcept
+{
+    StartupBufferStatistics result;
+    if (payload.empty())
+    {
+        return result;
+    }
+
+    result.minimum_byte = std::numeric_limits<unsigned int>::max();
+    for (const auto byte : payload)
+    {
+        const auto value = std::to_integer<unsigned int>(byte);
+        result.zero_bytes += value == 0U ? 1U : 0U;
+        result.sentinel_bytes += byte == startup_probe_sentinel ? 1U : 0U;
+        result.minimum_byte = std::min(result.minimum_byte, value);
+        result.maximum_byte = std::max(result.maximum_byte, value);
+    }
+    for (const auto byte : payload)
+    {
+        if (byte != startup_probe_sentinel)
+        {
+            break;
+        }
+        ++result.leading_sentinel_bytes;
+    }
+    for (auto iterator = payload.rbegin(); iterator != payload.rend(); ++iterator)
+    {
+        if (*iterator != startup_probe_sentinel)
+        {
+            break;
+        }
+        ++result.trailing_sentinel_bytes;
+    }
+
+    if (result.sentinel_bytes == payload.size())
+    {
+        result.classification = StartupBufferClassification::unwritten_sentinel;
+    }
+    else if (result.leading_sentinel_bytes > 0U || result.trailing_sentinel_bytes > 0U)
+    {
+        result.classification = StartupBufferClassification::partial_write_suspected;
+    }
+    else if (result.zero_bytes == payload.size())
+    {
+        result.classification = StartupBufferClassification::all_zero_overwritten;
+    }
+    return result;
+}
+
+std::string_view startup_buffer_classification_name(
+    const StartupBufferClassification classification) noexcept
+{
+    switch (classification)
+    {
+    case StartupBufferClassification::all_zero_overwritten:
+        return "all-zero-overwritten";
+    case StartupBufferClassification::unwritten_sentinel:
+        return "unwritten-sentinel";
+    case StartupBufferClassification::partial_write_suspected:
+        return "partial-write-suspected";
+    case StartupBufferClassification::normal:
+        return "normal";
+    }
+    return "normal";
 }
 } // namespace
 
@@ -305,6 +395,11 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
     };
     try
     {
+        std::size_t startup_probe_attempts_remaining = options_.diagnostics.enabled &&
+                                                               options_.diagnostics.record &&
+                                                               options_.diagnostics.enabled()
+                                                           ? startup_probe_attempt_limit
+                                                           : 0U;
         while (!stop_token.stop_requested())
         {
             if (options_.software_trigger_interval)
@@ -337,6 +432,15 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
                 continue;
             }
 
+            const bool probe_this_attempt = startup_probe_attempts_remaining > 0U;
+            std::size_t startup_probe_attempt = 0U;
+            if (probe_this_attempt)
+            {
+                startup_probe_attempt =
+                    startup_probe_attempt_limit - startup_probe_attempts_remaining + 1U;
+                --startup_probe_attempts_remaining;
+                std::ranges::fill(acquired.buffer->writable_bytes(), startup_probe_sentinel);
+            }
             auto captured = device_.capture_into(*acquired.buffer, options_.receive_timeout);
             if (!captured)
             {
@@ -362,9 +466,32 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
                 return;
             }
 
-            ++sequence_number;
             const auto metadata = captured.value();
             consecutive_timeouts = 0U;
+            if (probe_this_attempt)
+            {
+                const auto statistics = inspect_startup_buffer(acquired.buffer->bytes());
+                options_.diagnostics.record(
+                    "operation=frame.startupBufferProbe cameraId=" + options_.camera_id +
+                    " probeAttempt=" + std::to_string(startup_probe_attempt) + " classification=" +
+                    std::string{startup_buffer_classification_name(statistics.classification)} +
+                    " zeroBytes=" + std::to_string(statistics.zero_bytes) +
+                    " sentinelBytes=" + std::to_string(statistics.sentinel_bytes) +
+                    " leadingSentinelBytes=" + std::to_string(statistics.leading_sentinel_bytes) +
+                    " trailingSentinelBytes=" + std::to_string(statistics.trailing_sentinel_bytes) +
+                    " minimumByte=" + std::to_string(statistics.minimum_byte) +
+                    " maximumByte=" + std::to_string(statistics.maximum_byte) +
+                    " payloadBytes=" + std::to_string(acquired.buffer->size()) +
+                    " cameraFrameNumber=" + std::to_string(metadata.camera_frame_number) +
+                    " lostPacketFlag=" + (metadata.flags.incomplete ? "true" : "false"));
+                if (statistics.classification == StartupBufferClassification::unwritten_sentinel)
+                {
+                    incomplete_frames_.fetch_add(1U, std::memory_order_relaxed);
+                    continue;
+                }
+            }
+
+            ++sequence_number;
             if (!expected_geometry)
             {
                 expected_geometry = metadata.geometry;

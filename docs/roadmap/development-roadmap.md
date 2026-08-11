@@ -790,6 +790,12 @@ schema v4，v2/v3 安全迁移为 `Off`；公共相机模型、Mock、Hikrobot �
 关闭自动曝光、写入 `ExposureTime` 基准，再写目标模式；启动和恢复取流只确认并保留模式，不再
 覆盖用户配置。自动化与构建证据见执行记录；实体相机的单次收敛、连续调节和图像质量未执行。
 
+启动全零帧取证跟进（2026-08-11）：执行记录为
+`.agent/plans/m4-05-startup-zero-frame-diagnosis.md`。相机 Debug 日志开启时，每次采集启动的前 8 次
+取帧使用 `0xA5` 缓冲哨兵并记录有效载荷统计；完整哨兵帧计入不完整帧且不下发，完整零覆盖仍保持
+原行为。CAM01 已完成 20 次同连接启停和 5 次重连启停，200 条探针记录均为 `normal`，当前条件
+未复现原启动全零帧，根因仍未确定；官方 MVS 对照因未出现完整零覆盖而未执行。
+
 实施 `camera.list/discover/bind/connect/disconnect/start/stop/getConfig/updateConfig/captureSnapshot/softwareTrigger` 及对应 UI；覆盖逻辑编号、安装位置、型号、序列号、IP、状态、曝光、增益、帧率、ROI、像素格式、触发和网络参数；危险操作二次确认；参数展示区分“已保存、已下发、已应用、失败、需重启”，最终显示服务回读的实际值。
 
 ### M4-06 状态、报警、日志和诊断

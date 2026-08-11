@@ -1,0 +1,4 @@
+2026-08-11T18:12:16.700+08:00 [76568] [service-main] [info] [service] operation=thread.start result=success threadName=service-main
+2026-08-11T18:12:16.700+08:00 [76568] [service-main] [info] [service] PaperBreakEdgeService lifecycle started
+2026-08-11T18:12:42.007+08:00 [76568] [service-main] [info] [service] PaperBreakEdgeService lifecycle stopping
+2026-08-11T18:12:42.007+08:00 [76568] [service-main] [info] [service] operation=thread.stop result=success threadName=service-main
