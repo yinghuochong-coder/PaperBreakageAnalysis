@@ -1569,9 +1569,9 @@ struct DeviceHandle::State final
             }
             if (resume)
             {
-                int code = api.set_enum_value_by_string(handle, "ExposureAuto", "Continuous");
+                int code = api.set_enum_value_by_string(handle, "ExposureAuto", "Off");
                 const char* node = "ExposureAuto";
-                const char* reason = "restore-auto-exposure-failed";
+                const char* reason = "restore-fixed-exposure-failed";
                 if (code == MV_OK)
                 {
                     code = api.start_grabbing(handle);
@@ -1620,9 +1620,9 @@ struct DeviceHandle::State final
 
         if (resume)
         {
-            int code = api.set_enum_value_by_string(handle, "ExposureAuto", "Continuous");
+            int code = api.set_enum_value_by_string(handle, "ExposureAuto", "Off");
             const char* node = "ExposureAuto";
-            const char* reason = "resume-auto-exposure-failed";
+            const char* reason = "resume-fixed-exposure-failed";
             if (code == MV_OK)
             {
                 code = api.start_grabbing(handle);
@@ -1796,12 +1796,12 @@ Result<StreamSession> DeviceHandle::start_streaming()
                                 "camera.hikrobot.startGrabbing", "MVS 设备已经处于取流状态"));
     }
     const int exposure_code =
-        state_->api.set_enum_value_by_string(state_->handle, "ExposureAuto", "Continuous");
+        state_->api.set_enum_value_by_string(state_->handle, "ExposureAuto", "Off");
     if (exposure_code != MV_OK)
     {
         return Result<StreamSession>::failure(parameter_error(
             CameraErrorKind::stream_start_failed, exposure_code, "camera.hikrobot.startGrabbing",
-            "ExposureAuto", "enable-continuous-auto-exposure-failed"));
+            "ExposureAuto", "disable-auto-exposure-failed"));
     }
     const int code = state_->api.start_grabbing(state_->handle);
     if (code != MV_OK)

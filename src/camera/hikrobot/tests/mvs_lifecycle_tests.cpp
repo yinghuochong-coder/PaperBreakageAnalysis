@@ -737,8 +737,13 @@ TEST_F(MvsLifecycleTest, ParameterApplyPausesWritesReadsBackAndResumesStreaming)
     ASSERT_NE(disable_auto, context_.calls.end());
     ASSERT_NE(exposure_write, context_.calls.end());
     ASSERT_NE(restart, context_.calls.end());
+    const auto keep_fixed_exposure =
+        std::find(exposure_write, context_.calls.end(), "setes:ExposureAuto=Off");
+    ASSERT_NE(keep_fixed_exposure, context_.calls.end());
     EXPECT_LT(stop, first_write);
     EXPECT_LT(disable_auto, exposure_write);
+    EXPECT_LT(exposure_write, keep_fixed_exposure);
+    EXPECT_LT(keep_fixed_exposure, restart);
     EXPECT_LT(first_write, restart);
     EXPECT_TRUE(std::move(stream).value().active());
 }
@@ -1188,7 +1193,7 @@ TEST_F(MvsLifecycleTest, StreamAndHandleDestructorsReleaseInReverseOrder)
     }
 
     EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Continuous", "start",
+              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Off", "start",
                                         "stop", "close", "destroy"}));
 }
 
@@ -1207,11 +1212,11 @@ TEST_F(MvsLifecycleTest, ExplicitStopIsIdempotent)
     EXPECT_TRUE(handle.close());
 
     EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Continuous", "start",
+              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Off", "start",
                                         "stop", "close", "destroy"}));
 }
 
-TEST_F(MvsLifecycleTest, StartEnablesContinuousAutoExposureBeforeGrabbing)
+TEST_F(MvsLifecycleTest, StartDisablesAutoExposureBeforeGrabbing)
 {
     auto handle_result = DeviceHandle::open(fake_api, context_.device_info);
     ASSERT_TRUE(handle_result);
@@ -1221,14 +1226,14 @@ TEST_F(MvsLifecycleTest, StartEnablesContinuousAutoExposureBeforeGrabbing)
 
     ASSERT_TRUE(stream_result);
     const auto auto_exposure =
-        std::find(context_.calls.begin(), context_.calls.end(), "setes:ExposureAuto=Continuous");
+        std::find(context_.calls.begin(), context_.calls.end(), "setes:ExposureAuto=Off");
     const auto start = std::find(context_.calls.begin(), context_.calls.end(), "start");
     ASSERT_NE(auto_exposure, context_.calls.end());
     ASSERT_NE(start, context_.calls.end());
     EXPECT_LT(auto_exposure, start);
 }
 
-TEST_F(MvsLifecycleTest, AutoExposureFailurePreventsGrabbing)
+TEST_F(MvsLifecycleTest, DisablingAutoExposureFailurePreventsGrabbing)
 {
     context_.fail_set_node = "ExposureAuto";
     context_.fail_set_code = MV_E_GC_ACCESS;
@@ -1276,7 +1281,7 @@ TEST_F(MvsLifecycleTest, CleanupContinuesAfterStopFailure)
     }
 
     EXPECT_EQ(context_.calls,
-              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Continuous", "start",
+              (std::vector<std::string>{"create", "open", "setes:ExposureAuto=Off", "start",
                                         "stop", "stop", "stop", "close", "destroy"}));
 }
 
