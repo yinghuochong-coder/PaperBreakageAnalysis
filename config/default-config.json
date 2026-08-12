@@ -1,7 +1,7 @@
 {
   "acquisition": {
     "autoStart": true,
-    "framePoolCapacity": 2187,
+    "framePoolCapacity": 1939,
     "queueCapacity": 128,
     "receiveTimeoutMs": 1000,
     "startupRetryCount": 3,
