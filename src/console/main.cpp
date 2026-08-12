@@ -73,7 +73,8 @@ void send_left_double_click(QWidget* widget)
     static_cast<void>(QApplication::sendEvent(widget, &event));
 }
 
-bool preview_pane_smoke(paperbreak::console::MainWindow& main_window, QApplication& application)
+bool preview_pane_smoke(paperbreak::console::MainWindow& main_window, QApplication& application,
+                        paperbreak::console::PreviewClient& preview_client)
 {
     if (!main_window.select_page(1U))
         return false;
@@ -90,7 +91,17 @@ bool preview_pane_smoke(paperbreak::console::MainWindow& main_window, QApplicati
     }
     auto* const first_image = main_window.findChild<QLabel*>(QStringLiteral("preview-image-1"));
     auto* const grid = main_window.findChild<QWidget*>(QStringLiteral("preview-grid"));
-    if (!first_image || !grid)
+    auto* const rate_choice =
+        main_window.findChild<QComboBox*>(QStringLiteral("preview-rate-choice"));
+    if (!first_image || !grid || !rate_choice || rate_choice->count() != 6)
+        return false;
+    const std::array<int, 6U> expected_rates{2, 3, 5, 10, 20, 30};
+    for (int index = 0; index < rate_choice->count(); ++index)
+        if (rate_choice->itemData(index).toInt() != expected_rates[static_cast<std::size_t>(index)])
+            return false;
+    rate_choice->setCurrentIndex(rate_choice->findData(30));
+    application.processEvents();
+    if (preview_client.snapshot().target_fps != 30.0)
         return false;
 
     paperbreak::console::PreviewSnapshot snapshot;
@@ -224,6 +235,10 @@ int main(int argc, char* argv[])
         [&preview_client](const bool paused) {
             if (preview_client)
                 preview_client->set_paused(paused);
+        },
+        [&preview_client](const double frames_per_second) {
+            if (preview_client)
+                preview_client->set_target_fps(frames_per_second);
         },
         {.discover =
              [&camera_client] {
@@ -638,13 +653,12 @@ int main(int argc, char* argv[])
         camera_smoke.cameras.back().saved.reverse_x = false;
         camera_smoke.cameras.back().saved.reverse_y = true;
         camera_smoke.cameras.back().roi_capabilities =
-            paperbreak::console::CameraRoiCapabilitiesValue{
-                .sensor_width = 1624U,
-                .sensor_height = 1240U,
-                .width = {32U, 1624U, 4U},
-                .height = {4U, 1240U, 4U},
-                .offset_x = {0U, 1592U, 2U},
-                .offset_y = {0U, 1232U, 16U}};
+            paperbreak::console::CameraRoiCapabilitiesValue{.sensor_width = 1624U,
+                                                            .sensor_height = 1240U,
+                                                            .width = {32U, 1624U, 4U},
+                                                            .height = {4U, 1240U, 4U},
+                                                            .offset_x = {0U, 1592U, 2U},
+                                                            .offset_y = {0U, 1232U, 16U}};
         camera_smoke.discovered_devices.front().exclusive_access_available = true;
         camera_smoke.discovered_devices.push_back({.model = "MV-CS020-60GM",
                                                    .serial = "SMOKE-02",
@@ -693,8 +707,8 @@ int main(int argc, char* argv[])
             camera_discovered_panel->layout()->indexOf(camera_discover) <
                 camera_discovered_panel->layout()->indexOf(discovered_devices);
         const bool first_camera_status_only =
-            camera_selector && camera_status && camera_selector->currentText() ==
-                                                   QStringLiteral("CAM01") &&
+            camera_selector && camera_status &&
+            camera_selector->currentText() == QStringLiteral("CAM01") &&
             camera_status->text().contains(QStringLiteral("CAM01")) &&
             !camera_status->text().contains(QStringLiteral("CAM02"));
         if (camera_selector)
@@ -707,14 +721,14 @@ int main(int argc, char* argv[])
             reverse_x && reverse_y && !reverse_x->isChecked() && reverse_y->isChecked();
         auto* const offset_y =
             main_window.findChild<QSpinBox*>(QStringLiteral("camera-roi-offset-y"));
-        const bool roi_capabilities_loaded =
-            offset_y && offset_y->minimum() == 0 && offset_y->maximum() == 1232 &&
-            offset_y->singleStep() == 16;
+        const bool roi_capabilities_loaded = offset_y && offset_y->minimum() == 0 &&
+                                             offset_y->maximum() == 1232 &&
+                                             offset_y->singleStep() == 16;
         if (offset_y)
         {
             offset_y->setValue(100);
-            static_cast<void>(QMetaObject::invokeMethod(offset_y, "editingFinished",
-                                                        Qt::DirectConnection));
+            static_cast<void>(
+                QMetaObject::invokeMethod(offset_y, "editingFinished", Qt::DirectConnection));
         }
         const bool roi_offset_aligned = offset_y && offset_y->value() == 96;
         const bool camera_banner_removed =
@@ -723,8 +737,7 @@ int main(int argc, char* argv[])
             });
         const bool fixed_acquisition_controls_removed =
             !main_window.findChild<QWidget*>(QStringLiteral("camera-trigger-panel")) &&
-            !main_window.findChild<QPushButton*>(
-                QStringLiteral("camera-camera.softwareTrigger"));
+            !main_window.findChild<QPushButton*>(QStringLiteral("camera-camera.softwareTrigger"));
         auto* const camera_binding_panel =
             main_window.findChild<QWidget*>(QStringLiteral("camera-binding-panel"));
         auto* const camera_bind_slot =
@@ -895,7 +908,8 @@ int main(int argc, char* argv[])
         }
         main_window.resize(1280, 800);
         application.processEvents();
-        const bool preview_panes_stable_and_cycle = preview_pane_smoke(main_window, application);
+        const bool preview_panes_stable_and_cycle =
+            preview_pane_smoke(main_window, application, *preview_client);
         if (!preview_panes_stable_and_cycle)
             std::cerr << "preview pane sizing or double-click cycle smoke failed\n";
         static_cast<void>(main_window.select_page(0U));

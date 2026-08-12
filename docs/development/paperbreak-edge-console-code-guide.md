@@ -352,11 +352,11 @@ sequenceDiagram
     participant W as "MainWindow"
 
     Cam->>P: set_camera_ids(当前 1~4 个相机 ID)
-    P->>I: preview.subscribe(cameraIds)
+    P->>I: preview.subscribe(cameraIds, fps)
     I->>S: IPC request
     S-->>P: subscribed response
     P->>P: snapshot.subscribed = true
-    loop 低帧率预览
+    loop 目标帧率预览
         S-->>I: push preview.frame + JPEG
         I-->>P: push_received(generation, push)
         P->>P: 校验元数据和大小，QImage::loadFromData()
@@ -367,6 +367,11 @@ sequenceDiagram
     P->>I: preview.unsubscribe
     P->>P: subscribed=false，保留固定快照槽
 ```
+
+实时预览页提供 2、3、5、10、20、30 fps。选择新值时 `PreviewClient::set_target_fps()` 取消旧的
+在途订阅并以当前相机集合重新订阅；断线重连沿用当前选择。该值是连接级临时状态，不写生产
+配置，也不改变相机采集帧率。服务同一相机按所有订阅中的最高目标帧率编码一次，并对较低帧率
+订阅独立限速。
 
 暂停只取消预览订阅，不停止后台相机采集。`PreviewSnapshot::images` 是固定 4 槽数组，每台相机只保留最新成功解码的图像。
 

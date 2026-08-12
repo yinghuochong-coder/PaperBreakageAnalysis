@@ -131,8 +131,10 @@ PreviewRuntime::PreviewRuntime(std::vector<std::string> camera_ids,
 {
     if (!encoder_ || !delivery_ || camera_ids.empty() ||
         camera_ids.size() > options_.maximum_cameras || options_.maximum_cameras == 0U ||
-        options_.maximum_subscriptions == 0U || options_.frames_per_second < 2.0 ||
-        options_.frames_per_second > 5.0 || options_.encoding.maximum_binary_bytes == 0U ||
+        options_.maximum_subscriptions == 0U || !std::isfinite(options_.frames_per_second) ||
+        options_.frames_per_second < preview_minimum_frames_per_second ||
+        options_.frames_per_second > preview_maximum_frames_per_second ||
+        options_.encoding.maximum_binary_bytes == 0U ||
         options_.encoding.maximum_binary_bytes > 16U * 1024U * 1024U)
     {
         throw std::invalid_argument{"PreviewRuntime options are invalid"};
@@ -200,26 +202,32 @@ Result<void> PreviewRuntime::join(const std::chrono::steady_clock::time_point de
     return Result<void>::success();
 }
 
-Result<void> PreviewRuntime::subscribe(const std::uint64_t subscriber_id,
-                                       const std::vector<std::string>& camera_ids)
+Result<double> PreviewRuntime::subscribe(const std::uint64_t subscriber_id,
+                                         const std::vector<std::string>& camera_ids,
+                                         const std::optional<double> frames_per_second)
 {
-    if (subscriber_id == 0U || camera_ids.empty() || camera_ids.size() > cameras_.size())
-        return Result<void>::failure(
+    const double target_frames_per_second = frames_per_second.value_or(options_.frames_per_second);
+    if (subscriber_id == 0U || camera_ids.empty() || camera_ids.size() > cameras_.size() ||
+        !std::isfinite(target_frames_per_second) ||
+        target_frames_per_second < preview_minimum_frames_per_second ||
+        target_frames_per_second > preview_maximum_frames_per_second)
+        return Result<double>::failure(
             preview_error("IPC_REQUEST_INVALID", "预览订阅参数无效", "preview.subscribe"));
     std::unordered_set<std::string> selected;
     for (const auto& camera_id : camera_ids)
     {
         if (!cameras_.contains(camera_id) || !selected.insert(camera_id).second)
-            return Result<void>::failure(preview_error(
+            return Result<double>::failure(preview_error(
                 "IPC_REQUEST_INVALID", "预览订阅包含未知或重复相机", "preview.subscribe"));
     }
     std::scoped_lock lock{subscriptions_mutex_};
     if (!subscriptions_.contains(subscriber_id) &&
         subscriptions_.size() >= options_.maximum_subscriptions)
-        return Result<void>::failure(
+        return Result<double>::failure(
             preview_error("IPC_BUSY", "预览订阅数已达上限", "preview.subscribe"));
-    subscriptions_[subscriber_id] = std::move(selected);
-    return Result<void>::success();
+    subscriptions_[subscriber_id] = {.camera_ids = std::move(selected),
+                                     .frames_per_second = target_frames_per_second};
+    return Result<double>::success(target_frames_per_second);
 }
 
 void PreviewRuntime::unsubscribe(const std::uint64_t subscriber_id) noexcept
@@ -228,11 +236,19 @@ void PreviewRuntime::unsubscribe(const std::uint64_t subscriber_id) noexcept
     subscriptions_.erase(subscriber_id);
 }
 
-bool PreviewRuntime::has_subscriber_for(const std::string& camera_id) const noexcept
+std::optional<double> PreviewRuntime::target_frames_per_second_for(
+    const std::string& camera_id) const noexcept
 {
     std::scoped_lock lock{subscriptions_mutex_};
-    return std::ranges::any_of(
-        subscriptions_, [&camera_id](const auto& item) { return item.second.contains(camera_id); });
+    std::optional<double> result;
+    for (const auto& [subscriber_id, subscription] : subscriptions_)
+    {
+        static_cast<void>(subscriber_id);
+        if (subscription.camera_ids.contains(camera_id) &&
+            (!result || subscription.frames_per_second > result.value()))
+            result = subscription.frames_per_second;
+    }
+    return result;
 }
 
 void PreviewRuntime::submit(camera::FrameView frame, PreviewFrameMetadata metadata) noexcept
@@ -249,7 +265,8 @@ void PreviewRuntime::submit(camera::FrameView frame, PreviewFrameMetadata metada
         rejected_after_stop_.fetch_add(1U, std::memory_order_relaxed);
         return;
     }
-    if (!has_subscriber_for(frame.camera_id()))
+    const auto target_frames_per_second = target_frames_per_second_for(frame.camera_id());
+    if (!target_frames_per_second)
     {
         frames_skipped_without_subscribers_.fetch_add(1U, std::memory_order_relaxed);
         return;
@@ -257,7 +274,7 @@ void PreviewRuntime::submit(camera::FrameView frame, PreviewFrameMetadata metada
     CameraSlot& slot = *iterator->second;
     std::scoped_lock lock{slot.mutex};
     const auto interval = std::chrono::duration_cast<camera::MonotonicTime::duration>(
-        std::chrono::duration<double>{1.0 / options_.frames_per_second});
+        std::chrono::duration<double>{1.0 / target_frames_per_second.value()});
     if (slot.last_sample && frame.received_monotonic_time() - *slot.last_sample < interval)
     {
         frames_skipped_by_rate_.fetch_add(1U, std::memory_order_relaxed);
@@ -387,9 +404,23 @@ void PreviewRuntime::run(const std::stop_token token) noexcept
             std::vector<std::uint64_t> subscribers;
             {
                 std::scoped_lock lock{subscriptions_mutex_};
-                for (const auto& [subscriber_id, selected] : subscriptions_)
-                    if (selected.contains(camera_id))
+                for (auto& [subscriber_id, subscription] : subscriptions_)
+                {
+                    if (!subscription.camera_ids.contains(camera_id))
+                        continue;
+                    const auto interval =
+                        std::chrono::duration_cast<camera::MonotonicTime::duration>(
+                            std::chrono::duration<double>{1.0 / subscription.frames_per_second});
+                    const auto last = subscription.last_deliveries.find(camera_id);
+                    if (last == subscription.last_deliveries.end() ||
+                        pending->frame.received_monotonic_time() <= last->second ||
+                        pending->frame.received_monotonic_time() - last->second >= interval)
+                    {
                         subscribers.push_back(subscriber_id);
+                        subscription.last_deliveries[camera_id] =
+                            pending->frame.received_monotonic_time();
+                    }
+                }
             }
             for (const auto subscriber_id : subscribers)
             {

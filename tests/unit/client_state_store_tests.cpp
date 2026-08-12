@@ -656,6 +656,7 @@ class PreviewSubscriptionHandler final : public paperbreak::ipc::IRequestHandler
             condition_.wait(lock, [this] { return release_first_request_; });
         }
         camera_ids_ = payload.at("cameraIds").get<std::vector<std::string>>();
+        frames_per_second_ = payload.at("fps").get<double>();
         condition_.notify_all();
         return paperbreak::Result<paperbreak::ipc::CommandResponse>::success(
             {.payload_json = R"({"subscribed":true})", .binary = {}});
@@ -682,6 +683,12 @@ class PreviewSubscriptionHandler final : public paperbreak::ipc::IRequestHandler
         return requests_ >= 2U && camera_ids_ == std::vector<std::string>{"CAM01"};
     }
 
+    [[nodiscard]] bool received_fps(const double frames_per_second) const
+    {
+        std::scoped_lock lock{mutex_};
+        return frames_per_second_ == frames_per_second;
+    }
+
   private:
     mutable std::mutex mutex_;
     std::condition_variable condition_;
@@ -689,6 +696,7 @@ class PreviewSubscriptionHandler final : public paperbreak::ipc::IRequestHandler
     bool first_request_entered_{};
     bool release_first_request_{};
     std::vector<std::string> camera_ids_;
+    double frames_per_second_{};
 };
 
 std::string state_name()
@@ -1676,6 +1684,33 @@ TEST(PreviewClient, UsesConfiguredCameraSlotsInsteadOfAlwaysRequestingFourCamera
     ASSERT_EQ(client.camera_ids().size(), 1U);
     EXPECT_EQ(client.camera_ids().front(), "CAM01");
     EXPECT_FALSE(client.snapshot().last_error.has_value());
+}
+
+TEST(PreviewClient, ValidatesAndResubscribesWithSelectedPreviewFps)
+{
+    const auto name = state_name();
+    auto handler = std::make_shared<PreviewSubscriptionHandler>();
+    paperbreak::ipc::IpcServer server{handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name)};
+    ASSERT_TRUE(server.start());
+    paperbreak::console::PreviewClient client{{}, client_options(name)};
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until([&] { return handler->first_request_entered(); }));
+    handler->release_first_request();
+    ASSERT_TRUE(wait_until([&] { return client.snapshot().subscribed; }));
+    EXPECT_TRUE(handler->received_fps(2.0));
+
+    client.set_target_fps(30.0);
+    ASSERT_TRUE(
+        wait_until([&] { return handler->received_fps(30.0) && client.snapshot().subscribed; }));
+    EXPECT_EQ(client.snapshot().target_fps, 30.0);
+
+    client.set_target_fps(7.0);
+    ASSERT_TRUE(client.snapshot().last_error.has_value());
+    EXPECT_EQ(client.snapshot().target_fps, 30.0);
+    client.stop();
+    server.request_stop();
+    ASSERT_TRUE(server.join(std::chrono::steady_clock::now() + std::chrono::seconds{2}));
 }
 
 TEST(PreviewClient, ReplacesAnInFlightDefaultSubscriptionWithConfiguredCameraSlots)

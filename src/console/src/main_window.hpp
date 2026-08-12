@@ -95,6 +95,7 @@ class MainWindow final : public QMainWindow
 {
   public:
     explicit MainWindow(std::function<void(bool)> preview_pause_changed = {},
+                        std::function<void(double)> preview_fps_changed = {},
                         CameraUiActions camera_actions = {}, ThemeUiActions theme_actions = {},
                         OperationsUiActions operations_actions = {},
                         AlgorithmUiActions algorithm_actions = {},
@@ -185,6 +186,7 @@ class MainWindow final : public QMainWindow
     QWidget* preview_grid_{};
     QGridLayout* preview_grid_layout_{};
     QComboBox* preview_layout_choice_{};
+    QComboBox* preview_rate_choice_{};
     QPushButton* preview_full_screen_button_{};
     PreviewPresentation preview_presentation_{PreviewPresentation::tiled};
     std::size_t preview_selected_index_{};
@@ -236,6 +238,7 @@ class MainWindow final : public QMainWindow
     bool camera_parameter_read_pending_{};
     QPushButton* preview_pause_button_{};
     std::function<void(bool)> preview_pause_changed_;
+    std::function<void(double)> preview_fps_changed_;
     bool preview_paused_{};
     QTableWidget* metrics_table_{};
     QComboBox* alarm_scope_{};

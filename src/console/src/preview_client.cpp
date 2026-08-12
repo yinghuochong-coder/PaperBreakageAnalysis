@@ -12,6 +12,8 @@ namespace paperbreak::console
 namespace
 {
 constexpr std::size_t maximum_preview_binary_bytes = 16U * 1024U * 1024U;
+constexpr std::array<double, 6U> supported_preview_frames_per_second{2.0,  3.0,  5.0,
+                                                                     10.0, 20.0, 30.0};
 
 Error protocol_error(std::string message)
 {
@@ -90,6 +92,27 @@ void PreviewClient::set_camera_ids(std::vector<std::string> camera_ids)
     subscription_request_.reset();
     camera_ids_ = std::move(camera_ids);
     snapshot_.images = {};
+    snapshot_.subscribed = false;
+    if (!snapshot_.paused && snapshot_.connection.state == ipc::ClientConnectionState::connected)
+        subscribe();
+    notify();
+}
+
+void PreviewClient::set_target_fps(const double frames_per_second)
+{
+    if (std::ranges::find(supported_preview_frames_per_second, frames_per_second) ==
+        supported_preview_frames_per_second.end())
+    {
+        snapshot_.last_error = protocol_error("预览帧率必须为 2、3、5、10、20 或 30 fps");
+        notify();
+        return;
+    }
+    if (snapshot_.target_fps == frames_per_second)
+        return;
+    if (subscription_request_)
+        static_cast<void>(client_->cancel_request(subscription_request_.value()));
+    subscription_request_.reset();
+    snapshot_.target_fps = frames_per_second;
     snapshot_.subscribed = false;
     if (!snapshot_.paused && snapshot_.connection.state == ipc::ClientConnectionState::connected)
         subscribe();
@@ -188,7 +211,8 @@ void PreviewClient::subscribe()
         return;
     const auto generation = snapshot_.connection.generation;
     auto sent = client_->send_request(
-        "preview.subscribe", nlohmann::json{{"cameraIds", camera_ids_}}.dump(), {},
+        "preview.subscribe",
+        nlohmann::json{{"cameraIds", camera_ids_}, {"fps", snapshot_.target_fps}}.dump(), {},
         [this](ipc::ClientRequestHandle handle, Result<ipc::ResponseMessage> result) {
             subscription_completed(std::move(handle), std::move(result));
         });

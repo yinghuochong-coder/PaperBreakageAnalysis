@@ -415,8 +415,8 @@ ProcessMain
 | `acquisition.frames[i]` | 采集 → 每相机预处理 | 16 帧/相机 | 丢弃最旧未处理帧，记录序号缺口；绝不阻塞采集 | 停采后关闭生产端，消费者排空至截止时间 | Warning，持续超限升级 Error |
 | `algorithm.frames[i]` | 预处理 → 算法执行器 | 8 帧/相机 | 丢弃最旧待检测帧并记录 `algorithmSkipped` | 停止新提交；可在截止时间内处理已接受帧 | Warning，持续超限升级 Error |
 | `algorithm.results` | 算法执行器 → 事件管理 | 256 条 | 不静默覆盖；拒绝新结果并触发 Error，后续帧进入降级状态 | 关闭算法生产端后排空并完成排序窗口 | Error |
-| `preview.latest[i]` | 预处理/结果叠加 → 预览编码 | 每相机 1 个槽 | `latest-wins`，覆盖旧帧并计数 | 无订阅立即清空；停止时直接丢弃 | Info |
-| `preview.encoded[i]` | 编码 → IPC 推送 | 每相机 1 个槽；单 JPEG 有字节上限 | `latest-wins` | 断开/停止直接丢弃 | Info |
+| `preview.latest[i]` | 预处理/结果叠加 → 预览编码 | 每相机 1 个槽 | `latest-wins`，按该相机订阅的最高目标帧率抽样并覆盖旧帧 | 无订阅立即清空；停止时直接丢弃 | Info |
+| `preview.encoded[i]` | 编码 → IPC 推送 | 每订阅/相机 1 个合并槽；单 JPEG 有字节上限 | 同一相机编码一次后按订阅目标帧率限速；`latest-wins` | 断开/停止直接丢弃 | Info |
 | `event.commands` | 事件检测/人工/复核 → 事件管理 | 256 条 | 事件触发不能静默丢弃；拒绝并触发 Critical；复核命令返回 busy | 停止新候选后处理已接受状态转换 | Critical（候选/确认） |
 | `event.persist` | 事件管理 → 事件写入 | 默认 8 个事件，不超过 `maxConcurrentEvents` | 不扩容；无法接收新事件时保护现有租约并触发 Critical | 截止时间内提交；超时保留可恢复临时目录 | Critical |
 | `keyframe.jobs` | 事件管理 → 关键帧线程 | 默认 32 个任务 | 拒绝并标记事件不完整，触发 Error；原始事件仍优先 | 尝试完成已接受任务，超时由恢复流程补偿 | Error |

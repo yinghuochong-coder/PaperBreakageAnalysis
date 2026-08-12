@@ -495,11 +495,13 @@ QString placeholder_message(const ConsolePageId id)
 } // namespace
 
 MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
+                       std::function<void(double)> preview_fps_changed,
                        CameraUiActions camera_actions, ThemeUiActions theme_actions,
                        OperationsUiActions operations_actions, AlgorithmUiActions algorithm_actions,
                        EventUiActions event_actions, StorageUiActions storage_actions,
                        UplinkUiActions uplink_actions, QWidget* parent)
     : QMainWindow(parent), preview_pause_changed_(std::move(preview_pause_changed)),
+      preview_fps_changed_(std::move(preview_fps_changed)),
       camera_actions_(std::move(camera_actions)), theme_actions_(std::move(theme_actions)),
       operations_actions_(std::move(operations_actions)),
       algorithm_actions_(std::move(algorithm_actions)), event_actions_(std::move(event_actions)),
@@ -1953,9 +1955,10 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
         preview_layout_choice_->addItems({QStringLiteral("四宫格"), QStringLiteral("CAM01"),
                                           QStringLiteral("CAM02"), QStringLiteral("CAM03"),
                                           QStringLiteral("CAM04")});
-        auto* rate_choice = make_child<QComboBox>(controls);
-        rate_choice->addItems(
-            {QStringLiteral("2 fps"), QStringLiteral("3 fps"), QStringLiteral("5 fps")});
+        preview_rate_choice_ = make_child<QComboBox>(controls);
+        preview_rate_choice_->setObjectName(QStringLiteral("preview-rate-choice"));
+        for (const int fps : {2, 3, 5, 10, 20, 30})
+            preview_rate_choice_->addItem(QStringLiteral("%1 fps").arg(fps), fps);
         auto* resolution_choice = make_child<QComboBox>(controls);
         resolution_choice->addItems({QStringLiteral("自适应分辨率"), QStringLiteral("1280×720"),
                                      QStringLiteral("640×360")});
@@ -1966,7 +1969,7 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
         preview_full_screen_button_->setObjectName(QStringLiteral("preview-full-screen"));
         auto* capture = make_child<QPushButton>(controls, QStringLiteral("抓图"));
         controls_layout->addWidget(preview_layout_choice_);
-        controls_layout->addWidget(rate_choice);
+        controls_layout->addWidget(preview_rate_choice_);
         controls_layout->addWidget(resolution_choice);
         controls_layout->addWidget(preview_pause_button_);
         controls_layout->addWidget(one_to_one);
@@ -2011,6 +2014,12 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                                  restore_preview_tiles();
                              else if (selection > 0 && selection <= 4)
                                  set_preview_focus(static_cast<std::size_t>(selection - 1));
+                         });
+        QObject::connect(preview_rate_choice_, &QComboBox::currentIndexChanged, this,
+                         [this](const int selection) {
+                             if (selection >= 0 && preview_fps_changed_)
+                                 preview_fps_changed_(
+                                     preview_rate_choice_->itemData(selection).toDouble());
                          });
         QObject::connect(one_to_one, &QPushButton::clicked, this, [this] {
             preview_adaptive_scaling_ = false;
@@ -2057,14 +2066,25 @@ void MainWindow::apply_preview_snapshot(const PreviewSnapshot& snapshot)
 {
     if (!preview_status_)
         return;
+    if (preview_rate_choice_)
+    {
+        const int target_index = preview_rate_choice_->findData(snapshot.target_fps);
+        if (target_index >= 0 && target_index != preview_rate_choice_->currentIndex())
+        {
+            const QSignalBlocker blocker{preview_rate_choice_};
+            preview_rate_choice_->setCurrentIndex(target_index);
+        }
+    }
     if (snapshot.paused)
         preview_status_->setText(QStringLiteral("显示已暂停：后台采集和预览服务仍继续运行"));
     else if (snapshot.connection.state != ipc::ClientConnectionState::connected)
         preview_status_->setText(QStringLiteral("预览服务未连接；最后画面不代表实时状态"));
     else if (!snapshot.subscribed)
-        preview_status_->setText(QStringLiteral("正在订阅预览帧"));
+        preview_status_->setText(
+            QStringLiteral("正在订阅 %1 fps 预览帧").arg(snapshot.target_fps, 0, 'g', 4));
     else
-        preview_status_->setText(QStringLiteral("已订阅预览：服务端按低帧率发送最新画面"));
+        preview_status_->setText(QStringLiteral("已订阅预览：目标 %1 fps，服务端发送最新画面")
+                                     .arg(snapshot.target_fps, 0, 'g', 4));
     for (std::size_t index = 0; index < snapshot.images.size(); ++index)
     {
         if (!snapshot.images[index])

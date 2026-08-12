@@ -717,11 +717,30 @@ TEST(SystemCommand, ValidatesPreviewSubscriptionAgainstBoundedRuntime)
                                                        .local = true,
                                                        .authenticated = true,
                                                        .administrator = false};
-    auto subscribed = commands.handle(
-        fixture.request("preview.subscribe", R"({"cameraIds":["CAM01"]})"), preview_reader, {});
+    auto subscribed =
+        commands.handle(fixture.request("preview.subscribe", R"({"cameraIds":["CAM01"],"fps":30})"),
+                        preview_reader, {});
     ASSERT_TRUE(subscribed);
-    EXPECT_TRUE(Json::parse(subscribed.value().payload_json).at("subscribed").get<bool>());
+    const auto subscribed_payload = Json::parse(subscribed.value().payload_json);
+    EXPECT_TRUE(subscribed_payload.at("subscribed").get<bool>());
+    EXPECT_EQ(subscribed_payload.at("fps").get<double>(), 30.0);
     EXPECT_EQ(preview->snapshot().subscriptions, 1U);
+
+    auto invalid_fps = commands.handle(
+        fixture.request("preview.subscribe", R"({"cameraIds":["CAM01"],"fps":30.1})"),
+        preview_reader, {});
+    ASSERT_FALSE(invalid_fps);
+    EXPECT_EQ(invalid_fps.error().business_code, "IPC_REQUEST_INVALID");
+
+    const paperbreak::ipc::PeerIdentity legacy_reader{.actor_sid = "S-1-5-21-preview-legacy",
+                                                      .connection_id = 43U,
+                                                      .local = true,
+                                                      .authenticated = true,
+                                                      .administrator = false};
+    auto legacy = commands.handle(
+        fixture.request("preview.subscribe", R"({"cameraIds":["CAM01"]})"), legacy_reader, {});
+    ASSERT_TRUE(legacy);
+    EXPECT_EQ(Json::parse(legacy.value().payload_json).at("fps").get<double>(), 3.0);
 
     auto invalid = commands.handle(
         fixture.request("preview.subscribe", R"({"cameraIds":["UNKNOWN"]})"), preview_reader, {});
@@ -730,7 +749,8 @@ TEST(SystemCommand, ValidatesPreviewSubscriptionAgainstBoundedRuntime)
 
     auto unsubscribed = commands.handle(fixture.request("preview.unsubscribe"), preview_reader, {});
     ASSERT_TRUE(unsubscribed);
-    EXPECT_EQ(preview->snapshot().subscriptions, 0U);
+    EXPECT_EQ(preview->snapshot().subscriptions, 1U);
+    preview->unsubscribe(legacy_reader.connection_id);
 }
 
 TEST(SystemCommand, ReturnsResolvedEventLocationAndRejectsFields)

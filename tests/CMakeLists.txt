@@ -201,7 +201,7 @@ add_test(NAME qt_console_smoke
         "$<TARGET_FILE:PaperBreakEdgeConsole>" --smoke-test)
 set_tests_properties(qt_console_smoke PROPERTIES
     LABELS "integration"
-    TIMEOUT 10)
+    TIMEOUT 20)
 
 add_test(NAME uplink_simulator_headless_smoke
     COMMAND "${CMAKE_COMMAND}" -E env

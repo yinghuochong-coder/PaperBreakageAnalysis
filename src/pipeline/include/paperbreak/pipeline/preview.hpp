@@ -25,6 +25,8 @@ namespace paperbreak::pipeline
 
 inline constexpr std::size_t preview_maximum_cameras = 4U;
 inline constexpr std::size_t preview_maximum_subscriptions = 4U;
+inline constexpr double preview_minimum_frames_per_second = 0.1;
+inline constexpr double preview_maximum_frames_per_second = 30.0;
 
 struct PreviewRoi final
 {
@@ -134,8 +136,9 @@ class PreviewRuntime final
     [[nodiscard]] Result<void> start();
     void request_stop() noexcept;
     [[nodiscard]] Result<void> join(std::chrono::steady_clock::time_point deadline);
-    [[nodiscard]] Result<void> subscribe(std::uint64_t subscriber_id,
-                                         const std::vector<std::string>& camera_ids);
+    [[nodiscard]] Result<double> subscribe(std::uint64_t subscriber_id,
+                                           const std::vector<std::string>& camera_ids,
+                                           std::optional<double> frames_per_second = std::nullopt);
     void unsubscribe(std::uint64_t subscriber_id) noexcept;
     void submit(camera::FrameView frame, PreviewFrameMetadata metadata = {}) noexcept;
     [[nodiscard]] PreviewRuntimeSnapshot snapshot() const noexcept;
@@ -147,9 +150,16 @@ class PreviewRuntime final
         PreviewFrameMetadata metadata;
     };
     struct CameraSlot;
+    struct Subscription final
+    {
+        std::unordered_set<std::string> camera_ids;
+        double frames_per_second{};
+        std::unordered_map<std::string, camera::MonotonicTime> last_deliveries;
+    };
 
     void run(std::stop_token token) noexcept;
-    [[nodiscard]] bool has_subscriber_for(const std::string& camera_id) const noexcept;
+    [[nodiscard]] std::optional<double> target_frames_per_second_for(
+        const std::string& camera_id) const noexcept;
     void finish() noexcept;
 
     std::unique_ptr<IPreviewEncoder> encoder_;
@@ -162,7 +172,7 @@ class PreviewRuntime final
     std::atomic_size_t pending_slots_{};
     std::size_t rotation_start_{};
     mutable std::mutex subscriptions_mutex_;
-    std::unordered_map<std::uint64_t, std::unordered_set<std::string>> subscriptions_;
+    std::unordered_map<std::uint64_t, Subscription> subscriptions_;
     mutable std::mutex lifecycle_mutex_;
     std::condition_variable lifecycle_condition_;
     bool started_{};

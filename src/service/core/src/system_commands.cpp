@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -2783,9 +2784,9 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             return Result<ipc::CommandResponse>::failure(
                 command_error("SYS_NOT_SUPPORTED", Severity::warning, "预览运行时尚未装配",
                               "ipc.preview.subscribe"));
-        if (!has_only_field(payload.value(), "cameraIds") ||
-            !payload.value()["cameraIds"].is_array() || payload.value()["cameraIds"].empty() ||
-            payload.value()["cameraIds"].size() > 4U)
+        if (!has_only_fields(payload.value(), {"cameraIds", "fps"}) ||
+            !payload.value().contains("cameraIds") || !payload.value()["cameraIds"].is_array() ||
+            payload.value()["cameraIds"].empty() || payload.value()["cameraIds"].size() > 4U)
             return Result<ipc::CommandResponse>::failure(command_error(
                 "IPC_REQUEST_INVALID", Severity::error,
                 "preview.subscribe 需要 1 至 4 个 cameraIds", "ipc.preview.subscribe"));
@@ -2800,11 +2801,28 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                                   "cameraIds 包含无效相机编号", "ipc.preview.subscribe"));
             camera_ids.push_back(value.get<std::string>());
         }
-        auto subscribed = preview_->subscribe(peer.connection_id, camera_ids);
+        std::optional<double> frames_per_second;
+        if (payload.value().contains("fps"))
+        {
+            if (!payload.value()["fps"].is_number())
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error, "fps 必须为数值",
+                                  "ipc.preview.subscribe"));
+            frames_per_second = payload.value()["fps"].get<double>();
+            if (!std::isfinite(frames_per_second.value()) ||
+                frames_per_second.value() < pipeline::preview_minimum_frames_per_second ||
+                frames_per_second.value() > pipeline::preview_maximum_frames_per_second)
+                return Result<ipc::CommandResponse>::failure(
+                    command_error("IPC_REQUEST_INVALID", Severity::error,
+                                  "fps 必须在 0.1 至 30 之间", "ipc.preview.subscribe"));
+        }
+        auto subscribed = preview_->subscribe(peer.connection_id, camera_ids, frames_per_second);
         if (!subscribed)
             return Result<ipc::CommandResponse>::failure(subscribed.error());
         return Result<ipc::CommandResponse>::success(
-            {.payload_json = Json{{"subscribed", true}, {"cameraIds", camera_ids}}.dump(),
+            {.payload_json =
+                 Json{{"subscribed", true}, {"cameraIds", camera_ids}, {"fps", subscribed.value()}}
+                     .dump(),
              .binary = {}});
     }
     if (request.command == "preview.unsubscribe")

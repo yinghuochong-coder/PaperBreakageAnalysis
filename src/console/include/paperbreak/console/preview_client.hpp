@@ -34,6 +34,7 @@ struct PreviewSnapshot final
     std::array<std::optional<PreviewImage>, 4U> images;
     bool paused{};
     bool subscribed{};
+    double target_fps{2.0};
     std::optional<Error> last_error;
     std::uint64_t accepted_frames{};
     std::uint64_t rejected_frames{};
@@ -52,6 +53,7 @@ class PreviewClient final
     [[nodiscard]] Result<void> start();
     void stop() noexcept;
     void set_camera_ids(std::vector<std::string> camera_ids);
+    void set_target_fps(double frames_per_second);
     void set_paused(bool paused);
     [[nodiscard]] const PreviewSnapshot& snapshot() const noexcept;
     [[nodiscard]] const std::vector<std::string>& camera_ids() const noexcept;

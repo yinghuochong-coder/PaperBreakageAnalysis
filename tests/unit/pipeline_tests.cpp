@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -439,6 +441,43 @@ TEST(PipelinePreviewRuntime, DoesNotEncodeWithoutSubscribersAndSamplesAtConfigur
     EXPECT_GE(runtime.snapshot().maximum_encoding_time, runtime.snapshot().last_encoding_time);
     ASSERT_EQ(runtime.snapshot().cameras.size(), 1U);
     EXPECT_EQ(runtime.snapshot().cameras.front().encoding_attempts, 1U);
+    runtime.request_stop();
+    EXPECT_TRUE(runtime.join(std::chrono::steady_clock::now() + 1s));
+}
+
+TEST(PipelinePreviewRuntime, SupportsThirtyFpsAndThrottlesEachSubscriberIndependently)
+{
+    std::mutex deliveries_mutex;
+    std::vector<PreviewDelivery> deliveries;
+    PreviewRuntime runtime{{"CAM01"},
+                           std::make_unique<CountingPreviewEncoder>(),
+                           [&](PreviewDelivery delivery) {
+                               std::scoped_lock lock{deliveries_mutex};
+                               deliveries.push_back(std::move(delivery));
+                           },
+                           {.frames_per_second = 2.0}};
+    ASSERT_TRUE(runtime.start());
+    const auto ten_fps = runtime.subscribe(10U, {"CAM01"}, 10.0);
+    const auto thirty_fps = runtime.subscribe(30U, {"CAM01"}, 30.0);
+    ASSERT_TRUE(ten_fps);
+    ASSERT_TRUE(thirty_fps);
+    EXPECT_EQ(ten_fps.value(), 10.0);
+    EXPECT_EQ(thirty_fps.value(), 30.0);
+    auto invalid = runtime.subscribe(40U, {"CAM01"}, 30.1);
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
+
+    const std::array<std::uint64_t, 7U> frame_times_ms{1U, 35U, 69U, 103U, 137U, 171U, 205U};
+    for (std::size_t index = 0; index < frame_times_ms.size(); ++index)
+    {
+        runtime.submit(preview_frame(frame_times_ms[index]));
+        ASSERT_TRUE(wait_preview([&] { return runtime.snapshot().encoded >= index + 1U; }));
+    }
+    {
+        std::scoped_lock lock{deliveries_mutex};
+        EXPECT_EQ(std::ranges::count(deliveries, 30U, &PreviewDelivery::subscriber_id), 7);
+        EXPECT_EQ(std::ranges::count(deliveries, 10U, &PreviewDelivery::subscriber_id), 3);
+    }
     runtime.request_stop();
     EXPECT_TRUE(runtime.join(std::chrono::steady_clock::now() + 1s));
 }
