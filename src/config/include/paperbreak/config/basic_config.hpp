@@ -106,6 +106,9 @@ struct CameraConfig final
 
 struct AcquisitionConfig final
 {
+    bool auto_start{};
+    std::uint32_t startup_retry_interval_ms{1000U};
+    std::uint32_t startup_retry_count{3U};
     std::uint32_t frame_pool_capacity{2048U};
     std::uint32_t queue_capacity{128U};
     std::uint32_t receive_timeout_ms{1000U};

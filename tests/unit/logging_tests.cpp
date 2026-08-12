@@ -114,6 +114,29 @@ TEST(Logging, FiltersLevelsRedactsSecretsAndRotatesBySize)
     EXPECT_NE(content.find("[audit]"), std::string::npos);
 }
 
+TEST(Logging, WritesTheSameRecordToConsoleAndFile)
+{
+    TemporaryDirectory temporary;
+    paperbreak::logging::LoggingConfig config;
+    config.directory = temporary.path();
+    config.console_output_enabled = true;
+    auto created = paperbreak::logging::LoggingRuntime::create(config);
+    ASSERT_TRUE(created);
+    auto runtime = std::move(created).value();
+    auto registration = runtime->register_current_thread("service-main");
+    ASSERT_TRUE(registration);
+
+    testing::internal::CaptureStdout();
+    ASSERT_TRUE(runtime->log(paperbreak::logging::Category::service,
+                             paperbreak::logging::Level::info, "console-and-file-marker"));
+    ASSERT_TRUE(runtime->shutdown());
+    const auto console = testing::internal::GetCapturedStdout();
+
+    EXPECT_NE(console.find("console-and-file-marker"), std::string::npos);
+    EXPECT_NE(console.find("[service-main] [info] [service]"), std::string::npos);
+    EXPECT_NE(read_logs(temporary.path()).find("console-and-file-marker"), std::string::npos);
+}
+
 TEST(Logging, ReportsDiagnosticErrorWhenDirectoryCannotBeCreated)
 {
     TemporaryDirectory temporary;

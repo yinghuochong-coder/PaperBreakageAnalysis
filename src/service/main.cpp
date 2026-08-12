@@ -9,6 +9,7 @@
 #include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/platform/system_metrics.hpp"
 #include "paperbreak/service/algorithm_metrics.hpp"
+#include "paperbreak/service/camera_startup.hpp"
 #include "paperbreak/service/event_runtime.hpp"
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/service/system_commands.hpp"
@@ -1720,6 +1721,7 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     log_config.queue_capacity = loaded.value().effective->logging.queue_capacity;
     log_config.minimum_level = logging_level_from_config(loaded.value().effective->logging.level);
     log_config.retention_days = loaded.value().effective->logging.retention_days;
+    log_config.console_output_enabled = true;
     auto logging_result = paperbreak::logging::LoggingRuntime::create(log_config);
     if (!logging_result)
     {
@@ -2411,6 +2413,9 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     components.push_back(std::make_unique<EventLifecycleComponent>(event_runtime));
     if (nvme_cache)
         components.push_back(std::make_unique<NvmeLifecycleComponent>(nvme_cache));
+    components.push_back(std::make_unique<paperbreak::service::CameraStartupLifecycleComponent>(
+        cameras, loaded.value().effective->cameras, loaded.value().effective->acquisition,
+        logging));
     components.push_back(std::make_unique<StorageMaintenanceLifecycleComponent>(
         storage_policy, alarms, nvme_cache, service_thread_registrar));
     components.push_back(std::make_unique<IpcLifecycleComponent>(ipc_server));

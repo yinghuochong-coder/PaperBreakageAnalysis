@@ -111,6 +111,9 @@
       "type": "object", "additionalProperties": false,
       "required": ["framePoolCapacity", "queueCapacity", "receiveTimeoutMs", "threadPriority"],
       "properties": {
+        "autoStart": { "type": "boolean", "default": false },
+        "startupRetryIntervalMs": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 1000 },
+        "startupRetryCount": { "type": "integer", "minimum": 0, "maximum": 10, "default": 3 },
         "framePoolCapacity": { "type": "integer", "minimum": 1, "maximum": 4096 },
         "queueCapacity": { "type": "integer", "minimum": 1, "maximum": 4096 },
         "receiveTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 60000 },

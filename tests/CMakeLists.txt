@@ -5,6 +5,7 @@ add_executable(PaperBreakTests
     unit/algorithm_mock_trigger_tests.cpp
     unit/camera_acquisition_tests.cpp
     unit/camera_model_tests.cpp
+    unit/camera_startup_tests.cpp
     unit/camera_state_tests.cpp
     unit/common_tests.cpp
     unit/basic_config_tests.cpp

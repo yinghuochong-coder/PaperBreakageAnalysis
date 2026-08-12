@@ -175,6 +175,36 @@ TEST(BasicConfig, AcceptsCompleteVersionTwoAtUnicodeAndSpacePath)
     EXPECT_EQ(result.value().config_revision, 1U);
 }
 
+TEST(BasicConfig, DefaultsAndRoundTripsCameraStartupPolicy)
+{
+    const TemporaryDirectory directory;
+    const auto legacy = paperbreak::config::parse_config(valid_config(), directory.path());
+    ASSERT_TRUE(legacy) << legacy.error().message;
+    EXPECT_FALSE(legacy.value().acquisition.auto_start);
+    EXPECT_EQ(legacy.value().acquisition.startup_retry_interval_ms, 1000U);
+    EXPECT_EQ(legacy.value().acquisition.startup_retry_count, 3U);
+
+    auto explicit_policy = paperbreak::config::serialize_config(legacy.value());
+    explicit_policy = replace_once(explicit_policy, "\"autoStart\": false", "\"autoStart\": true");
+    explicit_policy = replace_once(explicit_policy, "\"startupRetryIntervalMs\": 1000",
+                                   "\"startupRetryIntervalMs\": 250");
+    explicit_policy =
+        replace_once(explicit_policy, "\"startupRetryCount\": 3", "\"startupRetryCount\": 5");
+    const auto parsed = paperbreak::config::parse_config(explicit_policy, directory.path());
+    ASSERT_TRUE(parsed) << parsed.error().message;
+    EXPECT_TRUE(parsed.value().acquisition.auto_start);
+    EXPECT_EQ(parsed.value().acquisition.startup_retry_interval_ms, 250U);
+    EXPECT_EQ(parsed.value().acquisition.startup_retry_count, 5U);
+
+    EXPECT_FALSE(paperbreak::config::parse_config(replace_once(explicit_policy,
+                                                               "\"startupRetryIntervalMs\": 250",
+                                                               "\"startupRetryIntervalMs\": 0"),
+                                                  directory.path()));
+    EXPECT_FALSE(paperbreak::config::parse_config(
+        replace_once(explicit_policy, "\"startupRetryCount\": 5", "\"startupRetryCount\": 11"),
+        directory.path()));
+}
+
 TEST(BasicConfig, AllowsAlgorithmFullFrameAcrossDifferentCameraGeometries)
 {
     const TemporaryDirectory directory;

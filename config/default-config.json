@@ -1,8 +1,11 @@
 {
   "acquisition": {
+    "autoStart": true,
     "framePoolCapacity": 2187,
     "queueCapacity": 128,
     "receiveTimeoutMs": 1000,
+    "startupRetryCount": 3,
+    "startupRetryIntervalMs": 1000,
     "threadPriority": "normal"
   },
   "algorithm": {
@@ -153,7 +156,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 89,
+  "configRevision": 90,
   "configSchemaVersion": 4,
   "event": {
     "generatePreviewVideo": true,
@@ -181,7 +184,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-12T07:29:09.629Z",
+  "modifiedAt": "2026-08-12T07:48:27.190Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

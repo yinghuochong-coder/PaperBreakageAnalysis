@@ -25,6 +25,18 @@ Hikrobot `ExposureAuto` 的关闭、单次和连续模式。v2/v3 迁移固定�
 - 相机参数、preview、algorithm、event、存储水位、日志等级/保留和 health 可立即应用。
 - 返回值同时包含存储修订、有效修订和 `pendingRestartPaths`。
 
+## 服务启动自动采集
+
+`acquisition.autoStart` 控制服务启动时是否自动处理所有 `enabled=true` 的已配置相机槽位。
+启用后，每个槽位依次执行连接、应用保存参数和开始采集；一个槽位失败不会阻止其他槽位或服务
+继续启动。`acquisition.startupRetryIntervalMs` 是失败后的重试间隔，默认 1000 ms，范围
+1～60000 ms；`acquisition.startupRetryCount` 是首次失败后的额外重试次数，默认 3，范围
+0～10，因此默认最多尝试 4 次。重试耗尽后相机保持断开并记录稳定业务错误，操作员仍可通过
+IPC 诊断和手动重试。这三个字段均属于 `/acquisition` 待重启配置。
+
+旧配置缺少这三个字段时按 `autoStart=false`、1000 ms 和 3 次迁移，序列化后显式写出；本次
+向 schema v4 添加向后兼容的可选字段，不提升 `configSchemaVersion`。
+
 ## M5 采集容量与事件配置
 
 - `acquisition.framePoolCapacity` 是每路相机固定原始图像缓冲数，不只是转发队列长度。
@@ -92,6 +104,9 @@ ADR-017 取消滚动缓存启动恢复配置与固定扫描上限。每次启动
 - uplink 传输字段变化记录为 `/uplink/transport` 待重启项；配置 schema、解析器、序列化器和默认配置使用相同字段集。
 
 ## 日志配置
+
+服务进程把通过等级过滤和脱敏后的同一条异步日志同时写到标准输出及按线程滚动文件；
+控制台写入由有界日志工作线程执行，不阻塞相机采集线程。
 
 本变更不提升 `configSchemaVersion`。`logging.level` 与 `logging.retentionDays` 属于
 `/logging/live`，配置事务按 prepare、apply/readback、commit 和 rollback 热应用；应用失败时恢复

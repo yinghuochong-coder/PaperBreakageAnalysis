@@ -665,12 +665,27 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
 
 Result<EdgeConfig> parse_acquisition(const Json& root, EdgeConfig result)
 {
-    const Json& acquisition = root.at("acquisition");
-    if (auto fields = exact_fields(
-            acquisition, "/acquisition",
-            {"framePoolCapacity", "queueCapacity", "receiveTimeoutMs", "threadPriority"});
+    Json acquisition = root.at("acquisition");
+    if (acquisition.is_object())
+    {
+        if (!acquisition.contains("autoStart"))
+            acquisition["autoStart"] = false;
+        if (!acquisition.contains("startupRetryIntervalMs"))
+            acquisition["startupRetryIntervalMs"] = 1000U;
+        if (!acquisition.contains("startupRetryCount"))
+            acquisition["startupRetryCount"] = 3U;
+    }
+    if (auto fields = exact_fields(acquisition, "/acquisition",
+                                   {"autoStart", "startupRetryIntervalMs", "startupRetryCount",
+                                    "framePoolCapacity", "queueCapacity", "receiveTimeoutMs",
+                                    "threadPriority"});
         !fields)
         return Result<EdgeConfig>::failure(fields.error());
+    auto auto_start = bool_field(acquisition, "autoStart", "/acquisition");
+    auto retry_interval = unsigned_field<std::uint32_t>(acquisition, "startupRetryIntervalMs",
+                                                        "/acquisition", 1U, 60000U);
+    auto retry_count =
+        unsigned_field<std::uint32_t>(acquisition, "startupRetryCount", "/acquisition", 0U, 10U);
     auto frame_pool =
         unsigned_field<std::uint32_t>(acquisition, "framePoolCapacity", "/acquisition", 1U, 4096U);
     auto queue =
@@ -678,6 +693,12 @@ Result<EdgeConfig> parse_acquisition(const Json& root, EdgeConfig result)
     auto timeout =
         unsigned_field<std::uint32_t>(acquisition, "receiveTimeoutMs", "/acquisition", 1U, 60000U);
     auto priority = string_field(acquisition, "threadPriority", "/acquisition", 16U);
+    if (!auto_start)
+        return Result<EdgeConfig>::failure(auto_start.error());
+    if (!retry_interval)
+        return Result<EdgeConfig>::failure(retry_interval.error());
+    if (!retry_count)
+        return Result<EdgeConfig>::failure(retry_count.error());
     if (!frame_pool)
         return Result<EdgeConfig>::failure(frame_pool.error());
     if (!queue)
@@ -694,7 +715,10 @@ Result<EdgeConfig> parse_acquisition(const Json& root, EdgeConfig result)
         return Result<EdgeConfig>::failure(
             invalid_config("framePoolCapacity 不能小于 queueCapacity", "config.validateDependency",
                            "/acquisition", "pool-smaller-than-queue"));
-    result.acquisition = {.frame_pool_capacity = frame_pool.value(),
+    result.acquisition = {.auto_start = auto_start.value(),
+                          .startup_retry_interval_ms = retry_interval.value(),
+                          .startup_retry_count = retry_count.value(),
+                          .frame_pool_capacity = frame_pool.value(),
                           .queue_capacity = queue.value(),
                           .receive_timeout_ms = timeout.value(),
                           .thread_priority = std::move(priority).value()};
@@ -1244,7 +1268,10 @@ std::string serialize_config(const EdgeConfig& config)
                    {"shutdownTimeoutMs", config.system.shutdown_timeout_ms}}},
                  {"cameras", std::move(cameras)},
                  {"acquisition",
-                  {{"framePoolCapacity", config.acquisition.frame_pool_capacity},
+                  {{"autoStart", config.acquisition.auto_start},
+                   {"startupRetryIntervalMs", config.acquisition.startup_retry_interval_ms},
+                   {"startupRetryCount", config.acquisition.startup_retry_count},
+                   {"framePoolCapacity", config.acquisition.frame_pool_capacity},
                    {"queueCapacity", config.acquisition.queue_capacity},
                    {"receiveTimeoutMs", config.acquisition.receive_timeout_ms},
                    {"threadPriority", config.acquisition.thread_priority}}},

@@ -52,6 +52,8 @@ struct LoggingConfig final
     std::size_t maximum_thread_file_states{64U};
     std::uint32_t retention_days{30U};
     Level minimum_level{Level::info};
+    /// Bootstrap enables this for user-facing processes; library tests may keep it disabled.
+    bool console_output_enabled{};
 };
 
 struct StructuredField final

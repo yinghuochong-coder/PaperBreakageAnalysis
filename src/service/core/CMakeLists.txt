@@ -1,5 +1,6 @@
 add_library(paperbreak_service_core STATIC
     src/algorithm_metrics.cpp
+    src/camera_startup.cpp
     src/event_runtime.cpp
     src/runtime.cpp
     src/system_commands.cpp)

@@ -1,6 +1,7 @@
 #include "paperbreak/service/system_commands.hpp"
 
 #include "paperbreak/common/version.hpp"
+#include "paperbreak/service/camera_startup.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -1212,75 +1213,6 @@ void add_alarm_active(Json& value, const config::CameraConfig& configuration)
     const bool raw = value["lineInput"]["rawLevel"].get<bool>();
     value["lineInput"]["alarmActive"] =
         configuration.line_io.alarm_active_level == config::AlarmActiveLevel::high ? raw : !raw;
-}
-
-camera::CameraParameterSnapshot camera_parameters(const config::CameraConfig& value)
-{
-    camera::ExposureAutoMode exposure_auto = camera::ExposureAutoMode::off;
-    switch (value.exposure_auto_mode)
-    {
-    case config::ExposureAutoMode::off:
-        exposure_auto = camera::ExposureAutoMode::off;
-        break;
-    case config::ExposureAutoMode::once:
-        exposure_auto = camera::ExposureAutoMode::once;
-        break;
-    case config::ExposureAutoMode::continuous:
-        exposure_auto = camera::ExposureAutoMode::continuous;
-        break;
-    }
-    camera::PixelFormat pixel = camera::PixelFormat::mono8;
-    switch (value.pixel_format)
-    {
-    case config::PixelFormat::mono8:
-        pixel = camera::PixelFormat::mono8;
-        break;
-    case config::PixelFormat::mono10:
-        pixel = camera::PixelFormat::mono10;
-        break;
-    case config::PixelFormat::mono12:
-        pixel = camera::PixelFormat::mono12;
-        break;
-    case config::PixelFormat::bayer_rg8:
-        pixel = camera::PixelFormat::bayer_rg8;
-        break;
-    }
-    camera::TriggerMode trigger = camera::TriggerMode::continuous;
-    switch (value.trigger_mode)
-    {
-    case config::TriggerMode::continuous:
-        trigger = camera::TriggerMode::continuous;
-        break;
-    case config::TriggerMode::hardware:
-        trigger = camera::TriggerMode::hardware;
-        break;
-    case config::TriggerMode::software:
-        trigger = camera::TriggerMode::software;
-        break;
-    }
-    camera::CameraParameterSnapshot result{
-        .exposure_us = value.exposure_us,
-        .exposure_auto_mode = exposure_auto,
-        .gain_db = value.gain_db,
-        .frame_rate = value.frame_rate,
-        .roi =
-            camera::Roi{value.roi.width, value.roi.height, value.roi.offset_x, value.roi.offset_y},
-        .reverse_x = value.reverse_x,
-        .reverse_y = value.reverse_y,
-        .pixel_format = pixel,
-        .trigger_mode = trigger,
-        .trigger_delay_us = value.trigger_delay_us,
-        .packet_size_bytes = value.packet_size_bytes,
-        .inter_packet_delay_ns = value.inter_packet_delay_ns,
-        .line_io =
-            camera::LineIoParameters{.alarm_input_enabled = value.line_io.alarm_input_enabled,
-                                     .strobe_output_enabled = value.line_io.strobe_output_enabled,
-                                     .strobe_duration_us = value.line_io.strobe_duration_us,
-                                     .strobe_pre_delay_us = value.line_io.strobe_pre_delay_us,
-                                     .strobe_post_delay_us = value.line_io.strobe_post_delay_us}};
-    if (trigger == camera::TriggerMode::hardware)
-        result.trigger_source = value.trigger_source;
-    return result;
 }
 
 Result<Json> bound_camera_json(const std::string& id, const std::string& serial,
@@ -2625,7 +2557,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             if (!connected)
                 return Result<ipc::CommandResponse>::failure(connected.error());
 
-            auto applied = cameras_->update(id.value(), camera_parameters(*found));
+            auto applied = cameras_->update(id.value(), configured_camera_parameters(*found));
             if (!applied)
             {
                 if (applied.error().business_code != "CAMERA_CONFIG_FAILED")
@@ -2711,8 +2643,8 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                 return Result<ipc::CommandResponse>::failure(current.error());
             if (current.value().capabilities)
             {
-                auto validated = camera::validate_parameters(*current.value().capabilities,
-                                                             camera_parameters(*candidate_camera));
+                auto validated = camera::validate_parameters(
+                    *current.value().capabilities, configured_camera_parameters(*candidate_camera));
                 if (!validated)
                     return Result<ipc::CommandResponse>::failure(validated.error());
             }
@@ -2731,7 +2663,7 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                 return Result<ipc::CommandResponse>::failure(
                     command_error("CAMERA_NOT_FOUND", Severity::error, "保存后逻辑相机不存在",
                                   "ipc.camera.updateConfig"));
-            auto applied = cameras_->update(id.value(), camera_parameters(*updated));
+            auto applied = cameras_->update(id.value(), configured_camera_parameters(*updated));
             if (applied)
                 result = std::move(applied);
             else

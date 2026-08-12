@@ -277,6 +277,22 @@ class RecentLogSink final : public spdlog::sinks::base_sink<std::mutex>
     std::shared_ptr<RecentLogStore> store_;
 };
 
+class ConsoleSink final : public spdlog::sinks::base_sink<std::mutex>
+{
+  protected:
+    void sink_it_(const spdlog::details::log_msg& log_message) override
+    {
+        const auto payload = parse_payload(log_message);
+        const auto line = formatted_line(log_message, payload);
+        static_cast<void>(std::fwrite(line.data(), sizeof(char), line.size(), stdout));
+    }
+
+    void flush_() override
+    {
+        static_cast<void>(std::fflush(stdout));
+    }
+};
+
 class ThreadRoutingFileSink final : public spdlog::sinks::base_sink<std::mutex>
 {
   public:
@@ -631,10 +647,14 @@ Result<std::unique_ptr<LoggingRuntime>> LoggingRuntime::create(const LoggingConf
         auto state = std::make_shared<State>();
         state->recent_logs = std::make_shared<RecentLogStore>(config.recent_record_capacity);
         auto recent_sink = std::make_shared<RecentLogSink>(state->recent_logs);
+        auto console_sink = std::make_shared<ConsoleSink>();
         state->file_sink = std::make_shared<ThreadRoutingFileSink>(
             config.directory, config.file_stem, config.max_file_size_bytes,
             config.max_files_per_day, config.maximum_thread_file_states, config.retention_days);
-        const std::array<spdlog::sink_ptr, 2U> sinks{recent_sink, state->file_sink};
+        std::vector<spdlog::sink_ptr> sinks{recent_sink};
+        if (config.console_output_enabled)
+            sinks.push_back(std::move(console_sink));
+        sinks.push_back(state->file_sink);
         state->thread_pool = std::make_shared<spdlog::details::thread_pool>(
             config.queue_capacity, 1U, [] { set_native_thread_description("logging-worker"); },
             [] { set_native_thread_description(""); });
