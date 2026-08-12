@@ -25,22 +25,54 @@
   },
   "cameras": [
     {
-      "enabled": true,
       "autoExposure": "Off",
-      "exposureUs": 500.0,
+      "enabled": true,
+      "exposureUs": 5000.0,
       "frameRate": 60.0,
-      "gainDb": 23.01,
+      "gainDb": 23.0,
       "id": "CAM01",
       "interPacketDelayNs": 400,
       "lineIo": {
         "alarmActiveLevel": "High",
         "alarmInputEnabled": true,
-        "strobeDurationUs": 7,
+        "strobeDurationUs": 23,
         "strobeOutputEnabled": true,
         "strobePostDelayUs": 0,
-        "strobePreDelayUs": 5
+        "strobePreDelayUs": 0
       },
-      "location": "安装工位",
+      "location": "001",
+      "packetSizeBytes": 8164,
+      "pixelFormat": "Mono8",
+      "reverseX": false,
+      "reverseY": false,
+      "roi": {
+        "height": 1240,
+        "offsetX": 0,
+        "offsetY": 0,
+        "width": 1624
+      },
+      "serialNumber": "DB2180750",
+      "triggerDelayUs": 0,
+      "triggerMode": "Continuous",
+      "triggerSource": ""
+    },
+    {
+      "autoExposure": "Off",
+      "enabled": true,
+      "exposureUs": 5000.0,
+      "frameRate": 60.0,
+      "gainDb": 23.01,
+      "id": "CAM02",
+      "interPacketDelayNs": 400,
+      "lineIo": {
+        "alarmActiveLevel": "High",
+        "alarmInputEnabled": true,
+        "strobeDurationUs": 23,
+        "strobeOutputEnabled": true,
+        "strobePostDelayUs": 0,
+        "strobePreDelayUs": 0
+      },
+      "location": "002",
       "packetSizeBytes": 8164,
       "pixelFormat": "Mono8",
       "reverseX": false,
@@ -57,12 +89,44 @@
       "triggerSource": ""
     },
     {
-      "enabled": true,
       "autoExposure": "Off",
-      "exposureUs": 500.0,
+      "enabled": true,
+      "exposureUs": 5000.0,
       "frameRate": 60.0,
       "gainDb": 23.01,
-      "id": "CAM02",
+      "id": "CAM03",
+      "interPacketDelayNs": 4000,
+      "lineIo": {
+        "alarmActiveLevel": "High",
+        "alarmInputEnabled": true,
+        "strobeDurationUs": 23,
+        "strobeOutputEnabled": true,
+        "strobePostDelayUs": 0,
+        "strobePreDelayUs": 0
+      },
+      "location": "003",
+      "packetSizeBytes": 1500,
+      "pixelFormat": "Mono8",
+      "reverseX": false,
+      "reverseY": false,
+      "roi": {
+        "height": 1240,
+        "offsetX": 0,
+        "offsetY": 0,
+        "width": 1624
+      },
+      "serialNumber": "DB2180695",
+      "triggerDelayUs": 0,
+      "triggerMode": "Continuous",
+      "triggerSource": ""
+    },
+    {
+      "autoExposure": "Off",
+      "enabled": true,
+      "exposureUs": 5000.0,
+      "frameRate": 60.0,
+      "gainDb": 23.01,
+      "id": "CAM04",
       "interPacketDelayNs": 400,
       "lineIo": {
         "alarmActiveLevel": "High",
@@ -70,9 +134,9 @@
         "strobeDurationUs": 23,
         "strobeOutputEnabled": true,
         "strobePostDelayUs": 0,
-        "strobePreDelayUs": 5
+        "strobePreDelayUs": 0
       },
-      "location": "NoLed",
+      "location": "004",
       "packetSizeBytes": 8164,
       "pixelFormat": "Mono8",
       "reverseX": false,
@@ -89,7 +153,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 73,
+  "configRevision": 88,
   "configSchemaVersion": 4,
   "event": {
     "generatePreviewVideo": true,
@@ -117,7 +181,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-11T08:37:28.689Z",
+  "modifiedAt": "2026-08-12T06:18:06.334Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

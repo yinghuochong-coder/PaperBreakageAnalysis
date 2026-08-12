@@ -21,6 +21,8 @@
 #include <QFile>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QMouseEvent>
@@ -644,6 +646,11 @@ int main(int argc, char* argv[])
                 .offset_x = {0U, 1592U, 2U},
                 .offset_y = {0U, 1232U, 16U}};
         camera_smoke.discovered_devices.front().exclusive_access_available = true;
+        camera_smoke.discovered_devices.push_back({.model = "MV-CS020-60GM",
+                                                   .serial = "SMOKE-02",
+                                                   .ip = "192.0.2.11",
+                                                   .network_interface = "192.0.2.1",
+                                                   .exclusive_access_available = true});
         main_window.apply_camera_snapshot(camera_smoke);
         auto* const camera_selector =
             main_window.findChild<QComboBox*>(QStringLiteral("camera-selector"));
@@ -718,9 +725,40 @@ int main(int argc, char* argv[])
             !main_window.findChild<QWidget*>(QStringLiteral("camera-trigger-panel")) &&
             !main_window.findChild<QPushButton*>(
                 QStringLiteral("camera-camera.softwareTrigger"));
+        auto* const camera_binding_panel =
+            main_window.findChild<QWidget*>(QStringLiteral("camera-binding-panel"));
+        auto* const camera_bind_slot =
+            main_window.findChild<QComboBox*>(QStringLiteral("camera-bind-slot"));
+        auto* const camera_bind_location =
+            main_window.findChild<QLineEdit*>(QStringLiteral("camera-bind-location"));
+        auto* const camera_bind_button =
+            main_window.findChild<QPushButton*>(QStringLiteral("camera-bind"));
+        if (camera_bind_location)
+            camera_bind_location->setText(QStringLiteral("烘干部入口"));
+        application.processEvents();
+        const bool initial_binding_available =
+            camera_binding_panel && camera_bind_slot && camera_bind_location &&
+            camera_bind_button && camera_bind_button->parentWidget() == camera_binding_panel &&
+            camera_bind_slot->count() == 2 &&
+            camera_bind_slot->currentText() == QStringLiteral("CAM03") &&
+            camera_bind_button->isEnabled();
+        camera_smoke.cameras.push_back({.id = "CAM03",
+                                        .location = "烘干部入口",
+                                        .state = "disconnected",
+                                        .serial = "SMOKE-01"});
+        camera_smoke.stored_config_revision = 2U;
         camera_smoke.topology_restart_required = true;
         main_window.apply_camera_snapshot(camera_smoke);
         const bool restart_state_disabled_controls = main_window.camera_device_controls_disabled();
+        const auto* const selected_discovered =
+            main_window.findChild<QListWidget*>(QStringLiteral("discovered-devices"));
+        const bool next_binding_available_without_restart =
+            selected_discovered && selected_discovered->currentRow() == 1 && camera_bind_slot &&
+            selected_discovered->item(0) &&
+            selected_discovered->item(0)->text().contains(QStringLiteral("已绑定到 CAM03")) &&
+            camera_bind_slot->count() == 1 &&
+            camera_bind_slot->currentText() == QStringLiteral("CAM04") && camera_bind_button &&
+            camera_bind_button->isEnabled();
         const bool invalid_theme_fell_back =
             theme_controller.mode() == paperbreak::console::ThemeMode::system;
         const bool selected_light =
@@ -911,14 +949,14 @@ int main(int argc, char* argv[])
                    !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && camera_layout_responsive &&
-                   camera_action_bar_merged &&
-                   preview_panes_stable_and_cycle && camera_banner_removed &&
-                   fixed_acquisition_controls_removed &&
+                   camera_action_bar_merged && preview_panes_stable_and_cycle &&
+                   camera_banner_removed && fixed_acquisition_controls_removed &&
                    camera_discover_above_list && line_io_panels_split && first_camera_status_only &&
                    selected_camera_status_only && first_camera_mirroring_loaded &&
                    selected_camera_mirroring_loaded && roi_capabilities_loaded &&
                    roi_offset_aligned && empty_configuration_kept_discovery &&
-                   restart_state_disabled_controls && main_window.operations_pages_ready() &&
+                   initial_binding_available && restart_state_disabled_controls &&
+                   next_binding_available_without_restart && main_window.operations_pages_ready() &&
                    main_window.algorithm_page_ready() && main_window.event_pages_ready() &&
                    main_window.storage_page_ready() && main_window.uplink_page_ready() &&
                    event_configuration_editable && local_time_displayed &&

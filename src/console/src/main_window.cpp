@@ -737,26 +737,36 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             discovered_devices_->setObjectName(QStringLiteral("discovered-devices"));
             discovered_devices_->setMinimumHeight(140);
             discovered_layout->addWidget(discovered_devices_);
-            auto* binding = make_child<QWidget>(discovered_group);
-            binding->setObjectName(QStringLiteral("camera-binding-form"));
-            auto* binding_layout = make_layout<QFormLayout>(binding);
-            binding_layout->setContentsMargins(0, 0, 0, 0);
+            sidebar_layout->addWidget(discovered_group);
+
+            auto* binding_group = make_child<QGroupBox>(sidebar, QStringLiteral("槽位绑定"));
+            binding_group->setObjectName(QStringLiteral("camera-binding-panel"));
+            binding_group->setProperty("role", "cameraPanel");
+            auto* binding_layout = make_layout<QFormLayout>(binding_group);
             binding_layout->setHorizontalSpacing(10);
             binding_layout->setVerticalSpacing(8);
             binding_layout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-            camera_bind_slot_ = make_child<QComboBox>(binding);
+            auto* binding_hint = make_child<QLabel>(
+                binding_group,
+                QStringLiteral("从上方选择一台未绑定相机，再选择逻辑槽位并填写安装位置。"));
+            binding_hint->setObjectName(QStringLiteral("camera-binding-hint"));
+            binding_hint->setWordWrap(true);
+            binding_hint->setProperty("role", "muted");
+            camera_bind_slot_ = make_child<QComboBox>(binding_group);
             camera_bind_slot_->setObjectName(QStringLiteral("camera-bind-slot"));
-            camera_bind_location_ = make_child<QLineEdit>(binding);
+            camera_bind_location_ = make_child<QLineEdit>(binding_group);
             camera_bind_location_->setObjectName(QStringLiteral("camera-bind-location"));
             camera_bind_location_->setPlaceholderText(QStringLiteral("安装位置（必填）"));
             camera_bind_location_->setMaxLength(128);
-            camera_bind_button_ = make_child<QPushButton>(binding, QStringLiteral("绑定到槽位"));
+            camera_bind_button_ =
+                make_child<QPushButton>(binding_group, QStringLiteral("绑定到槽位"));
             camera_bind_button_->setObjectName(QStringLiteral("camera-bind"));
+            camera_bind_button_->setProperty("role", "primaryAction");
+            binding_layout->addRow(binding_hint);
             binding_layout->addRow(QStringLiteral("逻辑槽位"), camera_bind_slot_);
-            binding_layout->addRow(camera_bind_location_);
+            binding_layout->addRow(QStringLiteral("安装位置"), camera_bind_location_);
             binding_layout->addRow(camera_bind_button_);
-            discovered_layout->addWidget(binding);
-            sidebar_layout->addWidget(discovered_group);
+            sidebar_layout->addWidget(binding_group);
             sidebar_layout->addStretch(1);
             content_layout->addWidget(sidebar);
 
@@ -2216,24 +2226,36 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
     discovered_devices_->blockSignals(true);
     discovered_devices_->clear();
     int discovered_selection = -1;
+    int first_unbound_device = -1;
     for (std::size_t index = 0; index < snapshot.discovered_devices.size(); ++index)
     {
         const auto& device = snapshot.discovered_devices[index];
+        const auto bound_camera = std::ranges::find_if(
+            snapshot.cameras, [&](const auto& camera) { return camera.serial == device.serial; });
+        const bool already_bound = bound_camera != snapshot.cameras.end();
         const QString availability = device.exclusive_access_available
                                          ? QStringLiteral("可独占访问")
                                          : QStringLiteral("被占用/不可独占访问");
+        const QString binding =
+            already_bound
+                ? QStringLiteral(" · 已绑定到 %1").arg(QString::fromStdString(bound_camera->id))
+                : QString{};
         discovered_devices_->addItem(
-            QStringLiteral("%1 · 序列号 %2 · IP %3 · 主机网卡 %4 · %5%6")
+            QStringLiteral("%1 · 序列号 %2 · IP %3 · 主机网卡 %4 · %5%6%7")
                 .arg(QString::fromStdString(device.model), QString::fromStdString(device.serial),
                      QString::fromStdString(device.ip),
-                     QString::fromStdString(device.network_interface), availability,
+                     QString::fromStdString(device.network_interface), availability, binding,
                      snapshot.stale ? QStringLiteral("（已过期）") : QString{}));
-        if (QString::fromStdString(device.serial) == selected_serial)
+        if (!already_bound && first_unbound_device < 0)
+            first_unbound_device = static_cast<int>(index);
+        if (!already_bound && QString::fromStdString(device.serial) == selected_serial)
             discovered_selection = static_cast<int>(index);
     }
-    discovered_devices_->setCurrentRow(discovered_selection >= 0
-                                           ? discovered_selection
-                                           : (snapshot.discovered_devices.empty() ? -1 : 0));
+    discovered_devices_->setCurrentRow(
+        discovered_selection >= 0
+            ? discovered_selection
+            : (first_unbound_device >= 0 ? first_unbound_device
+                                         : (snapshot.discovered_devices.empty() ? -1 : 0)));
     discovered_devices_->blockSignals(false);
 
     camera_bind_slot_->blockSignals(true);
@@ -2424,7 +2446,8 @@ void MainWindow::update_camera_configuration_summary()
                 .arg(camera.actual.frame_rate.value_or(0.0), 0, 'f', 1);
     }
     if (camera_snapshot_.topology_restart_required)
-        summary += QStringLiteral("\n\n相机拓扑已保存但尚未生效，请通过托盘菜单重启后台服务。");
+        summary += QStringLiteral("\n\n相机拓扑已保存但尚未生效；可继续绑定其他槽位，") +
+                   QStringLiteral("全部完成后再通过托盘菜单重启后台服务。");
     if (camera_snapshot_.stale)
         summary += QStringLiteral("\n\n相机数据不可用或已过期；旧值不会作为实时状态使用。");
     camera_configuration_value_->setText(summary);
@@ -2646,9 +2669,15 @@ void MainWindow::update_camera_controls()
     const int row = discovered_devices_ ? discovered_devices_->currentRow() : -1;
     const bool valid_row =
         row >= 0 && row < static_cast<int>(camera_snapshot_.discovered_devices.size());
-    bool bindable = valid_row && !camera_snapshot_.stale &&
-                    !camera_snapshot_.topology_restart_required &&
-                    camera_bind_slot_->currentIndex() >= 0 &&
+    const CameraOperationResult* operation =
+        camera_snapshot_.operation ? &*camera_snapshot_.operation : nullptr;
+    const bool operation_pending = operation && operation->pending;
+    const bool binding_snapshot_pending =
+        operation && operation->operation == "camera.bind" && operation->succeeded &&
+        !std::ranges::any_of(camera_snapshot_.cameras,
+                             [&](const auto& camera) { return camera.id == operation->camera_id; });
+    bool bindable = valid_row && !camera_snapshot_.stale && !operation_pending &&
+                    !binding_snapshot_pending && camera_bind_slot_->currentIndex() >= 0 &&
                     !camera_bind_location_->text().trimmed().isEmpty();
     if (valid_row)
     {
@@ -3597,6 +3626,7 @@ bool MainWindow::camera_configuration_ready() const noexcept
            discovered_devices_ && camera_bind_slot_ && camera_bind_location_ &&
            camera_bind_button_ && camera_configuration_value_ && camera_operation_value_ &&
            findChild<QWidget*>(QStringLiteral("camera-device-sidebar")) &&
+           findChild<QWidget*>(QStringLiteral("camera-binding-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-control-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-acquisition-panel")) &&
            findChild<QWidget*>(QStringLiteral("camera-roi-panel")) &&
@@ -3622,9 +3652,8 @@ std::size_t MainWindow::discovered_camera_count() const noexcept
 
 bool MainWindow::camera_device_controls_disabled() const noexcept
 {
-    return camera_editor_ && camera_control_actions_ && camera_bind_button_ &&
-           !camera_editor_->isEnabled() && !camera_control_actions_->isEnabled() &&
-           !camera_bind_button_->isEnabled();
+    return camera_editor_ && camera_control_actions_ && !camera_editor_->isEnabled() &&
+           !camera_control_actions_->isEnabled();
 }
 
 bool MainWindow::select_theme_mode(const ThemeMode mode) noexcept
