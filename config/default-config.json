@@ -95,7 +95,7 @@
       "frameRate": 60.0,
       "gainDb": 23.01,
       "id": "CAM03",
-      "interPacketDelayNs": 4000,
+      "interPacketDelayNs": 400,
       "lineIo": {
         "alarmActiveLevel": "High",
         "alarmInputEnabled": true,
@@ -105,7 +105,7 @@
         "strobePreDelayUs": 0
       },
       "location": "003",
-      "packetSizeBytes": 1500,
+      "packetSizeBytes": 8164,
       "pixelFormat": "Mono8",
       "reverseX": false,
       "reverseY": false,
@@ -153,7 +153,7 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 88,
+  "configRevision": 89,
   "configSchemaVersion": 4,
   "event": {
     "generatePreviewVideo": true,
@@ -181,7 +181,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-12T06:18:06.334Z",
+  "modifiedAt": "2026-08-12T07:29:09.629Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",
