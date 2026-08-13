@@ -19,7 +19,7 @@
     "enabled": true,
     "modelReference": "",
     "modelVersion": "",
-    "processingFps": 30,
+    "processingFps": 15,
     "roi": {
       "height": 0,
       "offsetX": 0,
