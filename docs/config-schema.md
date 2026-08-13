@@ -1,6 +1,6 @@
 # 配置格式
 
-当前配置格式为 `configSchemaVersion = 4`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v4.schema.json`，可部署起点见 `config/default-config.json`。v1/v2/v3 合同继续归档；程序读取 v2 时为每路相机补入安全的 Line I/O 默认值，读取 v2/v3 时把缺少的自动曝光模式补为 `Off`，并归一化为内存 v4；下一次保存输出完整 v4，v1 不静默迁移。
+当前配置格式为 `configSchemaVersion = 5`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v5.schema.json`，可部署起点见 `config/default-config.json`。v1～v4 合同继续归档；程序读取 v2 时为每路相机补入安全的 Line I/O 默认值，读取 v2/v3 时把缺少的自动曝光模式补为 `Off`，读取 v2～v4 时再迁移算法抽样字段并归一化为内存 v5；下一次保存统一输出完整 v5，v1 不静默迁移。
 
 配置根对象包含 system、cameras、acquisition、preview、algorithm、event、storage、uplink、plantIo、logging 和 health。最多配置四路相机，逻辑编号限定为 CAM01～CAM04；启用相机必须具有唯一序列号。相机数值在 M1 只应用安全结构上限，M3 还必须按真实设备能力回读校验。每路相机的 `reverseX`、`reverseY` 分别控制水平、垂直镜像；旧 v2 配置省略时均按 `false` 处理，序列化保存后会显式写出。
 
@@ -42,8 +42,9 @@ IPC 诊断和手动重试。这三个字段均属于 `/acquisition` 待重启配
 - `acquisition.framePoolCapacity` 是每路相机固定原始图像缓冲数，不只是转发队列长度。
   服务启动会按启用相机帧率、`event.preEventSeconds`、`event.postEventSeconds`、采集队列、
   事件队列、预览槽和事件租约计算下限；不足时以稳定配置错误拒绝启动，不在运行中扩容。
-  当前可部署配置为单路 60 fps、前后各 10 秒，并启用 NVMe 滚动缓存；其启动下限为
-  2187 槽（环缓存 601、采集/算法/预览/NVMe 管线 385、单事件租约 1201）。最终四路生产
+  当前可部署配置为单路 60 fps、前后各 10 秒且普通 NVMe 滚动缓存关闭；其启动下限为
+  1933 槽（环缓存 601、采集/算法/预览管线 131、单事件租约 1201），默认留有 6 槽余量。
+  最终四路生产
   容量仍须按实际 ROI 和工控机内存实测校准。
 - `event` 完整对象包含 `preEventSeconds`、`postEventSeconds`、`maxEventSeconds`、
   `mergeGapSeconds`、`keyFrameCount`、`saveRaw`、`generatePreviewVideo`、`uploadPolicy` 和
@@ -58,10 +59,15 @@ IPC 诊断和手动重试。这三个字段均属于 `/acquisition` 待重启配
 ## M6 算法配置
 
 - `algorithm` 是严格完整对象，包含 `enabled`、`type`、`roi`、`candidateThreshold`、
-  `confirmationThreshold`、`consecutiveFrames`、`cooldownMs`、`modelReference`、
-  `modelVersion`、`device` 和 `debugOverlay`；未知字段会被拒绝。
-- 两级阈值范围均为 0～1，且确认阈值不得低于候选阈值；连续帧为 1～1000，冷却时间为
+  `confirmationThreshold`、`downsampleMode`、`processingFps`、`confirmationDurationMs`、
+  `cooldownMs`、`modelReference`、`modelVersion`、`device` 和 `debugOverlay`；未知字段会被拒绝。
+- `downsampleMode` 只能为 `disabled`、`half` 或 `quarter`；`processingFps` 只能为 15、30 或
+  60；`confirmationDurationMs` 范围为 10～60000 ms，且不得大于 `event.maxEventSeconds`
+  对应的候选超时时间。两级阈值范围均为 0～1，且确认阈值不得低于候选阈值；冷却时间为
   0～3,600,000 ms。模型引用、模型版本和设备名分别限制为 512、128 和 64 字节。
+- 新安装默认 `half + 15 FPS + 120 ms`。读取 v2～v4 时固定迁移为
+  `disabled + 60 FPS`，并把旧 `consecutiveFrames` 按 60 FPS 换算后向上取整到 10 ms；例如
+  7 帧迁移为 120 ms。这样升级不会直接改变旧配置的分析尺寸或处理节拍。
 - 算法配置可立即应用。控制台同时显示保存配置、有效配置、运行时实际修订、检测器实现/模型
   版本和降级状态，不得以“已保存”替代“已应用”。更新失败沿用配置仓储事务回滚，保留旧配置
   与旧检测器实例。
@@ -122,3 +128,5 @@ ADR-017 取消滚动缓存启动恢复配置与固定扫描上限。每次启动
 ## 原子保存和恢复
 
 服务在目标目录创建唯一临时文件，完整写入并刷新后使用 Windows 原子替换。最近 5 份有效配置保存在 `<配置文件名>.history/`，文件名为 20 位修订号。主配置损坏时只从可完整验证的最新历史恢复；残留临时文件不会被采用。选择历史回滚时会创建新的修订，不会复用历史修订号。
+
+schema v5 不向旧程序提供降写兼容。若必须回滚到只支持 v4 的程序，须先停止服务，再从配置历史恢复最后一份 v4 文件；不得只修改版本号或把 v5 文件交给旧程序读取。

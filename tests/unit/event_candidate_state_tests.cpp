@@ -87,15 +87,23 @@ class CandidateHarness final
         const std::chrono::milliseconds pre_event = 200ms, const double candidate_threshold = 0.0,
         const double confirmation_threshold = 0.0,
         const ExternalConfirmationPolicy external = ExternalConfirmationPolicy::not_used,
-        const std::chrono::milliseconds cooldown = 0ms)
+        const std::chrono::milliseconds cooldown = 0ms,
+        const std::chrono::milliseconds confirmation_duration = -1ms,
+        const std::chrono::nanoseconds processing_period = 100ms)
         : pool_(96U, 4U)
     {
         rings_.reserve(camera_ids.size());
         CandidateEventManagerConfig config{
             .candidate_consecutive_frames = candidate_frames,
-            .confirmation_consecutive_frames = confirmation_frames,
             .candidate_confidence_threshold = candidate_threshold,
             .confirmation_confidence_threshold = confirmation_threshold,
+            .confirmation_duration =
+                confirmation_duration >= 0ms
+                    ? confirmation_duration
+                    : std::chrono::milliseconds{confirmation_frames > 1U
+                                                    ? (confirmation_frames - 1U) * 100U
+                                                    : 10U},
+            .processing_period = processing_period,
             .external_confirmation = external,
             .candidate_timeout = timeout,
             .pre_event_duration = pre_event,
@@ -298,13 +306,71 @@ TEST(EventCandidateState, RequiresExternalSignalAndHonorsExactCooldownBoundary)
 
     auto boundary = harness.submit("CAM01", 3U, 250ms, true, 0.9);
     ASSERT_TRUE(boundary);
-    EXPECT_EQ(boundary.value().camera.observation_state, CandidateEventState::confirmed);
+    EXPECT_EQ(boundary.value().camera.observation_state, CandidateEventState::candidate);
     EXPECT_TRUE(boundary.value().camera.event.has_value());
+    auto confirmed_again = harness.submit("CAM01", 4U, 260ms, true, 0.9);
+    ASSERT_TRUE(confirmed_again);
+    EXPECT_EQ(confirmed_again.value().camera.observation_state, CandidateEventState::confirmed);
 
     auto unknown = harness.manager().update_external_signal("CAM04", true, MonotonicTime{300ms},
                                                             WallClockTime{300ms});
     ASSERT_FALSE(unknown);
     EXPECT_EQ(unknown.error().business_code, "SYS_CONFIG_INVALID");
+}
+
+TEST(EventCandidateState, ConfirmsByOneHundredTwentyMillisecondsAtAllConfiguredRates)
+{
+    for (const auto fps : {15U, 30U, 60U})
+    {
+        const auto period = std::chrono::nanoseconds{1'000'000'000LL / fps};
+        CandidateHarness harness({"CAM01"}, 1U, 1U, {}, 2s, 0ms, 0.5, 0.8,
+                                 ExternalConfirmationPolicy::not_used, 0ms, 120ms, period);
+        ASSERT_TRUE(harness.submit("CAM01", 1U, 0ms, true, 0.9));
+        const auto step = std::chrono::milliseconds{(1000U + fps - 1U) / fps};
+        std::uint64_t sequence = 2U;
+        auto time = step;
+        Result<CandidateProcessOutcome> confirmed =
+            harness.submit("CAM01", sequence++, time, true, 0.9);
+        while (time < 120ms)
+        {
+            ASSERT_TRUE(confirmed);
+            EXPECT_EQ(confirmed.value().camera.observation_state, CandidateEventState::candidate);
+            time += step;
+            confirmed = harness.submit("CAM01", sequence++, time, true, 0.9);
+        }
+        ASSERT_TRUE(confirmed);
+        EXPECT_EQ(confirmed.value().camera.observation_state, CandidateEventState::confirmed);
+        ASSERT_TRUE(confirmed.value().camera.event->decision);
+        EXPECT_GE(confirmed.value().camera.event->decision->monotonic_time, MonotonicTime{120ms});
+        EXPECT_LE(confirmed.value().camera.event->decision->monotonic_time,
+                  MonotonicTime{120ms} + period);
+    }
+}
+
+TEST(EventCandidateState, ResetsOnlyBeyondTwoPeriodsAndRejectsStaleExternalConfirmation)
+{
+    CandidateHarness exact({"CAM01"}, 1U, 1U, {}, 2s, 0ms, 0.5, 0.8,
+                           ExternalConfirmationPolicy::required_active, 0ms, 120ms, 50ms);
+    ASSERT_TRUE(exact.submit("CAM01", 1U, 0ms, true, 0.9));
+    ASSERT_TRUE(exact.submit("CAM01", 2U, 100ms, true, 0.9));
+    auto exact_signal = exact.manager().update_external_signal("CAM01", true, MonotonicTime{100ms},
+                                                               WallClockTime{100ms});
+    ASSERT_TRUE(exact_signal);
+    EXPECT_EQ(exact_signal.value().observation_state, CandidateEventState::candidate);
+    ASSERT_TRUE(exact.submit("CAM01", 3U, 120ms, true, 0.9));
+    auto fresh_signal = exact.manager().update_external_signal("CAM01", true, MonotonicTime{120ms},
+                                                               WallClockTime{120ms});
+    ASSERT_TRUE(fresh_signal);
+    EXPECT_EQ(fresh_signal.value().observation_state, CandidateEventState::confirmed);
+
+    CandidateHarness stale({"CAM01"}, 1U, 1U, {}, 2s, 0ms, 0.5, 0.8,
+                           ExternalConfirmationPolicy::required_active, 0ms, 120ms, 50ms);
+    ASSERT_TRUE(stale.submit("CAM01", 1U, 0ms, true, 0.9));
+    ASSERT_TRUE(stale.submit("CAM01", 2U, 101ms, true, 0.9));
+    auto stale_signal = stale.manager().update_external_signal("CAM01", true, MonotonicTime{250ms},
+                                                               WallClockTime{250ms});
+    ASSERT_TRUE(stale_signal);
+    EXPECT_EQ(stale_signal.value().observation_state, CandidateEventState::candidate);
 }
 
 TEST(EventCandidateState, ExternalSignalAtCandidateDeadlineTimesOutInsteadOfConfirming)
@@ -499,7 +565,7 @@ TEST(EventCandidateState, RejectsUnsafeConfiguration)
     CandidateEventManagerConfig invalid_threshold{
         .cameras = {{.camera_id = "CAM01", .memory_ring = &ring}},
         .candidate_consecutive_frames = 2U,
-        .confirmation_consecutive_frames = 1U,
+        .confirmation_duration = 0ms,
     };
     created = CandidateEventManager::create(std::move(invalid_threshold));
     ASSERT_FALSE(created);

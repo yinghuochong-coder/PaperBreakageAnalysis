@@ -12,7 +12,7 @@ namespace paperbreak::config
 {
 
 inline constexpr std::size_t config_max_bytes = 1024U * 1024U;
-inline constexpr std::uint32_t config_schema_version = 4U;
+inline constexpr std::uint32_t config_schema_version = 5U;
 inline constexpr std::size_t maximum_camera_count = 4U;
 
 enum class PixelFormat
@@ -126,14 +126,30 @@ struct PreviewConfig final
     bool operator==(const PreviewConfig&) const = default;
 };
 
+enum class AlgorithmDownsampleMode
+{
+    disabled,
+    half,
+    quarter,
+};
+
+enum class AlgorithmProcessingFps : std::uint32_t
+{
+    fps15 = 15U,
+    fps30 = 30U,
+    fps60 = 60U,
+};
+
 struct AlgorithmConfig final
 {
     bool enabled{};
     std::string type{"mock"};
     RoiConfig roi;
+    AlgorithmDownsampleMode downsample_mode{AlgorithmDownsampleMode::half};
+    AlgorithmProcessingFps processing_fps{AlgorithmProcessingFps::fps15};
     double candidate_threshold{0.6};
     double confirmation_threshold{0.8};
-    std::uint32_t consecutive_frames{3U};
+    std::uint32_t confirmation_duration_ms{120U};
     std::uint32_t cooldown_ms{1000U};
     std::string model_reference;
     std::string model_version;
@@ -241,7 +257,7 @@ struct BasicConfigInfo final
     std::size_t file_size_bytes{};
 };
 
-/// Parses strict schema v3 or migrates schema v2 with safe Line I/O defaults.
+/// Parses strict schema v5 or migrates schema v2-v4 with compatibility defaults.
 [[nodiscard]] Result<EdgeConfig> parse_config(
     std::string_view contents, const std::filesystem::path& config_directory) noexcept;
 [[nodiscard]] std::string serialize_config(const EdgeConfig& config);

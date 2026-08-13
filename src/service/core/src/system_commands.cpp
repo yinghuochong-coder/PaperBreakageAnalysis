@@ -392,6 +392,18 @@ Json uplink_config_json(const config::UplinkConfig& value)
 
 Json algorithm_config_json(const config::AlgorithmConfig& value)
 {
+    const auto downsample_mode = [&] {
+        switch (value.downsample_mode)
+        {
+        case config::AlgorithmDownsampleMode::disabled:
+            return "disabled";
+        case config::AlgorithmDownsampleMode::half:
+            return "half";
+        case config::AlgorithmDownsampleMode::quarter:
+            return "quarter";
+        }
+        return "disabled";
+    }();
     return {{"enabled", value.enabled},
             {"type", value.type},
             {"roi",
@@ -399,9 +411,11 @@ Json algorithm_config_json(const config::AlgorithmConfig& value)
               {"height", value.roi.height},
               {"offsetX", value.roi.offset_x},
               {"offsetY", value.roi.offset_y}}},
+            {"downsampleMode", downsample_mode},
+            {"processingFps", static_cast<std::uint32_t>(value.processing_fps)},
             {"candidateThreshold", value.candidate_threshold},
             {"confirmationThreshold", value.confirmation_threshold},
-            {"consecutiveFrames", value.consecutive_frames},
+            {"confirmationDurationMs", value.confirmation_duration_ms},
             {"cooldownMs", value.cooldown_ms},
             {"modelReference", value.model_reference},
             {"modelVersion", value.model_version},
@@ -485,6 +499,9 @@ Json algorithm_runtime_json(const AlgorithmRuntimeSnapshot& value)
                   {"submittedFrames", metrics.submitted_frames},
                   {"processedFrames", metrics.processed_frames},
                   {"skippedFrames", metrics.skipped_frames},
+                  {"sampledSkippedFrames", metrics.sampled_skipped_frames},
+                  {"missedProcessingSlots", metrics.missed_processing_slots},
+                  {"configuredProcessingFps", metrics.configured_processing_fps},
                   {"detectorFailures", metrics.detector_failures},
                   {"consecutiveDetectorFailures", metrics.consecutive_detector_failures},
                   {"consecutiveBacklogEvents", metrics.consecutive_backlog_events},

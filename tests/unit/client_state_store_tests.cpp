@@ -424,9 +424,11 @@ class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
                 {"enabled", true},
                 {"type", "classical-vision"},
                 {"roi", {{"width", 4}, {"height", 4}, {"offsetX", 0}, {"offsetY", 0}}},
+                {"downsampleMode", "half"},
+                {"processingFps", 15},
                 {"candidateThreshold", 0.6},
                 {"confirmationThreshold", 0.8},
-                {"consecutiveFrames", 3},
+                {"confirmationDurationMs", 120},
                 {"cooldownMs", 1000},
                 {"modelReference", ""},
                 {"modelVersion", "prototype-config"},
@@ -446,11 +448,14 @@ class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
                                            {"prototypeOnly", true}}},
                                          {"metrics",
                                           {{"queueDepth", 1},
-                                           {"queueCapacity", 8},
+                                           {"queueCapacity", 2},
                                            {"queueHighWatermark", 3},
                                            {"submittedFrames", 40},
                                            {"processedFrames", 39},
                                            {"skippedFrames", 1},
+                                           {"sampledSkippedFrames", 7},
+                                           {"missedProcessingSlots", 2},
+                                           {"configuredProcessingFps", 15},
                                            {"detectorFailures", 2},
                                            {"consecutiveDetectorFailures", 0},
                                            {"consecutiveBacklogEvents", 3},
@@ -1398,7 +1403,10 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
     EXPECT_EQ(latest.runtime.state, "active");
     EXPECT_TRUE(latest.runtime.prototype_only);
     EXPECT_TRUE(latest.runtime.has_current_frame);
-    EXPECT_EQ(latest.runtime.metrics.queue_capacity, 8U);
+    EXPECT_EQ(latest.runtime.metrics.queue_capacity, 2U);
+    EXPECT_EQ(latest.runtime.metrics.sampled_skipped_frames, 7U);
+    EXPECT_EQ(latest.runtime.metrics.missed_processing_slots, 2U);
+    EXPECT_EQ(latest.runtime.metrics.configured_processing_fps, 15U);
     EXPECT_EQ(latest.runtime.metrics.maximum_processing_time_us, 180);
     EXPECT_EQ(latest.runtime.metrics.consecutive_backlog_events, 3U);
     EXPECT_TRUE(latest.runtime.metrics.backlog_active);
@@ -1414,7 +1422,9 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
     changed.enabled = false;
     changed.candidate_threshold = 0.25;
     changed.confirmation_threshold = 0.75;
-    changed.consecutive_frames = 7U;
+    changed.downsample_mode = "quarter";
+    changed.processing_fps = 30U;
+    changed.confirmation_duration_ms = 120U;
     changed.cooldown_ms = 500U;
     changed.model_reference = "models/prototype.bin";
     changed.model_version = "prototype-2";
@@ -1432,7 +1442,9 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
         EXPECT_EQ(payload["expectedConfigRevision"], 9U);
         EXPECT_FALSE(payload["algorithm"]["enabled"].get<bool>());
         EXPECT_EQ(payload["algorithm"]["candidateThreshold"], 0.25);
-        EXPECT_EQ(payload["algorithm"]["consecutiveFrames"], 7U);
+        EXPECT_EQ(payload["algorithm"]["downsampleMode"], "quarter");
+        EXPECT_EQ(payload["algorithm"]["processingFps"], 30U);
+        EXPECT_EQ(payload["algorithm"]["confirmationDurationMs"], 120U);
         EXPECT_EQ(payload["algorithm"]["modelReference"], "models/prototype.bin");
         EXPECT_EQ(payload["algorithm"]["device"], "directml");
     }

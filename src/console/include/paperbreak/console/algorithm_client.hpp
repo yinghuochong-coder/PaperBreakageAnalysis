@@ -27,9 +27,11 @@ struct AlgorithmConfigurationValue final
     bool enabled{};
     std::string type{"mock"};
     AlgorithmRoiValue roi;
+    std::string downsample_mode{"half"};
+    std::uint32_t processing_fps{15U};
     double candidate_threshold{0.6};
     double confirmation_threshold{0.8};
-    std::uint32_t consecutive_frames{3U};
+    std::uint32_t confirmation_duration_ms{120U};
     std::uint32_t cooldown_ms{1000U};
     std::string model_reference;
     std::string model_version;
@@ -45,6 +47,9 @@ struct AlgorithmMetricValue final
     std::uint64_t submitted_frames{};
     std::uint64_t processed_frames{};
     std::uint64_t skipped_frames{};
+    std::uint64_t sampled_skipped_frames{};
+    std::uint64_t missed_processing_slots{};
+    std::uint32_t configured_processing_fps{};
     std::uint64_t detector_failures{};
     std::uint64_t consecutive_detector_failures{};
     std::uint64_t consecutive_backlog_events{};

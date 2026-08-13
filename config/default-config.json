@@ -10,14 +10,16 @@
   },
   "algorithm": {
     "candidateThreshold": 0.6,
+    "confirmationDurationMs": 120,
     "confirmationThreshold": 0.8,
-    "consecutiveFrames": 7,
     "cooldownMs": 1000,
     "debugOverlay": true,
     "device": "cpu",
+    "downsampleMode": "half",
     "enabled": true,
     "modelReference": "",
     "modelVersion": "",
+    "processingFps": 30,
     "roi": {
       "height": 0,
       "offsetX": 0,
@@ -156,8 +158,8 @@
       "triggerSource": ""
     }
   ],
-  "configRevision": 90,
-  "configSchemaVersion": 4,
+  "configRevision": 91,
+  "configSchemaVersion": 5,
   "event": {
     "generatePreviewVideo": true,
     "keyFrameCount": 7,
@@ -184,7 +186,7 @@
     "queueCapacity": 8192,
     "retentionDays": 30
   },
-  "modifiedAt": "2026-08-12T07:48:27.190Z",
+  "modifiedAt": "2026-08-13T05:09:02.699Z",
   "plantIo": {
     "adapterType": "disabled",
     "credentialReference": "",

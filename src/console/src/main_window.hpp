@@ -265,7 +265,9 @@ class MainWindow final : public QMainWindow
     QSpinBox* algorithm_roi_y_{};
     QDoubleSpinBox* algorithm_candidate_threshold_{};
     QDoubleSpinBox* algorithm_confirmation_threshold_{};
-    QSpinBox* algorithm_consecutive_frames_{};
+    QComboBox* algorithm_downsample_mode_{};
+    QComboBox* algorithm_processing_fps_{};
+    QSpinBox* algorithm_confirmation_duration_ms_{};
     QSpinBox* algorithm_cooldown_ms_{};
     QLineEdit* algorithm_model_reference_{};
     QLineEdit* algorithm_model_version_{};

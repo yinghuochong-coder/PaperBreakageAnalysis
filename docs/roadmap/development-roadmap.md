@@ -1131,6 +1131,18 @@ schema v4，v2/v3 安全迁移为 `Off`；公共相机模型、Mock、Hikrobot �
 
 完成证据（2026-08-04）：服务新增 `algorithm.getConfig/updateConfig/testCurrentFrame` 三项严格 IPC 命令，配置更新沿用乐观修订、审计、原子保存和事务式运行时重配置，响应同时给出保存/有效/运行时修订、检测器信息、实际状态及算法运行时汇总队列、处理耗时、失败、跳帧和候选结果指标。事件运行时按相机保留最近一张 RAII 内存帧；单帧测试在正式算法队列和候选状态机之外创建隔离检测器，生成不超过 8 MiB 的 JPEG，不写盘、不改变正式检测器指标且明确返回 `candidateCreated=false`。Qt 算法页覆盖启用、类型、ROI、两级阈值、连续帧、冷却、模型引用/版本、设备和调试开关，显示已保存/已下发/已应用、实际插件/模型/降级状态与性能表，并在测试图上叠加检测 ROI、候选类型和置信度；M6-00 原型警示始终可见。新增运行时、系统命令和 `AlgorithmClient` 三项端到端行为测试，Debug/Release `/W4 /WX` 全量构建及两套非硬件 CTest 均为 24/24，通用 unit 入口各 266 项，Qt 离屏 smoke、MSVC 静态分析、11 个任务 C++ 文件 clang-format 和 `git diff --check` 通过。全仓 `format-check` 仍被未修改的 `src/pipeline/include/paperbreak/pipeline/preview.hpp:6` 既有格式问题阻断。未执行实体相机、冻结数据集、目标工控机四路性能或人工 UI 点击验证；M6-00/DEC-006 仍 blocked，M6 退出门禁中的冻结数据集报告尚未满足，所有算法继续标记为原型，未进入 M7。
 
+算法抽样与确认优化跟进（2026-08-13）：执行记录为
+`.agent/plans/m6-03-04-algorithm-sampling-latest-frame-duration.md`。配置升级为 schema v5；新安装默认
+`half + 15 FPS + 120 ms`，v2～v4 迁移保持 `disabled + 60 FPS` 并把旧连续帧数换算为确认
+毫秒。`classical-vision` 在原图 ROI 内以 `INTER_AREA` 支持 1、1/2、1/4 分析并按配置 FPS
+换算背景 EMA；每相机算法输入改为容量 1 的自动 latest-wins 槽和容量 1 的人工保留槽，正常
+抽样与检测超时错过周期分开计数，后者沿用积压报警和五窗口降级。候选确认改为单调时间持续
+区间及两周期新鲜度，IPC、Console 和监控指标同步。Debug/Release `/W4 /WX` 全量构建及两套
+非硬件 CTest 均为 30/30，通用 unit 入口 415 项通过、2 项按设计跳过，全仓格式检查和
+`git diff --check` 通过；任务涉及的生产源以 MSVC `/analyze` 复核为 0 警告，但全仓静态分析
+仍被未修改的 `src/storage/src/nvme_cache.cpp:73` 既有 C28020 阻断。未执行实体相机、目标工控机
+四路 CPU/处理 FPS、正式数据集准确率或人工 UI 点击验证；M6-00 仍 blocked，算法继续标记为原型。
+
 退出门禁 M6：
 
 - 模拟检测器和初版算法可替换而不改采集/事件代码；

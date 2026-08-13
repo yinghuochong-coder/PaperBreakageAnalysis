@@ -23,7 +23,7 @@
 namespace paperbreak::service
 {
 
-inline constexpr std::size_t event_frame_queue_default_capacity = 8U;
+inline constexpr std::size_t event_frame_queue_default_capacity = 1U;
 inline constexpr std::size_t algorithm_result_queue_default_capacity = 256U;
 
 enum class AlgorithmRuntimeState
@@ -96,6 +96,9 @@ struct AlgorithmLaneMetrics final
     std::uint64_t submitted_frames{};
     std::uint64_t processed_frames{};
     std::uint64_t skipped_frames{};
+    std::uint64_t sampled_skipped_frames{};
+    std::uint64_t missed_processing_slots{};
+    std::uint32_t configured_processing_fps{};
     std::uint64_t detector_failures{};
     std::uint64_t consecutive_detector_failures{};
     std::uint64_t consecutive_backlog_events{};
@@ -143,6 +146,9 @@ struct EventRuntimeSnapshot final
     std::uint64_t processed_frames{};
     std::uint64_t rejected_frames{};
     std::uint64_t skipped_frames{};
+    std::uint64_t sampled_skipped_frames{};
+    std::uint64_t missed_processing_slots{};
+    std::uint32_t configured_processing_fps{};
     std::uint64_t detector_failures{};
     std::uint64_t consecutive_detector_failures{};
     std::uint64_t consecutive_backlog_events{};

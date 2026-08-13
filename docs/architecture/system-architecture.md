@@ -360,7 +360,7 @@ ProcessMain
 | 相机采集线程 | 每启用相机 1 个，最多 4 | 获取帧、复制/接管到池、填元数据、入队 |
 | 相机线路 I/O 分发线程 | 固定 1 | 消费四个每相机容量 1 的 latest-wins 槽，在 MVS 回调栈外更新快照和通知服务观察者 |
 | 每相机预处理执行器 | 每启用相机 1 个，最多 4 | 保序预处理、内存缓存登记和分支路由 |
-| 算法工作线程 | 每启用相机 1 个，最多 4 | 独占该相机的 `DetectorHost` 并串行检测；单 Lane 阻塞或降级不影响其他相机 |
+| 算法工作线程 | 每启用相机 1 个，最多 4 | 独占该相机的 `DetectorHost`，按配置节拍串行处理自动 latest-wins 槽并优先处理人工保留槽；单 Lane 阻塞或降级不影响其他相机 |
 | 预览编码线程 | 固定 1～2 | 抽样、缩放、覆盖层和 JPEG |
 | 事件管理线程 | 1 | 候选状态、窗口租约、合并和事件状态串行化 |
 | 关键帧/事件写线程 | 固定有界，首期各 1 | 关键帧编码和事件事务写入 |
@@ -378,7 +378,7 @@ ProcessMain
 
 - 帧进入内存环缓存的次序稳定；
 - 灰度/变化量等有状态节点按序执行；
-- 向算法提交时记录序号；
+- 所有原始帧先登记内存环和最近帧快照，向算法槽提交时记录序号；
 - 多算法工作线程返回的结果由事件入口按相机序号重排；
 - 缺失帧、跳帧和超出重排窗口均可统计。
 
@@ -413,7 +413,8 @@ ProcessMain
 | `camera.command[i]` | 主控制 → 相机会话 | 32 条/相机 | 拒绝新普通命令；stop/close 走优先控制 | 取消未开始操作，当前 SDK 调用必须有超时 | Warning |
 | `camera.lineInput[i]` | MVS C 边沿回调 → 相机线路 I/O 分发线程 | 1 项/相机，固定 4 槽 | `latest-wins`；回调侧仍递增该槽修订 | 先关闭事件通知/设备回调来源，再请求停止、唤醒并确定性 join | Info |
 | `acquisition.frames[i]` | 采集 → 每相机预处理 | 16 帧/相机 | 丢弃最旧未处理帧，记录序号缺口；绝不阻塞采集 | 停采后关闭生产端，消费者排空至截止时间 | Warning，持续超限升级 Error |
-| `algorithm.frames[i]` | 预处理 → 算法执行器 | 8 帧/相机 | 丢弃最旧待检测帧并记录 `algorithmSkipped` | 停止新提交；可在截止时间内处理已接受帧 | Warning，持续超限升级 Error |
+| `algorithm.frames[i].automatic` | 预处理 → 算法执行器 | 1 帧/相机 | `latest-wins`；按 15/30/60 FPS 正常抽样，覆盖只计 `sampledSkippedFrames`，不报警 | 停止新提交后最多排空最新 1 帧 | Info |
+| `algorithm.frames[i].manual` | 人工触发 → 算法执行器 | 1 帧/相机 | 保留请求后的第一帧；已有待处理人工帧时合并请求 | 停止新提交后优先且最多排空 1 帧 | Warning |
 | `algorithm.results` | 算法执行器 → 事件管理 | 256 条 | 不静默覆盖；拒绝新结果并触发 Error，后续帧进入降级状态 | 关闭算法生产端后排空并完成排序窗口 | Error |
 | `preview.latest[i]` | 预处理/结果叠加 → 预览编码 | 每相机 1 个槽 | `latest-wins`，按该相机订阅的最高目标帧率抽样并覆盖旧帧 | 无订阅立即清空；停止时直接丢弃 | Info |
 | `preview.encoded[i]` | 编码 → IPC 推送 | 每订阅/相机 1 个合并槽；单 JPEG 有字节上限 | 同一相机编码一次后按订阅目标帧率限速；`latest-wins` | 断开/停止直接丢弃 | Info |
@@ -473,7 +474,8 @@ FrameBufferPool → FramePacket 元数据
         ▼ acquisition.frames[i]（有界）
 每相机预处理执行器（保序）
         ├──────────────> MemoryRing[i]（O(1) 登记共享引用）
-        ├──────────────> algorithm.frames[i]（可跳帧）
+        ├──────────────> algorithm.frames[i].automatic（15/30/60 FPS、latest-wins）
+        ├──────────────> algorithm.frames[i].manual（请求后第一帧、绕过节拍）
         ├──────────────> preview.latest[i]（latest-wins）
         └──────────────> nvme.blocks（M7，可降级）
 ```
@@ -489,11 +491,11 @@ Hikrobot 参数事务把 `ExposureAuto` 作为公共三态参数处理。写入�
 ### 9.2 算法与候选
 
 ```text
-algorithm.frames[CAMxx]（每相机有界、drop-oldest）
+algorithm.frames[CAMxx]（自动 latest-wins 1 槽 + 人工保留 1 槽）
       ▼
-algorithm-worker-camxx（该 Lane 的 DetectorHost 串行调用；相机 ID 后缀转为小写以满足日志线程名约束）
+algorithm-worker-camxx（首帧立即；自动启动间隔不短于配置周期；无新帧不重复；人工帧绕过节拍）
       ▼
-AlgorithmResultEnvelope（禁用、降级、失败和跳帧也产生时间推进信封）
+AlgorithmResultEnvelope（禁用、降级和失败仍产生时间推进信封；正常抽样覆盖不伪造结果）
       ▼
 algorithm.results（全局有界 256，不阻塞 Lane）
       ▼
@@ -504,9 +506,11 @@ Idle → Suspicious → Candidate → Confirmed/Rejected/Timeout
                            └─ Candidate 时立即申请缓存窗口租约
 ```
 
-结果稳定顺序键为单调时间、相机 ID、序号。事件线程以所有 Lane 队列和在途帧中的最早单调时间作为安全水位，只提交水位之前的结果，避免慢 Lane 的旧结果在窗口已经冻结后到达。候选状态、跨相机合并窗口和冻结决策仍只由 `event-processing` 串行管理。`algorithm.results` 满载时拒绝来源结果、记录 `ALGORITHM_RESULT_QUEUE_FULL` 并立即把来源 Lane 降级为 `manual-trigger-only`；其他 Lane 保持自动检测。
+结果稳定顺序键为单调时间、相机 ID、序号。事件线程以所有 Lane 的自动槽、人工槽和在途帧中的最早单调时间作为安全水位，只提交水位之前的结果，避免慢 Lane 的旧结果在窗口已经冻结后到达。候选状态、跨相机合并窗口和冻结决策仍只由 `event-processing` 串行管理。候选确认使用结果单调时间的持续区间；阈值跌落立即重置，合格结果间隔大于两个配置周期从当前结果重计，外部信号只可确认两周期内仍新鲜的合格结果。`algorithm.results` 满载时拒绝来源结果、记录 `ALGORITHM_RESULT_QUEUE_FULL` 并立即把来源 Lane 降级为 `manual-trigger-only`；其他 Lane 保持自动检测。
 
-停止顺序固定为：禁止新提交，逐 Lane 排空并停止 worker，排空结果入口并冻结剩余窗口，随后关闭内存环、JPEG 和持久化运行时。重配置先构造完整检测器/Lane/队列，并创建停在启动门后的候选事件线程和 Lane worker；只有候选线程组全部准备成功，才排空旧线程组并切换。
+停止顺序固定为：禁止新提交并立即唤醒 worker，每 Lane 最多排空一张人工帧和一张最新自动帧，排空结果入口并冻结剩余窗口，随后关闭内存环、JPEG 和持久化运行时。重配置先构造完整检测器/Lane/两个槽位，并创建停在启动门后的候选事件线程和 Lane worker；只有候选线程组全部准备成功，才有界排空旧线程组并切换。检测调用超过配置周期时累计 `missedProcessingSlots` 并沿用积压报警和五窗口降级；普通节拍抽样不进入该报警路径。
+
+`classical-vision` 在原图坐标裁剪 ROI 后，用 `INTER_AREA` 缩放到 1、1/2 或 1/4 分析尺寸，工作区与背景矩阵由检测器实例复用；结果 ROI 仍为原图坐标。配置热更新以新检测器实例替换旧实例，因此旧尺寸背景不会跨配置保留。背景 EMA 以 60 FPS、2%/帧为基准按处理 FPS 换算单次权重，异常帧不更新背景。采集分辨率、预览源、内存环和事件原始窗口不降采样；Hikrobot SDK 边界仍只存在于相机适配器。
 
 不得等到 Confirmed 才保护缓存。算法更新采用先初始化新实例、验证后原子切换；失败继续使用旧实例。
 
@@ -689,8 +693,10 @@ IPC 层不直接操作相机、数据库或配置文件。业务用例返回稳�
 ```
 
 应用失败时保留旧文件和旧生效快照。启动时若主配置损坏，可从最近有效历史恢复，但必须报警和记录恢复来源。
-当前公开配置为 schema v3；v2 读取时只补入两路均禁用的 `lineIo` 安全默认值，保存时输出完整
-v3。v1/v2 schema 文件继续归档用于迁移测试。
+当前公开配置为 schema v5；v2～v4 读取时迁移为 `downsampleMode=disabled`、
+`processingFps=60`，并把旧连续帧数按 60 FPS 换算后向上取整到 10 ms；保存时输出完整 v5。
+新安装默认 `half + 15 FPS + 120 ms`。v1～v4 schema 文件继续归档用于迁移测试；回滚旧程序
+前必须从配置历史恢复 v4 文件，不能直接降写 v5。
 
 ### 12.2 事件目录
 

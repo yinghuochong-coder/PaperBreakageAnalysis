@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -110,6 +111,15 @@ std::unique_ptr<DetectorHost> make_host(const DetectorConfig& detector_config,
     return host;
 }
 
+double debug_metric(const paperbreak::algorithm::DetectionResult& result,
+                    const std::string_view name)
+{
+    for (const auto& metric : result.debug_metrics)
+        if (metric.name == name)
+            return metric.value;
+    throw std::runtime_error("debug metric not found");
+}
+
 TEST(AlgorithmClassicalVision, RegistersThroughHostAndReportsPrototypeResult)
 {
     DetectorPluginRegistry registry;
@@ -175,6 +185,61 @@ TEST(AlgorithmClassicalVision, FullFrameSentinelHonorsPaddedStride)
     EXPECT_EQ(result.value().evaluated_region.height, 2U);
     EXPECT_NEAR(result.value().mean_grayscale, 191.25 / 255.0, 1e-12);
     EXPECT_DOUBLE_EQ(result.value().paper_ratio, 0.75);
+}
+
+TEST(AlgorithmClassicalVision, DownsamplesOddAndTinyRoiButPreservesOriginalCoordinates)
+{
+    const std::vector<std::uint8_t> pixels{0U,  20U, 40U, 60U, 80U, 10U, 30U, 50U,
+                                           70U, 90U, 20U, 40U, 60U, 80U, 100U};
+    for (const auto [factor, expected_pixels] :
+         {std::pair{1, 15.0}, std::pair{2, 2.0}, std::pair{4, 1.0}})
+    {
+        DetectorPluginRegistry registry;
+        auto host = make_host(
+            config(1U,
+                   {integer("roi_offset_x", 0), integer("roi_offset_y", 0), integer("roi_width", 5),
+                    integer("roi_height", 3), integer("downsample_factor", factor),
+                    boolean("enable_paper_ratio", false), boolean("enable_mean_change", false),
+                    boolean("enable_background_compare", false)}),
+            registry);
+        auto result = host->process(make_frame(1U, 1ms, 5U, 3U, 5U, pixels));
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result.value().evaluated_region.width, 5U);
+        EXPECT_EQ(result.value().evaluated_region.height, 3U);
+        EXPECT_DOUBLE_EQ(debug_metric(result.value(), "roiPixels"), expected_pixels);
+    }
+
+    DetectorPluginRegistry registry;
+    auto tiny = make_host(config(1U, {integer("roi_width", 1), integer("roi_height", 1),
+                                      integer("downsample_factor", 4)}),
+                          registry);
+    auto result = tiny->process(uniform_frame(1U, 1ms, 255U, 1U, 1U));
+    ASSERT_TRUE(result);
+    EXPECT_DOUBLE_EQ(debug_metric(result.value(), "roiPixels"), 1.0);
+}
+
+TEST(AlgorithmClassicalVision, ProcessingRatesUseEquivalentPerSecondBackgroundEma)
+{
+    std::vector<double> learned_backgrounds;
+    for (const auto fps : {15U, 30U, 60U})
+    {
+        DetectorPluginRegistry registry;
+        const auto alpha = 1.0 - std::pow(1.0 - 0.02, 60.0 / static_cast<double>(fps));
+        auto host = make_host(
+            config(1U, {boolean("enable_paper_ratio", false), boolean("enable_mean_change", false),
+                        real("maximum_background_change", 1.0),
+                        real("background_learning_rate", alpha)}),
+            registry);
+        ASSERT_TRUE(host->process(uniform_frame(1U, 0ms, 0U, 2U, 2U)));
+        for (std::uint64_t index = 1U; index <= fps; ++index)
+            ASSERT_TRUE(host->process(uniform_frame(
+                index + 1U, std::chrono::milliseconds{index * 1000U / fps}, 100U, 2U, 2U)));
+        auto probe = host->process(uniform_frame(fps + 2U, 1100ms, 0U, 2U, 2U));
+        ASSERT_TRUE(probe);
+        learned_backgrounds.push_back(probe.value().change_score);
+    }
+    EXPECT_NEAR(learned_backgrounds[0], learned_backgrounds[1], 2.0 / 255.0);
+    EXPECT_NEAR(learned_backgrounds[1], learned_backgrounds[2], 2.0 / 255.0);
 }
 
 TEST(AlgorithmClassicalVision, DetectsMissingPaperWithAreaAndConfidence)

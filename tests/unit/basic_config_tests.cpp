@@ -3,6 +3,7 @@
 #include "paperbreak/platform/atomic_file.hpp"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <filesystem>
@@ -67,6 +68,19 @@ std::string replace_once(std::string value, const std::string_view from, const s
     if (position != std::string::npos)
         value.replace(position, from.size(), to);
     return value;
+}
+
+std::string downgrade_algorithm_config(std::string value, const std::uint32_t schema_version,
+                                       const std::uint32_t consecutive_frames = 3U)
+{
+    auto document = nlohmann::json::parse(value);
+    document["configSchemaVersion"] = schema_version;
+    auto& algorithm = document["algorithm"];
+    algorithm.erase("downsampleMode");
+    algorithm.erase("processingFps");
+    algorithm.erase("confirmationDurationMs");
+    algorithm["consecutiveFrames"] = consecutive_frames;
+    return document.dump(2) + "\n";
 }
 
 class RecordingAudit final : public paperbreak::config::IConfigAuditSink
@@ -171,7 +185,7 @@ TEST(BasicConfig, AcceptsCompleteVersionTwoAtUnicodeAndSpacePath)
     const auto path = directory.write("纸机 配置.json", valid_config());
     const auto result = paperbreak::config::validate_basic_config(path);
     ASSERT_TRUE(result) << result.error().message;
-    EXPECT_EQ(result.value().schema_version, 4U);
+    EXPECT_EQ(result.value().schema_version, 5U);
     EXPECT_EQ(result.value().config_revision, 1U);
 }
 
@@ -278,7 +292,7 @@ TEST(BasicConfig, DefaultsLegacyCameraMirroringOffAndSerializesExplicitValues)
     EXPECT_NE(serialized.find("\"reverseY\": true"), std::string::npos);
 }
 
-TEST(BasicConfig, MigratesVersionTwoCameraDefaultsToVersionFour)
+TEST(BasicConfig, MigratesVersionTwoCameraDefaultsToVersionFive)
 {
     const TemporaryDirectory directory;
     const auto contents = replace_once(
@@ -288,7 +302,12 @@ TEST(BasicConfig, MigratesVersionTwoCameraDefaultsToVersionFour)
     ASSERT_TRUE(parsed) << parsed.error().message;
     ASSERT_EQ(parsed.value().cameras.size(), 1U);
     const auto& camera = parsed.value().cameras.front();
-    EXPECT_EQ(parsed.value().config_schema_version, 4U);
+    EXPECT_EQ(parsed.value().config_schema_version, 5U);
+    EXPECT_EQ(parsed.value().algorithm.downsample_mode,
+              paperbreak::config::AlgorithmDownsampleMode::disabled);
+    EXPECT_EQ(parsed.value().algorithm.processing_fps,
+              paperbreak::config::AlgorithmProcessingFps::fps60);
+    EXPECT_EQ(parsed.value().algorithm.confirmation_duration_ms, 50U);
     EXPECT_DOUBLE_EQ(camera.exposure_us, 321.0);
     EXPECT_EQ(camera.exposure_auto_mode, paperbreak::config::ExposureAutoMode::off);
     EXPECT_FALSE(camera.line_io.alarm_input_enabled);
@@ -299,12 +318,12 @@ TEST(BasicConfig, MigratesVersionTwoCameraDefaultsToVersionFour)
     EXPECT_EQ(camera.line_io.strobe_post_delay_us, 0U);
 
     const auto serialized = paperbreak::config::serialize_config(parsed.value());
-    EXPECT_NE(serialized.find("\"configSchemaVersion\": 4"), std::string::npos);
+    EXPECT_NE(serialized.find("\"configSchemaVersion\": 5"), std::string::npos);
     EXPECT_NE(serialized.find("\"autoExposure\": \"Off\""), std::string::npos);
     EXPECT_NE(serialized.find("\"lineIo\""), std::string::npos);
 }
 
-TEST(BasicConfig, MigratesVersionThreeAutoExposureOffAndRoundTripsVersionFourModes)
+TEST(BasicConfig, MigratesVersionThreeAutoExposureOffAndRoundTripsVersionFiveModes)
 {
     const TemporaryDirectory directory;
     const auto version_two = replace_once(
@@ -312,9 +331,8 @@ TEST(BasicConfig, MigratesVersionThreeAutoExposureOffAndRoundTripsVersionFourMod
         R"("cameras": [{"id":"CAM01","enabled":true,"serialNumber":"MOCK-01","location":"入口","exposureUs":321.0,"gainDb":2.0,"frameRate":30.0,"roi":{"width":64,"height":48,"offsetX":0,"offsetY":0},"pixelFormat":"Mono8","triggerMode":"Continuous","triggerSource":"","triggerDelayUs":0,"packetSizeBytes":1500,"interPacketDelayNs":0}])");
     const auto migrated_v2 = paperbreak::config::parse_config(version_two, directory.path());
     ASSERT_TRUE(migrated_v2);
-    const auto version_four = paperbreak::config::serialize_config(migrated_v2.value());
-    auto version_three =
-        replace_once(version_four, "\"configSchemaVersion\": 4", "\"configSchemaVersion\": 3");
+    const auto version_five = paperbreak::config::serialize_config(migrated_v2.value());
+    auto version_three = downgrade_algorithm_config(version_five, 3U);
     version_three = replace_once(version_three, "\"autoExposure\": \"Off\",\n", "");
 
     const auto migrated_v3 = paperbreak::config::parse_config(version_three, directory.path());
@@ -323,7 +341,7 @@ TEST(BasicConfig, MigratesVersionThreeAutoExposureOffAndRoundTripsVersionFourMod
               paperbreak::config::ExposureAutoMode::off);
 
     const auto once =
-        replace_once(version_four, "\"autoExposure\": \"Off\"", "\"autoExposure\": \"Once\"");
+        replace_once(version_five, "\"autoExposure\": \"Off\"", "\"autoExposure\": \"Once\"");
     const auto parsed_once = paperbreak::config::parse_config(once, directory.path());
     ASSERT_TRUE(parsed_once) << parsed_once.error().message;
     EXPECT_EQ(parsed_once.value().cameras.front().exposure_auto_mode,
@@ -333,8 +351,66 @@ TEST(BasicConfig, MigratesVersionThreeAutoExposureOffAndRoundTripsVersionFourMod
               std::string::npos);
 
     const auto unknown =
-        replace_once(version_four, "\"autoExposure\": \"Off\"", "\"autoExposure\": \"Adaptive\"");
+        replace_once(version_five, "\"autoExposure\": \"Off\"", "\"autoExposure\": \"Adaptive\"");
     EXPECT_FALSE(paperbreak::config::parse_config(unknown, directory.path()));
+}
+
+TEST(BasicConfig, MigratesVersionFourSevenFramesToOneHundredTwentyMilliseconds)
+{
+    const TemporaryDirectory directory;
+    auto legacy = paperbreak::config::parse_config(valid_config(), directory.path());
+    ASSERT_TRUE(legacy);
+    const auto version_four =
+        downgrade_algorithm_config(paperbreak::config::serialize_config(legacy.value()), 4U, 7U);
+    auto migrated = paperbreak::config::parse_config(version_four, directory.path());
+    ASSERT_TRUE(migrated) << migrated.error().message;
+    EXPECT_EQ(migrated.value().algorithm.downsample_mode,
+              paperbreak::config::AlgorithmDownsampleMode::disabled);
+    EXPECT_EQ(migrated.value().algorithm.processing_fps,
+              paperbreak::config::AlgorithmProcessingFps::fps60);
+    EXPECT_EQ(migrated.value().algorithm.confirmation_duration_ms, 120U);
+    const auto serialized =
+        nlohmann::json::parse(paperbreak::config::serialize_config(migrated.value()));
+    EXPECT_EQ(serialized["configSchemaVersion"], 5U);
+    EXPECT_FALSE(serialized["algorithm"].contains("consecutiveFrames"));
+}
+
+TEST(BasicConfig, StrictlyValidatesVersionFiveSamplingAndConfirmation)
+{
+    const TemporaryDirectory directory;
+    auto migrated = paperbreak::config::parse_config(valid_config(), directory.path());
+    ASSERT_TRUE(migrated);
+    auto document = nlohmann::json::parse(paperbreak::config::serialize_config(migrated.value()));
+
+    for (const std::string_view mode : {"disabled", "half", "quarter"})
+        for (const auto fps : {15U, 30U, 60U})
+        {
+            document["algorithm"]["downsampleMode"] = mode;
+            document["algorithm"]["processingFps"] = fps;
+            document["algorithm"]["confirmationDurationMs"] = 120U;
+            auto parsed = paperbreak::config::parse_config(document.dump(), directory.path());
+            ASSERT_TRUE(parsed) << parsed.error().message;
+            EXPECT_EQ(static_cast<std::uint32_t>(parsed.value().algorithm.processing_fps), fps);
+        }
+
+    auto invalid_mode = document;
+    invalid_mode["algorithm"]["downsampleMode"] = "eighth";
+    EXPECT_FALSE(paperbreak::config::parse_config(invalid_mode.dump(), directory.path()));
+    auto invalid_fps = document;
+    invalid_fps["algorithm"]["processingFps"] = 20U;
+    EXPECT_FALSE(paperbreak::config::parse_config(invalid_fps.dump(), directory.path()));
+    auto too_short = document;
+    too_short["algorithm"]["confirmationDurationMs"] = 9U;
+    EXPECT_FALSE(paperbreak::config::parse_config(too_short.dump(), directory.path()));
+    auto exceeds_timeout = document;
+    exceeds_timeout["algorithm"]["confirmationDurationMs"] = 60000U;
+    exceeds_timeout["event"]["maxEventSeconds"] = 10U;
+    exceeds_timeout["event"]["preEventSeconds"] = 5U;
+    exceeds_timeout["event"]["postEventSeconds"] = 5U;
+    EXPECT_FALSE(paperbreak::config::parse_config(exceeds_timeout.dump(), directory.path()));
+    auto unknown = document;
+    unknown["algorithm"]["extra"] = true;
+    EXPECT_FALSE(paperbreak::config::parse_config(unknown.dump(), directory.path()));
 }
 
 TEST(BasicConfig, StrictlyValidatesVersionThreeLineIoAndDependencies)
@@ -380,7 +456,7 @@ TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
     const auto malformed = directory.write("truncated.json", R"({"configSchemaVersion":1)");
     const auto future =
         directory.write("future.json", replace_once(valid_config(), "\"configSchemaVersion\": 2",
-                                                    "\"configSchemaVersion\": 5"));
+                                                    "\"configSchemaVersion\": 6"));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(unknown));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(sensitive));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(malformed));

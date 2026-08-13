@@ -96,20 +96,23 @@ struct Lane final
     std::optional<algorithm::DetectorInfo> detector_info;
     mutable std::mutex mutex;
     std::condition_variable condition;
-    std::deque<QueuedAlgorithmFrame> frames;
+    std::optional<QueuedAlgorithmFrame> automatic_frame;
+    std::optional<QueuedAlgorithmFrame> manual_frame;
     std::optional<camera::MonotonicTime> in_flight_time;
+    std::optional<std::chrono::steady_clock::time_point> last_automatic_started_at;
     std::jthread worker;
     bool stop_requested{};
     std::optional<camera::FrameView> latest_frame;
     std::uint64_t latest_submitted_sequence{};
     std::uint64_t manual_after_sequence{};
-    std::optional<std::uint64_t> manual_target_sequence;
     bool manual_pending{};
     std::size_t frame_high_watermark{};
     std::atomic_bool degraded{};
     std::atomic_uint64_t submitted_frames{};
     std::atomic_uint64_t processed_frames{};
     std::atomic_uint64_t skipped_frames{};
+    std::atomic_uint64_t sampled_skipped_frames{};
+    std::atomic_uint64_t missed_processing_slots{};
     std::atomic_uint64_t detector_failures{};
     std::atomic_uint64_t consecutive_detector_failures{};
     std::atomic_uint64_t consecutive_backlog_events{};
@@ -154,6 +157,21 @@ algorithm::DetectorConfig detector_config(const config::EdgeConfig& configuratio
                                      .processing_timeout = 100ms};
     if (result.plugin_id == algorithm::classical::classical_vision_plugin_id)
     {
+        const auto downsample_factor = [&] {
+            switch (configuration.algorithm.downsample_mode)
+            {
+            case config::AlgorithmDownsampleMode::disabled:
+                return 1;
+            case config::AlgorithmDownsampleMode::half:
+                return 2;
+            case config::AlgorithmDownsampleMode::quarter:
+                return 4;
+            }
+            return 1;
+        }();
+        const auto processing_fps =
+            static_cast<double>(static_cast<std::uint32_t>(configuration.algorithm.processing_fps));
+        const auto background_learning_rate = 1.0 - std::pow(1.0 - 0.02, 60.0 / processing_fps);
         result.parameters = {
             {.name = "roi_offset_x",
              .value = static_cast<std::int64_t>(configuration.algorithm.roi.offset_x)},
@@ -163,6 +181,8 @@ algorithm::DetectorConfig detector_config(const config::EdgeConfig& configuratio
              .value = static_cast<std::int64_t>(configuration.algorithm.roi.width)},
             {.name = "roi_height",
              .value = static_cast<std::int64_t>(configuration.algorithm.roi.height)},
+            {.name = "downsample_factor", .value = static_cast<std::int64_t>(downsample_factor)},
+            {.name = "background_learning_rate", .value = background_learning_rate},
         };
     }
     return result;
@@ -197,7 +217,7 @@ struct EventPipelineState final
 };
 
 Result<std::unique_ptr<EventPipelineState>> build_pipeline(
-    const config::EdgeConfig& configuration, const std::size_t frame_queue_capacity,
+    const config::EdgeConfig& configuration, const std::size_t /*frame_queue_capacity*/,
     const std::size_t result_queue_capacity,
     const std::function<Result<void>(algorithm::DetectorPluginRegistry&)>& registry_configurer)
 {
@@ -233,7 +253,7 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
              .safety_margin_frames = 1U,
              .frame_buffer_capacity_bytes = 1U,
              .acquisition_queue_capacity = configuration.acquisition.queue_capacity,
-             .algorithm_queue_capacity = frame_queue_capacity,
+             .algorithm_queue_capacity = 2U,
              .preview_slot_count = configuration.preview.enabled ? 1U : 0U,
              .nvme_queue_frames =
                  configuration.storage.rolling_cache_enabled
@@ -260,9 +280,9 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
                     std::move(information).error());
             detector_information = std::move(information).value();
         }
-        // Keep the configured history available even when detection is delayed by a full
-        // algorithm queue. The pool plan already budgets these queue-held frame buffers.
-        const auto ring_capacity = plan.value().ring_capacity_frames + frame_queue_capacity;
+        // Keep enough additional history to cover frames advancing while either algorithm slot
+        // still references a frame; the same two frames are budgeted by algorithm_queue_capacity.
+        const auto ring_capacity = plan.value().ring_capacity_frames + 2U;
         const auto maximum_references = plan.value().ring_capacity_frames * 8U;
         auto lane = std::make_unique<Lane>();
         lane->camera_id = camera.id;
@@ -290,9 +310,13 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
     auto candidates = event::CandidateEventManager::create(
         {.cameras = std::move(candidate_bindings),
          .candidate_consecutive_frames = 1U,
-         .confirmation_consecutive_frames = configuration.algorithm.consecutive_frames,
          .candidate_confidence_threshold = configuration.algorithm.candidate_threshold,
          .confirmation_confidence_threshold = configuration.algorithm.confirmation_threshold,
+         .confirmation_duration =
+             std::chrono::milliseconds{configuration.algorithm.confirmation_duration_ms},
+         .processing_period = std::chrono::nanoseconds{1'000'000'000LL /
+                                                       static_cast<std::uint32_t>(
+                                                           configuration.algorithm.processing_fps)},
          .external_confirmation = configuration.plant_io.enabled
                                       ? event::ExternalConfirmationPolicy::required_active
                                       : event::ExternalConfirmationPolicy::not_used,
@@ -549,8 +573,7 @@ struct EventRuntimeImpl final
             else
             {
                 lane.consecutive_bad_backlog_windows = 0U;
-                if (lane.window_skipped == 0U &&
-                    lane.frames.size() * 4U < options.frame_queue_capacity)
+                if (lane.window_skipped == 0U && !lane.automatic_frame)
                     ++lane.consecutive_healthy_backlog_windows;
                 else
                     lane.consecutive_healthy_backlog_windows = 0U;
@@ -618,12 +641,17 @@ struct EventRuntimeImpl final
             .latest_sequence_number = lane.latest_frame ? lane.latest_frame->sequence_number() : 0U,
             .detector_info = lane.detector_info,
             .metrics = {
-                .frame_queue_depth = lane.frames.size(),
-                .frame_queue_capacity = options.frame_queue_capacity,
+                .frame_queue_depth = static_cast<std::size_t>(lane.automatic_frame.has_value()) +
+                                     static_cast<std::size_t>(lane.manual_frame.has_value()),
+                .frame_queue_capacity = 2U,
                 .frame_queue_high_watermark = lane.frame_high_watermark,
                 .submitted_frames = lane.submitted_frames.load(),
                 .processed_frames = lane.processed_frames.load(),
                 .skipped_frames = lane.skipped_frames.load(),
+                .sampled_skipped_frames = lane.sampled_skipped_frames.load(),
+                .missed_processing_slots = lane.missed_processing_slots.load(),
+                .configured_processing_fps =
+                    static_cast<std::uint32_t>(state.configuration.algorithm.processing_fps),
                 .detector_failures = lane.detector_failures.load(),
                 .consecutive_detector_failures = lane.consecutive_detector_failures.load(),
                 .consecutive_backlog_events = lane.consecutive_backlog_events.load(),
@@ -1293,11 +1321,12 @@ struct EventRuntimeImpl final
         {
             std::scoped_lock lock{lane->mutex};
             std::optional<camera::MonotonicTime> earliest = lane->in_flight_time;
-            if (!lane->frames.empty())
-            {
-                const auto queued = lane->frames.front().frame.received_monotonic_time();
-                earliest = earliest ? std::min(*earliest, queued) : queued;
-            }
+            for (const auto* queued : {&lane->automatic_frame, &lane->manual_frame})
+                if (*queued)
+                {
+                    const auto time = (*queued)->frame.received_monotonic_time();
+                    earliest = earliest ? std::min(*earliest, time) : time;
+                }
             if (earliest)
                 watermark = watermark ? std::min(*watermark, *earliest) : earliest;
         }
@@ -1326,26 +1355,50 @@ struct EventRuntimeImpl final
         std::uint64_t diagnostic_candidates = 0U;
         std::int64_t diagnostic_total_us = 0;
         std::int64_t diagnostic_maximum_us = 0;
+        const auto processing_period = std::chrono::nanoseconds{
+            1'000'000'000LL /
+            static_cast<std::uint32_t>(state.configuration.algorithm.processing_fps)};
         while (true)
         {
             std::optional<QueuedAlgorithmFrame> queued_frame;
             bool manual = false;
             {
                 std::unique_lock lock{lane.mutex};
-                lane.condition.wait(lock,
-                                    [&] { return lane.stop_requested || !lane.frames.empty(); });
-                if (lane.frames.empty() && lane.stop_requested)
-                    break;
-                queued_frame.emplace(std::move(lane.frames.front()));
-                lane.frames.pop_front();
-                lane.in_flight_time = queued_frame->frame.received_monotonic_time();
-                if (lane.manual_pending && lane.manual_target_sequence &&
-                    queued_frame->frame.sequence_number() == *lane.manual_target_sequence)
+                while (!queued_frame)
                 {
-                    lane.manual_pending = false;
-                    lane.manual_target_sequence.reset();
-                    manual = true;
+                    if (lane.manual_frame)
+                    {
+                        queued_frame.emplace(std::move(*lane.manual_frame));
+                        lane.manual_frame.reset();
+                        manual = true;
+                        break;
+                    }
+                    const auto current = now();
+                    const bool automatic_due =
+                        lane.stop_requested || !lane.last_automatic_started_at ||
+                        current - *lane.last_automatic_started_at >= processing_period;
+                    if (lane.automatic_frame && automatic_due)
+                    {
+                        queued_frame.emplace(std::move(*lane.automatic_frame));
+                        lane.automatic_frame.reset();
+                        lane.last_automatic_started_at = current;
+                        break;
+                    }
+                    if (lane.stop_requested)
+                        break;
+                    if (lane.automatic_frame && lane.last_automatic_started_at)
+                    {
+                        const auto due = *lane.last_automatic_started_at + processing_period;
+                        lane.condition.wait_for(lock, due - current);
+                    }
+                    else
+                    {
+                        lane.condition.wait(lock);
+                    }
                 }
+                if (!queued_frame)
+                    break;
+                lane.in_flight_time = queued_frame->frame.received_monotonic_time();
             }
             notify_result_progress(state);
             const auto processing_started = now();
@@ -1357,6 +1410,7 @@ struct EventRuntimeImpl final
 
             std::optional<algorithm::DetectionResult> completed_detection;
             std::optional<Error> detector_error;
+            std::uint64_t missed_processing_slots = 0U;
             if (manual)
                 completed_detection = manual_detection(frame);
             else if (state.configuration.algorithm.enabled && lane.detector &&
@@ -1364,9 +1418,14 @@ struct EventRuntimeImpl final
             {
                 const auto detector_started = now();
                 auto detection = lane.detector->process(frame);
+                const auto detector_elapsed_ns =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(now() - detector_started);
                 const auto detector_elapsed =
-                    std::chrono::duration_cast<std::chrono::microseconds>(now() - detector_started);
+                    std::chrono::duration_cast<std::chrono::microseconds>(detector_elapsed_ns);
                 record_processing_time(lane, detector_elapsed);
+                if (detector_elapsed_ns > processing_period)
+                    missed_processing_slots = static_cast<std::uint64_t>(
+                        (detector_elapsed_ns - std::chrono::nanoseconds{1}) / processing_period);
                 ++diagnostic_calls;
                 diagnostic_total_us += detector_elapsed.count();
                 diagnostic_maximum_us = std::max(diagnostic_maximum_us, detector_elapsed.count());
@@ -1436,12 +1495,44 @@ struct EventRuntimeImpl final
                                lane.maximum_end_to_end_us,
                                std::chrono::duration_cast<std::chrono::microseconds>(
                                    completed_at - frame.received_monotonic_time()));
+            bool backlog_started = false;
+            std::optional<Error> degraded_error;
             {
                 std::scoped_lock lock{lane.mutex};
+                if (missed_processing_slots > 0U)
+                {
+                    lane.missed_processing_slots.fetch_add(missed_processing_slots);
+                    lane.skipped_frames.fetch_add(missed_processing_slots);
+                    lane.window_skipped += missed_processing_slots;
+                    lane.consecutive_backlog_events.fetch_add(missed_processing_slots);
+                    backlog_started = !lane.backlog_active;
+                    lane.backlog_active = true;
+                    if (lane.window_skipped >= options.consecutive_backlog_limit &&
+                        options.backlog_degrade_window_limit == 1U)
+                    {
+                        lane.consecutive_bad_backlog_windows = 1U;
+                        degraded_error = enter_degraded(lane, "missed-processing-slots");
+                    }
+                }
                 lane.in_flight_time.reset();
                 ++lane.processed_frames;
                 ++lane.window_processed;
             }
+            if (backlog_started)
+            {
+                notify_backlog({.camera_id = lane.camera_id,
+                                .active = true,
+                                .queue_depth = 0U,
+                                .queue_capacity = 1U,
+                                .skipped_frames = lane.skipped_frames.load()});
+                auto error = algorithm_runtime_error(
+                    "ALGORITHM_QUEUE_BACKLOG", Severity::warning, "算法处理超时导致错过配置节拍",
+                    "algorithm.runtime.schedule", lane.camera_id, true);
+                error.details.push_back({"overflowAction", "missed-processing-slot"});
+                report(error);
+            }
+            if (degraded_error)
+                report(*degraded_error);
             notify_result_progress(state);
             if (detector_error)
                 report(*detector_error);
@@ -1730,13 +1821,10 @@ Result<void> EventRuntime::start()
 
 Result<void> EventRuntime::submit_frame(camera::FrameView frame)
 {
-    bool backlog_started = false;
     bool backlog_recovered = false;
     std::string source_id = frame.camera_id();
     std::optional<Error> degraded_error;
-    std::optional<Error> backlog_error;
     std::optional<AlgorithmBacklogStateChange> backlog_change;
-    std::vector<Error> delivery_errors;
     const auto submitted_at = impl_->now();
     std::unique_lock lock{impl_->mutex};
     if (!impl_->accepting)
@@ -1767,83 +1855,44 @@ Result<void> EventRuntime::submit_frame(camera::FrameView frame)
         return Result<void>::failure(std::move(cached).error());
     }
     lane->latest_frame = frame;
-    if (lane->manual_pending && !lane->manual_target_sequence &&
-        frame.sequence_number() > lane->manual_after_sequence)
-        lane->manual_target_sequence = frame.sequence_number();
-    bool enqueue = true;
-    std::optional<camera::FrameView> skipped_frame;
     ++lane->window_submitted;
-    if (lane->frames.size() >= impl_->options.frame_queue_capacity)
+    const bool reserve_manual =
+        lane->manual_pending && frame.sequence_number() > lane->manual_after_sequence;
+    if (reserve_manual)
     {
-        const auto oldest =
-            std::ranges::find_if(lane->frames, [&](const QueuedAlgorithmFrame& pending) {
-                return !lane->manual_target_sequence ||
-                       pending.frame.sequence_number() != *lane->manual_target_sequence;
-            });
-        if (oldest != lane->frames.end())
-        {
-            skipped_frame.emplace(std::move(oldest->frame));
-            lane->frames.erase(oldest);
-        }
-        else
-        {
-            enqueue = false;
-            skipped_frame = frame;
-        }
-        ++lane->skipped_frames;
-        ++lane->window_skipped;
-        lane->consecutive_backlog_events.fetch_add(1U);
-        backlog_started = !lane->backlog_active;
-        lane->backlog_active = true;
-        if (lane->window_skipped >= impl_->options.consecutive_backlog_limit &&
-            impl_->options.backlog_degrade_window_limit == 1U)
-        {
-            lane->consecutive_bad_backlog_windows = 1U;
-            degraded_error = impl_->enter_degraded(*lane, "sustained-queue-backlog");
-        }
+        if (lane->automatic_frame)
+            ++lane->sampled_skipped_frames;
+        lane->automatic_frame.reset();
+        lane->manual_frame = QueuedAlgorithmFrame{.frame = frame, .enqueued_at = submitted_at};
+        lane->manual_pending = false;
     }
+    else
+    {
+        if (lane->automatic_frame)
+            ++lane->sampled_skipped_frames;
+        lane->automatic_frame =
+            QueuedAlgorithmFrame{.frame = std::move(frame), .enqueued_at = submitted_at};
+    }
+    lane->frame_high_watermark = std::max(
+        lane->frame_high_watermark, static_cast<std::size_t>(lane->automatic_frame.has_value()) +
+                                        static_cast<std::size_t>(lane->manual_frame.has_value()));
     lane->latest_submitted_sequence =
-        std::max(lane->latest_submitted_sequence, frame.sequence_number());
+        std::max(lane->latest_submitted_sequence, lane->latest_frame->sequence_number());
     ++lane->submitted_frames;
-    if (skipped_frame)
-        delivery_errors = impl_->enqueue_result(
-            *impl_->pipeline, *lane, {.frame = *skipped_frame, .detection = std::nullopt});
-    if (enqueue)
-    {
-        lane->frames.push_back({.frame = std::move(frame), .enqueued_at = submitted_at});
-        lane->frame_high_watermark = std::max(lane->frame_high_watermark, lane->frames.size());
-        impl_->notify_result_progress(*impl_->pipeline);
-        lane->condition.notify_one();
-    }
-    if (backlog_started)
-    {
-        auto error =
-            runtime_error("ALGORITHM_QUEUE_BACKLOG", Severity::warning,
-                          "算法队列积压，已跳过最旧待检测帧", "algorithm.runtime.submit", true);
-        error.module = "algorithm";
-        error.source_id = source_id;
-        error.details.push_back({"queue", "algorithm.frames[" + source_id + "]"});
-        error.details.push_back({"capacity", std::to_string(impl_->options.frame_queue_capacity)});
-        error.details.push_back({"overflowAction", "drop-oldest"});
-        backlog_error = std::move(error);
-    }
-    if (backlog_started || backlog_recovered)
-        backlog_change =
-            AlgorithmBacklogStateChange{.camera_id = source_id,
-                                        .active = backlog_started,
-                                        .queue_depth = lane->frames.size(),
-                                        .queue_capacity = impl_->options.frame_queue_capacity,
-                                        .skipped_frames = lane->skipped_frames.load()};
+    impl_->notify_result_progress(*impl_->pipeline);
+    lane->condition.notify_one();
+    if (backlog_recovered)
+        backlog_change = AlgorithmBacklogStateChange{.camera_id = source_id,
+                                                     .active = false,
+                                                     .queue_depth = lane->automatic_frame ? 1U : 0U,
+                                                     .queue_capacity = 1U,
+                                                     .skipped_frames = lane->skipped_frames.load()};
     lane_lock.unlock();
     lock.unlock();
     if (backlog_change)
         impl_->notify_backlog(*backlog_change);
-    if (backlog_error)
-        impl_->report(*backlog_error);
     if (degraded_error)
         impl_->report(*degraded_error);
-    for (const auto& error : delivery_errors)
-        impl_->report(error);
     return Result<void>::success();
 }
 
@@ -1863,10 +1912,9 @@ Result<bool> EventRuntime::request_manual_trigger(const std::string_view camera_
         return Result<bool>::failure(std::move(error));
     }
     std::scoped_lock lane_lock{lane->mutex};
-    if (lane->manual_pending)
+    if (lane->manual_pending || lane->manual_frame)
         return Result<bool>::success(false);
     lane->manual_after_sequence = lane->latest_submitted_sequence;
-    lane->manual_target_sequence.reset();
     lane->manual_pending = true;
     return Result<bool>::success(true);
 }
@@ -1960,7 +2008,7 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
                 removed_backlogs.push_back({.camera_id = old_lane->camera_id,
                                             .active = false,
                                             .queue_depth = 0U,
-                                            .queue_capacity = impl_->options.frame_queue_capacity,
+                                            .queue_capacity = 1U,
                                             .skipped_frames = old_lane->skipped_frames.load()});
         }
         for (auto& lane : next->lanes)
@@ -1975,6 +2023,8 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
                 lane->submitted_frames.store(old_lane->submitted_frames.load());
                 lane->processed_frames.store(old_lane->processed_frames.load());
                 lane->skipped_frames.store(old_lane->skipped_frames.load());
+                lane->sampled_skipped_frames.store(old_lane->sampled_skipped_frames.load());
+                lane->missed_processing_slots.store(old_lane->missed_processing_slots.load());
                 lane->detector_failures.store(old_lane->detector_failures.load());
                 lane->consecutive_backlog_events.store(old_lane->consecutive_backlog_events.load());
                 lane->backlog_active = old_lane->backlog_active;
@@ -2153,6 +2203,8 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
     std::uint64_t submitted{};
     std::uint64_t processed{};
     std::uint64_t skipped{};
+    std::uint64_t sampled_skipped{};
+    std::uint64_t missed_slots{};
     std::uint64_t detector_failures{};
     std::uint64_t consecutive_failures{};
     std::uint64_t consecutive_backlogs{};
@@ -2175,12 +2227,15 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
     for (const auto& lane : impl_->pipeline->lanes)
     {
         std::scoped_lock lane_lock{lane->mutex};
-        frame_depth += lane->frames.size();
-        frame_capacity += impl_->options.frame_queue_capacity;
+        frame_depth += static_cast<std::size_t>(lane->automatic_frame.has_value()) +
+                       static_cast<std::size_t>(lane->manual_frame.has_value());
+        frame_capacity += 2U;
         frame_high_watermark += lane->frame_high_watermark;
         submitted += lane->submitted_frames.load();
         processed += lane->processed_frames.load();
         skipped += lane->skipped_frames.load();
+        sampled_skipped += lane->sampled_skipped_frames.load();
+        missed_slots += lane->missed_processing_slots.load();
         detector_failures += lane->detector_failures.load();
         consecutive_failures =
             std::max(consecutive_failures, lane->consecutive_detector_failures.load());
@@ -2246,6 +2301,10 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
             .processed_frames = processed,
             .rejected_frames = impl_->rejected_frames.load(),
             .skipped_frames = skipped,
+            .sampled_skipped_frames = sampled_skipped,
+            .missed_processing_slots = missed_slots,
+            .configured_processing_fps =
+                static_cast<std::uint32_t>(impl_->pipeline->configuration.algorithm.processing_fps),
             .detector_failures = detector_failures,
             .consecutive_detector_failures = consecutive_failures,
             .consecutive_backlog_events = consecutive_backlogs,

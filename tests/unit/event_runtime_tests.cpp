@@ -156,6 +156,9 @@ struct ControlledDetectorBehavior final
     std::map<std::pair<std::string, std::uint64_t>, double> confidence_by_frame;
     double default_trigger_confidence{1.0};
     std::map<std::string, std::vector<std::uint64_t>> completed_sequences;
+    std::map<std::string, std::vector<std::chrono::steady_clock::time_point>> started_at;
+    std::map<std::string, std::chrono::milliseconds> processing_delay;
+    std::function<void(std::string_view)> advance_clock;
     std::size_t active_calls{};
     std::size_t maximum_active_calls{};
 };
@@ -176,6 +179,18 @@ class ControlledRuntimeDetector final : public algorithm::IBreakDetector
 
     Result<algorithm::DetectionResult> process(const FrameView& input) override
     {
+        std::chrono::milliseconds delay{};
+        {
+            std::scoped_lock lock{behavior_->mutex};
+            behavior_->started_at[input.camera_id()].push_back(std::chrono::steady_clock::now());
+            const auto configured_delay = behavior_->processing_delay.find(input.camera_id());
+            if (configured_delay != behavior_->processing_delay.end())
+                delay = configured_delay->second;
+        }
+        if (delay > 0ms)
+            std::this_thread::sleep_for(delay);
+        if (behavior_->advance_clock)
+            behavior_->advance_clock(input.camera_id());
         bool fail = false;
         bool triggered = false;
         double confidence = 0.0;
@@ -293,7 +308,7 @@ config::EdgeConfig four_camera_runtime_config()
     value.acquisition.frame_pool_capacity = 512U;
     value.algorithm.enabled = true;
     value.algorithm.type = "controlled-runtime-test";
-    value.algorithm.consecutive_frames = 1U;
+    value.algorithm.confirmation_duration_ms = 10U;
     return value;
 }
 
@@ -323,7 +338,8 @@ struct ThreadRegistrationProbe final
     std::atomic_int& alive_;
 };
 
-FrameView frame(const std::uint64_t sequence, const std::chrono::milliseconds offset,
+template <typename Rep, typename Period>
+FrameView frame(const std::uint64_t sequence, const std::chrono::duration<Rep, Period> offset,
                 std::string camera_id = "CAM01")
 {
     auto buffer = std::make_shared<FrameBuffer>(16U);
@@ -332,14 +348,17 @@ FrameView frame(const std::uint64_t sequence, const std::chrono::milliseconds of
     if (!buffer->set_size(16U))
         throw std::runtime_error{"frame size"};
     const auto wall = WallClockTime{std::chrono::sys_days{std::chrono::year{2026} / 8 / 4}};
-    auto view = make_frame_view({.camera_id = std::move(camera_id),
-                                 .camera_frame_number = 1000U + sequence,
-                                 .sequence_number = sequence,
-                                 .received_monotonic_time = MonotonicTime{offset},
-                                 .received_wall_clock_time = wall + offset,
-                                 .geometry = {.width = 4U, .height = 4U, .stride = 4U},
-                                 .pixel_format = PixelFormat::mono8,
-                                 .buffer = std::move(buffer)});
+    auto view = make_frame_view(
+        {.camera_id = std::move(camera_id),
+         .camera_frame_number = 1000U + sequence,
+         .sequence_number = sequence,
+         .received_monotonic_time =
+             MonotonicTime{std::chrono::duration_cast<MonotonicTime::duration>(offset)},
+         .received_wall_clock_time =
+             wall + std::chrono::duration_cast<WallClockTime::duration>(offset),
+         .geometry = {.width = 4U, .height = 4U, .stride = 4U},
+         .pixel_format = PixelFormat::mono8,
+         .buffer = std::move(buffer)});
     if (!view)
         throw std::runtime_error{"frame view"};
     return std::move(view).value();
@@ -424,9 +443,13 @@ TEST(EventRuntimeIntegration, ManualTriggerPersistsContinuousWindowWithoutBlocki
     ASSERT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
     const auto snapshot = runtime.value()->snapshot();
     EXPECT_EQ(snapshot.submitted_frames, 23U);
-    EXPECT_EQ(snapshot.processed_frames, 23U);
+    EXPECT_EQ(snapshot.processed_frames + snapshot.sampled_skipped_frames, 23U);
+    EXPECT_GT(snapshot.sampled_skipped_frames, 0U);
+    EXPECT_EQ(snapshot.skipped_frames, 0U);
+    EXPECT_EQ(snapshot.missed_processing_slots, 0U);
     EXPECT_EQ(snapshot.rejected_frames, 0U);
     EXPECT_EQ(snapshot.events_committed, 1U);
+    EXPECT_EQ(snapshot.frame_queue_capacity, 2U);
     EXPECT_EQ(snapshot.persistence_queue_capacity, 8U);
     EXPECT_EQ(snapshot.persistence_queue_depth, 0U);
     EXPECT_EQ(snapshot.persistence_active_events, 0U);
@@ -449,12 +472,13 @@ TEST(EventRuntimeIntegration, FrozenCandidateMappingSurvivesUntilConfirmationAnd
     behavior->triggered_cameras = {"CAM01"};
     behavior->default_trigger_confidence = 0.7;
     behavior->confidence_by_frame[{"CAM01", 3U}] = 0.9;
+    behavior->confidence_by_frame[{"CAM01", 4U}] = 0.9;
     auto configuration = runtime_config();
     configuration.algorithm.enabled = true;
     configuration.algorithm.type = "controlled-runtime-test";
     configuration.algorithm.candidate_threshold = 0.6;
     configuration.algorithm.confirmation_threshold = 0.8;
-    configuration.algorithm.consecutive_frames = 1U;
+    configuration.algorithm.confirmation_duration_ms = 10U;
     configuration.algorithm.cooldown_ms = 0U;
     auto runtime = EventRuntime::create(
         {.configuration = configuration,
@@ -476,12 +500,17 @@ TEST(EventRuntimeIntegration, FrozenCandidateMappingSurvivesUntilConfirmationAnd
     ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_frozen == 1U; }));
     ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 1300ms)));
     ASSERT_TRUE(wait_until([&] {
+        std::scoped_lock lock{behavior->mutex};
+        return std::ranges::find(behavior->completed_sequences["CAM01"], 3U) !=
+               behavior->completed_sequences["CAM01"].end();
+    }));
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(4U, 1320ms)));
+    ASSERT_TRUE(wait_until([&] {
         auto record = shared_database->get_event(first_id);
         return record && record.value().decision_state == "Confirmed";
     }));
     EXPECT_EQ(runtime.value()->snapshot().events_started, 1U);
-
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(4U, 1400ms)));
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(5U, 1400ms)));
     ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 2U; }));
     auto second_page = shared_database->query_events({.limit = 10U});
     ASSERT_TRUE(second_page);
@@ -492,7 +521,7 @@ TEST(EventRuntimeIntegration, FrozenCandidateMappingSurvivesUntilConfirmationAnd
     EXPECT_EQ(event_ids.size(), 2U);
     EXPECT_TRUE(event_ids.contains(first_id));
 
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(5U, 2500ms)));
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(6U, 2500ms)));
     ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_frozen == 2U; }));
     EXPECT_EQ(runtime.value()->snapshot().events_started, 2U);
     runtime.value()->request_stop();
@@ -517,7 +546,7 @@ TEST(EventRuntimeIntegration, FrozenCandidateTimeoutDoesNotReuseIdAndLaterCandid
     configuration.algorithm.type = "controlled-runtime-test";
     configuration.algorithm.candidate_threshold = 0.6;
     configuration.algorithm.confirmation_threshold = 0.8;
-    configuration.algorithm.consecutive_frames = 1U;
+    configuration.algorithm.confirmation_duration_ms = 10U;
     configuration.algorithm.cooldown_ms = 1000U;
     auto runtime = EventRuntime::create(
         {.configuration = configuration,
@@ -572,7 +601,7 @@ TEST(EventRuntimeIntegration, ExternalConfirmationAfterFreezeUpdatesOriginalAndR
     configuration.algorithm.type = "controlled-runtime-test";
     configuration.algorithm.candidate_threshold = 0.6;
     configuration.algorithm.confirmation_threshold = 0.8;
-    configuration.algorithm.consecutive_frames = 1U;
+    configuration.algorithm.confirmation_duration_ms = 10U;
     configuration.algorithm.cooldown_ms = 0U;
     configuration.plant_io.enabled = true;
     auto runtime = EventRuntime::create(
@@ -819,7 +848,7 @@ TEST(EventRuntimeIntegration, RejectsUnsafePoolBudgetAndUnknownManualCamera)
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }
 
-TEST(EventRuntimeIntegration, DropsOldestOnBacklogAndKeepsSubmissionNonBlocking)
+TEST(EventRuntimeIntegration, LatestWinsSamplingIsNonBlockingAndDoesNotRaiseBacklog)
 {
     TemporaryDirectory temporary;
     const auto event_root = temporary.path() / "events";
@@ -854,9 +883,13 @@ TEST(EventRuntimeIntegration, DropsOldestOnBacklogAndKeepsSubmissionNonBlocking)
     const auto snapshot = runtime.value()->snapshot();
     EXPECT_EQ(snapshot.submitted_frames, 13U);
     EXPECT_EQ(snapshot.rejected_frames, 0U);
-    EXPECT_GT(snapshot.skipped_frames, 0U);
-    EXPECT_EQ(snapshot.processed_frames + snapshot.skipped_frames, snapshot.submitted_frames);
-    EXPECT_EQ(snapshot.frame_queue_capacity, 2U);
+    EXPECT_GT(snapshot.sampled_skipped_frames, 0U);
+    EXPECT_EQ(snapshot.processed_frames + snapshot.sampled_skipped_frames,
+              snapshot.submitted_frames);
+    EXPECT_EQ(snapshot.skipped_frames, 0U);
+    EXPECT_EQ(snapshot.missed_processing_slots, 0U);
+    EXPECT_EQ(snapshot.backlog_active_lanes, 0U);
+    EXPECT_EQ(snapshot.frame_queue_capacity, 4U);
     EXPECT_GE(snapshot.frame_queue_high_watermark, 1U);
     EXPECT_LE(snapshot.frame_queue_high_watermark, snapshot.frame_queue_capacity);
     EXPECT_GE(snapshot.processed_frames, 2U);
@@ -876,7 +909,7 @@ TEST(EventRuntimeIntegration, ConsecutiveDetectorFailuresKeepDetectingAndAlarmUn
     auto configuration = runtime_config();
     configuration.algorithm.enabled = true;
     configuration.algorithm.type = "failing-runtime-test";
-    configuration.algorithm.consecutive_frames = 1U;
+    configuration.algorithm.confirmation_duration_ms = 10U;
     auto behavior = std::make_shared<DetectorBehavior>(configuration.algorithm.type, 0ms, 3U);
     std::atomic_uint64_t degraded_errors{};
     std::atomic_uint64_t active_alarm_updates{};
@@ -1119,7 +1152,98 @@ TEST(EventRuntimeIntegration, ExposesAppliedAlgorithmStateAndTestsLatestFrameInI
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }
 
-TEST(EventRuntimeLanes, BlockedCameraDoesNotStopOtherLanesAndEachLaneRemainsOrdered)
+TEST(EventRuntimeScheduling, LimitsSixtyFpsInputAndAlwaysProcessesTheLatestAvailableFrame)
+{
+    struct Case final
+    {
+        config::AlgorithmProcessingFps fps;
+    };
+    const std::vector<Case> cases{{config::AlgorithmProcessingFps::fps15},
+                                  {config::AlgorithmProcessingFps::fps30},
+                                  {config::AlgorithmProcessingFps::fps60}};
+    TemporaryDirectory temporary;
+    for (const auto& test_case : cases)
+    {
+        const auto fps = static_cast<std::uint32_t>(test_case.fps);
+        const auto root = temporary.path() / std::to_wstring(fps);
+        auto database =
+            EventMetadataDatabase::open({.database_path = root / "database" / "events.db",
+                                         .event_root = root / "events",
+                                         .backup_directory = root / "backups"});
+        ASSERT_TRUE(database);
+        std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+        auto behavior = std::make_shared<ControlledDetectorBehavior>();
+        auto configuration = runtime_config();
+        configuration.algorithm.enabled = true;
+        configuration.algorithm.type = "controlled-runtime-test";
+        configuration.algorithm.processing_fps = test_case.fps;
+        configuration.algorithm.confirmation_duration_ms = 10U;
+        std::atomic_int64_t elapsed_ns{};
+        auto runtime = EventRuntime::create(
+            {.configuration = configuration,
+             .event_root = root / "events",
+             .database = shared_database,
+             .detector_registry_configurer = controlled_detector_registration(behavior),
+             .monotonic_now = [&] {
+                 return std::chrono::steady_clock::time_point{
+                     std::chrono::nanoseconds{elapsed_ns.load()}};
+             }});
+        ASSERT_TRUE(runtime) << "fps=" << fps;
+        ASSERT_TRUE(runtime.value()->start());
+
+        constexpr auto input_period = std::chrono::nanoseconds{16'666'667};
+        const auto processing_period = std::chrono::nanoseconds{1'000'000'000LL / fps};
+        std::size_t expected_calls = 0U;
+        std::chrono::nanoseconds last_expected_start{};
+        for (std::uint64_t sequence = 1U; sequence <= 25U; ++sequence)
+        {
+            const auto input_time = input_period * static_cast<std::int64_t>(sequence - 1U);
+            elapsed_ns.store(input_time.count());
+            ASSERT_TRUE(runtime.value()->submit_frame(frame(sequence, input_time)));
+            if (sequence == 1U || input_time - last_expected_start >= processing_period)
+            {
+                ++expected_calls;
+                last_expected_start = input_time;
+                ASSERT_TRUE(wait_until([&] {
+                    return runtime.value()->snapshot().detector_process_calls == expected_calls;
+                }));
+            }
+        }
+
+        std::vector<std::uint64_t> sequences;
+        {
+            std::scoped_lock lock{behavior->mutex};
+            sequences = behavior->completed_sequences["CAM01"];
+        }
+        EXPECT_EQ(sequences.size(), (24U * fps / 60U) + 1U) << "fps=" << fps;
+        EXPECT_EQ(sequences.front(), 1U);
+        EXPECT_GE(sequences.back(), 24U);
+        EXPECT_TRUE(std::ranges::is_sorted(sequences));
+        EXPECT_EQ(std::ranges::adjacent_find(sequences), sequences.end());
+
+        const auto calls_before_idle = runtime.value()->snapshot().detector_process_calls;
+        elapsed_ns.fetch_add((processing_period * 2).count());
+        std::this_thread::sleep_for(10ms);
+        const auto lane_before_stop = runtime.value()->algorithm_snapshot("CAM01");
+        ASSERT_TRUE(lane_before_stop);
+        EXPECT_EQ(runtime.value()->snapshot().detector_process_calls, calls_before_idle);
+        EXPECT_EQ(lane_before_stop.value().metrics.configured_processing_fps, fps);
+        EXPECT_EQ(lane_before_stop.value().metrics.missed_processing_slots, 0U);
+        EXPECT_EQ(lane_before_stop.value().metrics.skipped_frames, 0U);
+        EXPECT_FALSE(lane_before_stop.value().metrics.backlog_active);
+        runtime.value()->request_stop();
+        ASSERT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+        const auto lane_after_stop = runtime.value()->algorithm_snapshot("CAM01");
+        ASSERT_TRUE(lane_after_stop);
+        EXPECT_EQ(lane_after_stop.value().metrics.processed_frames +
+                      lane_after_stop.value().metrics.sampled_skipped_frames,
+                  25U);
+        std::scoped_lock behavior_lock{behavior->mutex};
+        EXPECT_EQ(behavior->completed_sequences["CAM01"].back(), 25U);
+    }
+}
+
+TEST(EventRuntimeLanes, BlockedCameraDoesNotStopOtherLatestWinsLanes)
 {
     TemporaryDirectory temporary;
     const auto event_root = temporary.path() / "events";
@@ -1146,38 +1270,50 @@ TEST(EventRuntimeLanes, BlockedCameraDoesNotStopOtherLanesAndEachLaneRemainsOrde
         return behavior->active_calls == 1U;
     }));
     for (const auto camera_id : {"CAM02", "CAM03", "CAM04"})
-        for (std::uint64_t sequence = 1U; sequence <= 3U; ++sequence)
-            ASSERT_TRUE(runtime.value()->submit_frame(
-                frame(sequence, std::chrono::milliseconds{sequence * 100U}, camera_id)));
-
-    ASSERT_TRUE(wait_until([&] {
+        ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 100ms, camera_id)));
+    const bool first_round_completed = wait_until([&] {
         for (const auto camera_id : {"CAM02", "CAM03", "CAM04"})
         {
             const auto lane = runtime.value()->algorithm_snapshot(camera_id);
-            if (!lane || lane.value().metrics.processed_frames != 3U)
+            if (!lane || lane.value().metrics.processed_frames != 1U)
                 return false;
         }
         return true;
-    }));
+    });
+    for (const auto camera_id : {"CAM02", "CAM03", "CAM04"})
+    {
+        ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 200ms, camera_id)));
+        ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 300ms, camera_id)));
+    }
+    const bool latest_round_completed = wait_until([&] {
+        for (const auto camera_id : {"CAM02", "CAM03", "CAM04"})
+        {
+            const auto lane = runtime.value()->algorithm_snapshot(camera_id);
+            if (!lane || lane.value().metrics.processed_frames != 2U)
+                return false;
+        }
+        return true;
+    });
     const auto blocked = runtime.value()->algorithm_snapshot("CAM01");
-    ASSERT_TRUE(blocked);
-    EXPECT_EQ(blocked.value().metrics.processed_frames, 0U);
     {
         std::scoped_lock lock{behavior->mutex};
-        EXPECT_GE(behavior->maximum_active_calls, 2U);
         behavior->release_cam01 = true;
     }
     behavior->condition.notify_all();
     runtime.value()->request_stop();
     ASSERT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 
+    EXPECT_TRUE(first_round_completed);
+    EXPECT_TRUE(latest_round_completed);
+    ASSERT_TRUE(blocked);
+    EXPECT_EQ(blocked.value().metrics.processed_frames, 0U);
     std::scoped_lock behavior_lock{behavior->mutex};
+    EXPECT_GE(behavior->maximum_active_calls, 2U);
     for (const auto camera_id : {"CAM02", "CAM03", "CAM04"})
-        EXPECT_EQ(behavior->completed_sequences[camera_id],
-                  (std::vector<std::uint64_t>{1U, 2U, 3U}));
+        EXPECT_EQ(behavior->completed_sequences[camera_id], (std::vector<std::uint64_t>{1U, 3U}));
 }
 
-TEST(EventRuntimeLanes, BacklogAndDegradationArePrivateToTheSourceLane)
+TEST(EventRuntimeLanes, NormalLatestWinsSamplingNeverDegradesAnyLane)
 {
     TemporaryDirectory temporary;
     const auto event_root = temporary.path() / "events";
@@ -1217,14 +1353,15 @@ TEST(EventRuntimeLanes, BacklogAndDegradationArePrivateToTheSourceLane)
     const auto cam02 = runtime.value()->algorithm_snapshot("CAM02");
     ASSERT_TRUE(cam01);
     ASSERT_TRUE(cam02);
-    EXPECT_EQ(cam01.value().state, AlgorithmRuntimeState::manual_trigger_only);
-    EXPECT_EQ(cam01.value().metrics.skipped_frames, 2U);
-    EXPECT_EQ(cam01.value().metrics.consecutive_backlog_events, 2U);
+    EXPECT_EQ(cam01.value().state, AlgorithmRuntimeState::active);
+    EXPECT_EQ(cam01.value().metrics.sampled_skipped_frames, 2U);
+    EXPECT_EQ(cam01.value().metrics.skipped_frames, 0U);
+    EXPECT_EQ(cam01.value().metrics.missed_processing_slots, 0U);
+    EXPECT_EQ(cam01.value().metrics.consecutive_backlog_events, 0U);
     EXPECT_EQ(cam02.value().state, AlgorithmRuntimeState::active);
     EXPECT_EQ(cam02.value().metrics.skipped_frames, 0U);
     EXPECT_EQ(cam02.value().metrics.consecutive_backlog_events, 0U);
-    EXPECT_EQ(runtime.value()->snapshot().algorithm_state,
-              AlgorithmRuntimeState::partially_degraded);
+    EXPECT_EQ(runtime.value()->snapshot().algorithm_state, AlgorithmRuntimeState::active);
 
     {
         std::scoped_lock lock{behavior->mutex};
@@ -1286,13 +1423,12 @@ TEST(EventRuntimeLanes, BacklogActivatesOnceAndRecoversAfterHealthyWindows)
             frame(sequence, std::chrono::milliseconds{sequence - 1U}, "CAM01")));
     {
         std::scoped_lock lock{observer_mutex};
-        ASSERT_EQ(changes.size(), 1U);
-        EXPECT_TRUE(changes.front().active);
+        EXPECT_TRUE(changes.empty());
         EXPECT_EQ(std::ranges::count_if(errors,
                                         [](const Error& error) {
                                             return error.business_code == "ALGORITHM_QUEUE_BACKLOG";
                                         }),
-                  1);
+                  0);
     }
 
     elapsed_ms.store(250);
@@ -1307,12 +1443,24 @@ TEST(EventRuntimeLanes, BacklogActivatesOnceAndRecoversAfterHealthyWindows)
     }));
     const auto latency = runtime.value()->algorithm_snapshot("CAM01");
     ASSERT_TRUE(latency);
+    EXPECT_EQ(latency.value().metrics.missed_processing_slots, 3U);
+    EXPECT_EQ(latency.value().metrics.sampled_skipped_frames, 2U);
     EXPECT_EQ(latency.value().metrics.last_queue_wait_time, 250ms);
     EXPECT_EQ(latency.value().metrics.average_queue_wait_time, 125ms);
     EXPECT_EQ(latency.value().metrics.maximum_queue_wait_time, 250ms);
     EXPECT_EQ(latency.value().metrics.last_end_to_end_time, 247ms);
     EXPECT_EQ(latency.value().metrics.average_end_to_end_time, std::chrono::microseconds{248500});
     EXPECT_EQ(latency.value().metrics.maximum_end_to_end_time, 250ms);
+    {
+        std::scoped_lock lock{observer_mutex};
+        ASSERT_EQ(changes.size(), 1U);
+        EXPECT_TRUE(changes.front().active);
+        EXPECT_EQ(std::ranges::count_if(errors,
+                                        [](const Error& error) {
+                                            return error.business_code == "ALGORITHM_QUEUE_BACKLOG";
+                                        }),
+                  1);
+    }
     for (std::uint64_t window = 1U; window <= 6U; ++window)
     {
         elapsed_ms.store(static_cast<std::int64_t>(window * 1000U));
@@ -1351,18 +1499,23 @@ TEST(EventRuntimeLanes, FiveBadBacklogWindowsDegradeOnlyTheOverloadedCamera)
     ASSERT_TRUE(database);
     std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
     auto behavior = std::make_shared<ControlledDetectorBehavior>();
-    behavior->hold_cam01 = true;
     std::atomic_int64_t elapsed_ms{};
+    behavior->advance_clock = [&](const std::string_view camera_id) {
+        if (camera_id == "CAM01")
+            elapsed_ms.fetch_add(80);
+    };
     std::atomic_uint64_t backlog_warnings{};
     std::atomic_uint64_t degraded_errors{};
     std::atomic_uint64_t backlog_activations{};
+    auto configuration = four_camera_runtime_config();
+    configuration.algorithm.processing_fps = config::AlgorithmProcessingFps::fps60;
     auto runtime = EventRuntime::create(
-        {.configuration = four_camera_runtime_config(),
+        {.configuration = configuration,
          .event_root = event_root,
          .database = shared_database,
          .frame_queue_capacity = 1U,
-         .consecutive_backlog_limit = 8U,
-         .backlog_window = 1s,
+         .consecutive_backlog_limit = 1U,
+         .backlog_window = 100ms,
          .backlog_degrade_window_limit = 5U,
          .detector_registry_configurer = controlled_detector_registration(behavior),
          .error_observer =
@@ -1385,26 +1538,23 @@ TEST(EventRuntimeLanes, FiveBadBacklogWindowsDegradeOnlyTheOverloadedCamera)
     ASSERT_TRUE(runtime);
     ASSERT_TRUE(runtime.value()->start());
     std::uint64_t sequence = 1U;
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(sequence++, 100ms, "CAM01")));
-    ASSERT_TRUE(wait_until([&] {
-        std::scoped_lock lock{behavior->mutex};
-        return behavior->active_calls == 1U;
-    }));
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(sequence++, 200ms, "CAM01")));
-    for (std::uint64_t window = 0U; window < 5U; ++window)
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(sequence++, 0ms, "CAM01")));
+    ASSERT_TRUE(
+        wait_until([&] { return runtime.value()->snapshot().detector_process_calls == 1U; }));
+    for (std::uint64_t window = 1U; window <= 5U; ++window)
     {
-        const std::uint64_t additional_drops = window == 0U ? 8U : 7U;
-        for (std::uint64_t drop = 0U; drop < additional_drops; ++drop)
-            ASSERT_TRUE(runtime.value()->submit_frame(
-                frame(sequence++, std::chrono::milliseconds{sequence * 100U}, "CAM01")));
-        elapsed_ms.store(static_cast<std::int64_t>((window + 1U) * 1000U));
+        elapsed_ms.store(static_cast<std::int64_t>(window * 100U));
         ASSERT_TRUE(runtime.value()->submit_frame(
-            frame(sequence++, std::chrono::milliseconds{sequence * 100U}, "CAM01")));
+            frame(sequence++, std::chrono::milliseconds{window * 100U}, "CAM01")));
+        if (window < 5U)
+            ASSERT_TRUE(wait_until(
+                [&] { return runtime.value()->snapshot().detector_process_calls == window + 1U; }));
     }
     const auto cam01 = runtime.value()->algorithm_snapshot("CAM01");
     ASSERT_TRUE(cam01);
     EXPECT_EQ(cam01.value().state, AlgorithmRuntimeState::manual_trigger_only);
     EXPECT_EQ(cam01.value().metrics.consecutive_bad_backlog_windows, 5U);
+    EXPECT_GE(cam01.value().metrics.missed_processing_slots, 20U);
     EXPECT_EQ(backlog_warnings.load(), 1U);
     EXPECT_EQ(backlog_activations.load(), 1U);
     EXPECT_EQ(degraded_errors.load(), 1U);
@@ -1419,11 +1569,6 @@ TEST(EventRuntimeLanes, FiveBadBacklogWindowsDegradeOnlyTheOverloadedCamera)
     EXPECT_EQ(cam02.value().state, AlgorithmRuntimeState::active);
     EXPECT_EQ(cam02.value().metrics.skipped_frames, 0U);
 
-    {
-        std::scoped_lock lock{behavior->mutex};
-        behavior->release_cam01 = true;
-    }
-    behavior->condition.notify_all();
     runtime.value()->request_stop();
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }
@@ -1741,6 +1886,9 @@ TEST(EventRuntimeLanes, PublishesAggregateAndPerCameraMonitoringMetrics)
     EXPECT_TRUE(names.contains("algorithm.input_fps"));
     EXPECT_TRUE(names.contains("algorithm.processed_fps"));
     EXPECT_TRUE(names.contains("algorithm.skipped_ratio"));
+    EXPECT_TRUE(names.contains("algorithm.sampled_skipped_frames_total"));
+    EXPECT_TRUE(names.contains("algorithm.missed_processing_slots_total"));
+    EXPECT_TRUE(names.contains("algorithm.configured_processing_fps"));
     for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
     {
         const std::string prefix = "algorithm." + std::string{camera_id};
@@ -1754,6 +1902,9 @@ TEST(EventRuntimeLanes, PublishesAggregateAndPerCameraMonitoringMetrics)
         EXPECT_TRUE(names.contains(prefix + ".input_fps"));
         EXPECT_TRUE(names.contains(prefix + ".processed_fps"));
         EXPECT_TRUE(names.contains(prefix + ".skipped_ratio"));
+        EXPECT_TRUE(names.contains(prefix + ".sampled_skipped_frames_total"));
+        EXPECT_TRUE(names.contains(prefix + ".missed_processing_slots_total"));
+        EXPECT_TRUE(names.contains(prefix + ".configured_processing_fps"));
     }
     runtime.value()->request_stop();
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));

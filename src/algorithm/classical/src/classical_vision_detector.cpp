@@ -24,6 +24,7 @@ constexpr std::string_view implementation_version = "1.0.0-prototype";
 struct ClassicalConfig final
 {
     DetectionRegion roi;
+    std::uint32_t downsample_factor{1U};
     std::uint8_t paper_grayscale_threshold{16U};
     double minimum_paper_ratio{0.75};
     double maximum_mean_grayscale_change{0.20};
@@ -123,6 +124,8 @@ Result<ClassicalConfig> parse_config(const DetectorConfig& config)
             applied = assign_u32(parameter, config.camera_id, parsed.roi.width);
         else if (parameter.name == "roi_height")
             applied = assign_u32(parameter, config.camera_id, parsed.roi.height);
+        else if (parameter.name == "downsample_factor")
+            applied = assign_u32(parameter, config.camera_id, parsed.downsample_factor);
         else if (parameter.name == "paper_grayscale_threshold")
         {
             auto value = integer_parameter(parameter, config.camera_id);
@@ -209,6 +212,10 @@ Result<ClassicalConfig> parse_config(const DetectorConfig& config)
     {
         return Result<ClassicalConfig>::failure(config_error(config.camera_id, "roi-too-large"));
     }
+    if (parsed.downsample_factor != 1U && parsed.downsample_factor != 2U &&
+        parsed.downsample_factor != 4U)
+        return Result<ClassicalConfig>::failure(
+            config_error(config.camera_id, "downsample-factor-range"));
     if (!normalized(parsed.minimum_paper_ratio) ||
         !normalized(parsed.maximum_mean_grayscale_change) ||
         parsed.maximum_mean_grayscale_change <= 0.0 ||
@@ -316,8 +323,20 @@ class ClassicalVisionDetector final : public IBreakDetector
                 image(cv::Rect{static_cast<int>(region.offset_x), static_cast<int>(region.offset_y),
                                static_cast<int>(region.width), static_cast<int>(region.height)});
 
+            cv::Mat analysis = roi;
+            if (config_.downsample_factor > 1U)
+            {
+                const auto width =
+                    (std::max)(1, roi.cols / static_cast<int>(config_.downsample_factor));
+                const auto height =
+                    (std::max)(1, roi.rows / static_cast<int>(config_.downsample_factor));
+                cv::resize(roi, downsampled_, cv::Size{width, height}, 0.0, 0.0, cv::INTER_AREA);
+                analysis = downsampled_;
+            }
+
             const bool has_background = !background_.empty();
-            if (has_background && (background_.rows != roi.rows || background_.cols != roi.cols))
+            if (has_background &&
+                (background_.rows != analysis.rows || background_.cols != analysis.cols))
                 return Result<DetectionResult>::failure(
                     process_error(lifecycle_config_.camera_id, "frame-geometry-changed"));
             const auto pixel_threshold = static_cast<std::uint8_t>(std::clamp(
@@ -326,12 +345,14 @@ class ClassicalVisionDetector final : public IBreakDetector
             std::uint64_t paper_pixels{};
             std::uint64_t background_difference_sum{};
             std::uint64_t changed_pixels{};
-            for (int row = 0; row < roi.rows; ++row)
+            const auto analysis_pixels = static_cast<std::uint64_t>(analysis.cols) *
+                                         static_cast<std::uint64_t>(analysis.rows);
+            for (int row = 0; row < analysis.rows; ++row)
             {
-                const auto* source = roi.ptr<std::uint8_t>(row);
+                const auto* source = analysis.ptr<std::uint8_t>(row);
                 const auto* background =
                     has_background ? background_.ptr<std::uint8_t>(row) : nullptr;
-                for (int column = 0; column < roi.cols; ++column)
+                for (int column = 0; column < analysis.cols; ++column)
                 {
                     const auto value = source[column];
                     grayscale_sum += value;
@@ -348,25 +369,26 @@ class ClassicalVisionDetector final : public IBreakDetector
 
             auto result = base_result(frame, region);
             result.mean_grayscale =
-                static_cast<double>(grayscale_sum) / (static_cast<double>(pixels) * 255.0);
+                static_cast<double>(grayscale_sum) / (static_cast<double>(analysis_pixels) * 255.0);
             if (previous_mean_)
                 result.mean_grayscale_change = std::abs(result.mean_grayscale - *previous_mean_);
 
-            result.paper_ratio = static_cast<double>(paper_pixels) / static_cast<double>(pixels);
+            result.paper_ratio =
+                static_cast<double>(paper_pixels) / static_cast<double>(analysis_pixels);
 
             double background_mean_change{};
             double background_changed_ratio{};
             if (config_.enable_background_compare && background_.empty() &&
                 (!config_.enable_paper_ratio || result.paper_ratio >= config_.minimum_paper_ratio))
             {
-                roi.copyTo(background_);
+                analysis.copyTo(background_);
             }
             else if (config_.enable_background_compare && has_background)
             {
                 background_mean_change = static_cast<double>(background_difference_sum) /
-                                         (static_cast<double>(pixels) * 255.0);
+                                         (static_cast<double>(analysis_pixels) * 255.0);
                 background_changed_ratio =
-                    static_cast<double>(changed_pixels) / static_cast<double>(pixels);
+                    static_cast<double>(changed_pixels) / static_cast<double>(analysis_pixels);
             }
 
             result.change_score = std::max(result.mean_grayscale_change, background_mean_change);
@@ -397,7 +419,7 @@ class ClassicalVisionDetector final : public IBreakDetector
 
             if (!result.anomalous && !background_.empty() && config_.background_learning_rate > 0.0)
             {
-                cv::addWeighted(roi, config_.background_learning_rate, background_,
+                cv::addWeighted(analysis, config_.background_learning_rate, background_,
                                 1.0 - config_.background_learning_rate, 0.0, background_);
             }
 
@@ -416,7 +438,7 @@ class ClassicalVisionDetector final : public IBreakDetector
                 {"backgroundPixelChangeThreshold", config_.background_pixel_change_threshold});
             result.debug_metrics.push_back(
                 {"backgroundLearningRate", config_.background_learning_rate});
-            result.debug_metrics.push_back({"roiPixels", static_cast<double>(pixels)});
+            result.debug_metrics.push_back({"roiPixels", static_cast<double>(analysis_pixels)});
 
             previous_mean_ = result.mean_grayscale;
             last_sequence_number_ = frame.sequence_number();
@@ -472,6 +494,7 @@ class ClassicalVisionDetector final : public IBreakDetector
         last_sequence_number_.reset();
         last_frame_time_.reset();
         background_.release();
+        downsampled_.release();
     }
 
     DetectorConfig lifecycle_config_;
@@ -481,6 +504,7 @@ class ClassicalVisionDetector final : public IBreakDetector
     std::optional<std::uint64_t> last_sequence_number_;
     std::optional<camera::MonotonicTime> last_frame_time_;
     cv::Mat background_;
+    cv::Mat downsampled_;
 };
 
 } // namespace

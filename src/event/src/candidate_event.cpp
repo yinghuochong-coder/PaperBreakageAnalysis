@@ -230,6 +230,8 @@ struct CandidateEventManager::Impl final
         CandidateEventState state{CandidateEventState::idle};
         std::size_t consecutive_triggered_frames{};
         std::size_t consecutive_confirmation_frames{};
+        std::optional<camera::MonotonicTime> confirmation_started_at;
+        std::optional<camera::MonotonicTime> last_confirmation_qualified_at;
         bool external_signal_active{};
         std::optional<camera::MonotonicTime> external_signal_time;
         std::optional<camera::WallClockTime> external_signal_wall_time;
@@ -271,6 +273,8 @@ struct CandidateEventManager::Impl final
                 .observation_state = camera.state,
                 .consecutive_triggered_frames = camera.consecutive_triggered_frames,
                 .consecutive_confirmation_frames = camera.consecutive_confirmation_frames,
+                .confirmation_started_at = camera.confirmation_started_at,
+                .last_confirmation_qualified_at = camera.last_confirmation_qualified_at,
                 .external_signal_active = camera.external_signal_active,
                 .cooling_down = camera.cooldown_until.has_value(),
                 .cooldown_until = camera.cooldown_until,
@@ -283,10 +287,51 @@ struct CandidateEventManager::Impl final
                camera.external_signal_active;
     }
 
-    [[nodiscard]] bool confirmation_satisfied(const CameraTracker& camera) const noexcept
+    [[nodiscard]] bool confirmation_fresh(const CameraTracker& camera,
+                                          const camera::MonotonicTime current) const noexcept
     {
-        return camera.consecutive_confirmation_frames >= config.confirmation_consecutive_frames &&
-               external_confirmation_satisfied(camera);
+        if (!camera.last_confirmation_qualified_at ||
+            current < *camera.last_confirmation_qualified_at)
+            return false;
+        return current - *camera.last_confirmation_qualified_at <= config.processing_period * 2;
+    }
+
+    [[nodiscard]] bool confirmation_satisfied(const CameraTracker& camera,
+                                              const camera::MonotonicTime current) const noexcept
+    {
+        return camera.confirmation_started_at && current >= *camera.confirmation_started_at &&
+               current - *camera.confirmation_started_at >= config.confirmation_duration &&
+               confirmation_fresh(camera, current) && external_confirmation_satisfied(camera);
+    }
+
+    static void reset_confirmation_interval(CameraTracker& camera) noexcept
+    {
+        camera.consecutive_confirmation_frames = 0U;
+        camera.confirmation_started_at.reset();
+        camera.last_confirmation_qualified_at.reset();
+    }
+
+    void observe_confirmation(CameraTracker& camera, const algorithm::TriggerResult& result,
+                              const bool eligible) const noexcept
+    {
+        if (!eligible)
+        {
+            reset_confirmation_interval(camera);
+            return;
+        }
+        if (!camera.confirmation_started_at ||
+            (camera.last_confirmation_qualified_at &&
+             result.monotonic_time - *camera.last_confirmation_qualified_at >
+                 config.processing_period * 2))
+        {
+            camera.confirmation_started_at = result.monotonic_time;
+            camera.consecutive_confirmation_frames = 1U;
+        }
+        else if (camera.consecutive_confirmation_frames < (std::numeric_limits<std::size_t>::max)())
+        {
+            ++camera.consecutive_confirmation_frames;
+        }
+        camera.last_confirmation_qualified_at = result.monotonic_time;
     }
 
     void confirm_from_result(CameraTracker& camera, const algorithm::TriggerResult& result,
@@ -529,11 +574,10 @@ Result<std::unique_ptr<CandidateEventManager>> CandidateEventManager::create(
         return Result<std::unique_ptr<CandidateEventManager>>::failure(
             config_error({}, "camera-count-out-of-range"));
     }
-    if (config.candidate_consecutive_frames == 0U ||
-        config.confirmation_consecutive_frames < config.candidate_consecutive_frames)
+    if (config.candidate_consecutive_frames == 0U)
     {
         return Result<std::unique_ptr<CandidateEventManager>>::failure(
-            config_error({}, "invalid-consecutive-frame-threshold"));
+            config_error({}, "invalid-candidate-frame-threshold"));
     }
     if (!std::isfinite(config.candidate_confidence_threshold) ||
         !std::isfinite(config.confirmation_confidence_threshold) ||
@@ -551,7 +595,10 @@ Result<std::unique_ptr<CandidateEventManager>> CandidateEventManager::create(
         return Result<std::unique_ptr<CandidateEventManager>>::failure(
             config_error({}, "invalid-external-confirmation-policy"));
     }
-    if (config.candidate_timeout <= std::chrono::milliseconds::zero() ||
+    if (config.confirmation_duration <= std::chrono::milliseconds::zero() ||
+        config.processing_period <= std::chrono::milliseconds::zero() ||
+        config.confirmation_duration > config.candidate_timeout ||
+        config.candidate_timeout <= std::chrono::milliseconds::zero() ||
         config.pre_event_duration < std::chrono::milliseconds::zero() ||
         config.cooldown_duration < std::chrono::milliseconds::zero())
     {
@@ -561,7 +608,10 @@ Result<std::unique_ptr<CandidateEventManager>> CandidateEventManager::create(
     const auto maximum_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         camera::MonotonicTime::duration::max());
     if (config.candidate_timeout > maximum_duration ||
-        config.pre_event_duration > maximum_duration || config.cooldown_duration > maximum_duration)
+        config.pre_event_duration > maximum_duration ||
+        config.cooldown_duration > maximum_duration ||
+        config.confirmation_duration > maximum_duration ||
+        config.processing_period > maximum_duration)
     {
         return Result<std::unique_ptr<CandidateEventManager>>::failure(
             config_error({}, "event-duration-out-of-range"));
@@ -666,7 +716,7 @@ Result<CandidateProcessOutcome> CandidateEventManager::process(
                 camera->event.reset();
                 camera->state = CandidateEventState::idle;
                 camera->consecutive_triggered_frames = 0U;
-                camera->consecutive_confirmation_frames = 0U;
+                Impl::reset_confirmation_interval(*camera);
                 camera->first_suspicious_trigger.reset();
             }
 
@@ -685,7 +735,7 @@ Result<CandidateProcessOutcome> CandidateEventManager::process(
             {
                 camera->state = CandidateEventState::idle;
                 camera->consecutive_triggered_frames = 0U;
-                camera->consecutive_confirmation_frames = 0U;
+                Impl::reset_confirmation_interval(*camera);
                 camera->first_suspicious_trigger.reset();
             }
             else if (camera->state == CandidateEventState::candidate)
@@ -697,16 +747,8 @@ Result<CandidateProcessOutcome> CandidateEventManager::process(
                     {
                         ++camera->consecutive_triggered_frames;
                     }
-                    if (confirmation_eligible && camera->consecutive_confirmation_frames <
-                                                     (std::numeric_limits<std::size_t>::max)())
-                    {
-                        ++camera->consecutive_confirmation_frames;
-                    }
-                    else if (!confirmation_eligible)
-                    {
-                        camera->consecutive_confirmation_frames = 0U;
-                    }
-                    if (impl_->confirmation_satisfied(*camera))
+                    impl_->observe_confirmation(*camera, result, confirmation_eligible);
+                    if (impl_->confirmation_satisfied(*camera, result.monotonic_time))
                     {
                         impl_->confirm_from_result(*camera, result, notifications);
                     }
@@ -714,14 +756,14 @@ Result<CandidateProcessOutcome> CandidateEventManager::process(
                 else
                 {
                     camera->consecutive_triggered_frames = 0U;
-                    camera->consecutive_confirmation_frames = 0U;
+                    Impl::reset_confirmation_interval(*camera);
                 }
             }
             else if (!candidate_eligible)
             {
                 camera->state = CandidateEventState::idle;
                 camera->consecutive_triggered_frames = 0U;
-                camera->consecutive_confirmation_frames = 0U;
+                Impl::reset_confirmation_interval(*camera);
                 camera->first_suspicious_trigger.reset();
             }
             else
@@ -730,18 +772,14 @@ Result<CandidateProcessOutcome> CandidateEventManager::process(
                 {
                     camera->state = CandidateEventState::suspicious;
                     camera->consecutive_triggered_frames = 1U;
-                    camera->consecutive_confirmation_frames = confirmation_eligible ? 1U : 0U;
+                    impl_->observe_confirmation(*camera, result, confirmation_eligible);
                     camera->first_suspicious_trigger = result;
                 }
                 else if (camera->consecutive_triggered_frames <
                          (std::numeric_limits<std::size_t>::max)())
                 {
                     ++camera->consecutive_triggered_frames;
-                    if (confirmation_eligible && camera->consecutive_confirmation_frames <
-                                                     (std::numeric_limits<std::size_t>::max)())
-                        ++camera->consecutive_confirmation_frames;
-                    else if (!confirmation_eligible)
-                        camera->consecutive_confirmation_frames = 0U;
+                    impl_->observe_confirmation(*camera, result, confirmation_eligible);
                 }
 
                 if (camera->consecutive_triggered_frames >=
@@ -754,7 +792,7 @@ Result<CandidateProcessOutcome> CandidateEventManager::process(
                         response.emplace(
                             Result<CandidateProcessOutcome>::failure(std::move(created.error())));
                     }
-                    else if (impl_->confirmation_satisfied(*camera))
+                    else if (impl_->confirmation_satisfied(*camera, result.monotonic_time))
                     {
                         impl_->confirm_from_result(*camera, result, notifications);
                     }
@@ -823,7 +861,7 @@ Result<CandidateCameraSnapshot> CandidateEventManager::update_external_signal(
             camera->external_signal_time = monotonic_time;
             camera->external_signal_wall_time = wall_clock_time;
             if (camera->state == CandidateEventState::candidate && camera->event &&
-                impl_->confirmation_satisfied(*camera))
+                impl_->confirmation_satisfied(*camera, monotonic_time))
             {
                 impl_->transition_decision(*camera, CandidateEventState::confirmed, monotonic_time,
                                            wall_clock_time, notifications);
@@ -908,7 +946,7 @@ std::vector<CandidateEventSnapshot> CandidateEventManager::stop(
                 {
                     camera.state = CandidateEventState::idle;
                     camera.consecutive_triggered_frames = 0U;
-                    camera.consecutive_confirmation_frames = 0U;
+                    Impl::reset_confirmation_interval(camera);
                     camera.first_suspicious_trigger.reset();
                 }
             }

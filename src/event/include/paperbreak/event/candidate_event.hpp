@@ -62,6 +62,8 @@ struct CandidateCameraSnapshot final
     CandidateEventState observation_state{CandidateEventState::idle};
     std::size_t consecutive_triggered_frames{};
     std::size_t consecutive_confirmation_frames{};
+    std::optional<camera::MonotonicTime> confirmation_started_at;
+    std::optional<camera::MonotonicTime> last_confirmation_qualified_at;
     bool external_signal_active{};
     bool cooling_down{};
     std::optional<camera::MonotonicTime> cooldown_until;
@@ -100,9 +102,10 @@ struct CandidateEventManagerConfig final
 {
     std::vector<CandidateCameraBinding> cameras;
     std::size_t candidate_consecutive_frames{2U};
-    std::size_t confirmation_consecutive_frames{3U};
     double candidate_confidence_threshold{};
     double confirmation_confidence_threshold{};
+    std::chrono::milliseconds confirmation_duration{120};
+    std::chrono::nanoseconds processing_period{66'666'667};
     ExternalConfirmationPolicy external_confirmation{ExternalConfirmationPolicy::not_used};
     std::chrono::milliseconds candidate_timeout{5000};
     std::chrono::milliseconds pre_event_duration{1000};

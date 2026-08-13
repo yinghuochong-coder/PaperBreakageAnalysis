@@ -1123,8 +1123,16 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                 threshold->setDecimals(4);
                 threshold->setSingleStep(0.01);
             }
-            algorithm_consecutive_frames_ = make_child<QSpinBox>(algorithm_editor_);
-            algorithm_consecutive_frames_->setRange(1, 1000);
+            algorithm_downsample_mode_ = make_child<QComboBox>(algorithm_editor_);
+            algorithm_downsample_mode_->addItem(QStringLiteral("不降采样"),
+                                                QStringLiteral("disabled"));
+            algorithm_downsample_mode_->addItem(QStringLiteral("1/2"), QStringLiteral("half"));
+            algorithm_downsample_mode_->addItem(QStringLiteral("1/4"), QStringLiteral("quarter"));
+            algorithm_processing_fps_ = make_child<QComboBox>(algorithm_editor_);
+            for (const auto fps : {15, 30, 60})
+                algorithm_processing_fps_->addItem(QString::number(fps), fps);
+            algorithm_confirmation_duration_ms_ = make_child<QSpinBox>(algorithm_editor_);
+            algorithm_confirmation_duration_ms_->setRange(10, 60000);
             algorithm_cooldown_ms_ = make_child<QSpinBox>(algorithm_editor_);
             algorithm_cooldown_ms_->setRange(0, 3600000);
             algorithm_model_reference_ = make_child<QLineEdit>(algorithm_editor_);
@@ -1147,7 +1155,9 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             form->addRow(QStringLiteral("ROI Y"), algorithm_roi_y_);
             form->addRow(QStringLiteral("候选阈值"), algorithm_candidate_threshold_);
             form->addRow(QStringLiteral("确认阈值"), algorithm_confirmation_threshold_);
-            form->addRow(QStringLiteral("连续帧"), algorithm_consecutive_frames_);
+            form->addRow(QStringLiteral("算法降采样"), algorithm_downsample_mode_);
+            form->addRow(QStringLiteral("算法处理 FPS"), algorithm_processing_fps_);
+            form->addRow(QStringLiteral("确认持续时间 (ms)"), algorithm_confirmation_duration_ms_);
             form->addRow(QStringLiteral("冷却时间 (ms)"), algorithm_cooldown_ms_);
             form->addRow(QStringLiteral("模型引用"), algorithm_model_reference_);
             form->addRow(QStringLiteral("配置模型版本"), algorithm_model_version_);
@@ -1251,10 +1261,14 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                              .offset_y = full_frame ? 0U
                                                     : static_cast<std::uint32_t>(
                                                           algorithm_roi_y_->value())},
+                     .downsample_mode =
+                         algorithm_downsample_mode_->currentData().toString().toStdString(),
+                     .processing_fps = static_cast<std::uint32_t>(
+                         algorithm_processing_fps_->currentData().toInt()),
                      .candidate_threshold = algorithm_candidate_threshold_->value(),
                      .confirmation_threshold = algorithm_confirmation_threshold_->value(),
-                     .consecutive_frames =
-                         static_cast<std::uint32_t>(algorithm_consecutive_frames_->value()),
+                     .confirmation_duration_ms =
+                         static_cast<std::uint32_t>(algorithm_confirmation_duration_ms_->value()),
                      .cooldown_ms = static_cast<std::uint32_t>(algorithm_cooldown_ms_->value()),
                      .model_reference = algorithm_model_reference_->text().toStdString(),
                      .model_version = algorithm_model_version_->text().toStdString(),
@@ -3031,7 +3045,12 @@ void MainWindow::apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapsho
         algorithm_roi_y_->setValue(static_cast<int>(value.roi.offset_y));
         algorithm_candidate_threshold_->setValue(value.candidate_threshold);
         algorithm_confirmation_threshold_->setValue(value.confirmation_threshold);
-        algorithm_consecutive_frames_->setValue(static_cast<int>(value.consecutive_frames));
+        algorithm_downsample_mode_->setCurrentIndex(
+            algorithm_downsample_mode_->findData(QString::fromStdString(value.downsample_mode)));
+        algorithm_processing_fps_->setCurrentIndex(
+            algorithm_processing_fps_->findData(static_cast<int>(value.processing_fps)));
+        algorithm_confirmation_duration_ms_->setValue(
+            static_cast<int>(value.confirmation_duration_ms));
         algorithm_cooldown_ms_->setValue(static_cast<int>(value.cooldown_ms));
         algorithm_model_reference_->setText(QString::fromStdString(value.model_reference));
         algorithm_model_version_->setText(QString::fromStdString(value.model_version));
@@ -3094,6 +3113,12 @@ void MainWindow::apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapsho
                    QStringLiteral("帧")},
         std::tuple{QStringLiteral("跳帧"), QString::number(metrics.skipped_frames),
                    QStringLiteral("帧")},
+        std::tuple{QStringLiteral("正常抽样跳过"), QString::number(metrics.sampled_skipped_frames),
+                   QStringLiteral("帧")},
+        std::tuple{QStringLiteral("错过处理周期"), QString::number(metrics.missed_processing_slots),
+                   QStringLiteral("周期")},
+        std::tuple{QStringLiteral("配置处理速率"),
+                   QString::number(metrics.configured_processing_fps), QStringLiteral("FPS")},
         std::tuple{QStringLiteral("检测失败"), QString::number(metrics.detector_failures),
                    QStringLiteral("次")},
         std::tuple{QStringLiteral("连续失败"),
@@ -3702,10 +3727,12 @@ bool MainWindow::algorithm_page_ready() const noexcept
            algorithm_type_ && algorithm_full_frame_ && algorithm_roi_width_ &&
            algorithm_roi_height_ && algorithm_roi_x_ && algorithm_roi_y_ &&
            algorithm_candidate_threshold_ && algorithm_confirmation_threshold_ &&
-           algorithm_consecutive_frames_ && algorithm_cooldown_ms_ && algorithm_model_reference_ &&
-           algorithm_model_version_ && algorithm_device_ && algorithm_debug_overlay_ &&
-           algorithm_save_ && algorithm_test_ && algorithm_runtime_status_ && algorithm_metrics_ &&
-           algorithm_test_result_ && algorithm_test_preview_ && algorithm_debug_metrics_ &&
+           algorithm_downsample_mode_ && algorithm_processing_fps_ &&
+           algorithm_confirmation_duration_ms_ && algorithm_cooldown_ms_ &&
+           algorithm_model_reference_ && algorithm_model_version_ && algorithm_device_ &&
+           algorithm_debug_overlay_ && algorithm_save_ && algorithm_test_ &&
+           algorithm_runtime_status_ && algorithm_metrics_ && algorithm_test_result_ &&
+           algorithm_test_preview_ && algorithm_debug_metrics_ &&
            findChild<QLabel*>(QStringLiteral("algorithm-prototype-notice"));
 }
 

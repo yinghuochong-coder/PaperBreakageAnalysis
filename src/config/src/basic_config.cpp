@@ -378,6 +378,20 @@ std::string_view log_level_name(const LogLevel value)
     return "info";
 }
 
+std::string_view downsample_mode_name(const AlgorithmDownsampleMode value) noexcept
+{
+    switch (value)
+    {
+    case AlgorithmDownsampleMode::disabled:
+        return "disabled";
+    case AlgorithmDownsampleMode::half:
+        return "half";
+    case AlgorithmDownsampleMode::quarter:
+        return "quarter";
+    }
+    return "disabled";
+}
+
 Json roi_json(const RoiConfig& roi)
 {
     return {{"width", roi.width},
@@ -392,7 +406,7 @@ Result<EdgeConfig> parse_metadata(const Json& root)
                                                 (std::numeric_limits<std::uint32_t>::max)());
     if (!schema)
         return Result<EdgeConfig>::failure(schema.error());
-    constexpr std::array migratable_schema_versions{2U, 3U};
+    constexpr std::array migratable_schema_versions{2U, 3U, 4U};
     if (schema.value() != config_schema_version &&
         std::find(migratable_schema_versions.begin(), migratable_schema_versions.end(),
                   schema.value()) == migratable_schema_versions.end())
@@ -401,7 +415,7 @@ Result<EdgeConfig> parse_metadata(const Json& root)
             make_error("SYS_CONFIG_SCHEMA_UNSUPPORTED", Severity::error, "不支持该配置 schema 版本",
                        "config", "config.validateSchemaVersion");
         error.details.push_back({"received", std::to_string(schema.value())});
-        error.details.push_back({"supported", "2,3,4"});
+        error.details.push_back({"supported", "2,3,4,5"});
         return Result<EdgeConfig>::failure(std::move(error));
     }
     auto revision = unsigned_field<std::uint64_t>(root, "configRevision", "", 1U,
@@ -761,12 +775,26 @@ Result<EdgeConfig> parse_preview(const Json& root, EdgeConfig result)
 Result<EdgeConfig> parse_algorithm(const Json& root, EdgeConfig result)
 {
     const Json& algorithm = root.at("algorithm");
-    if (auto fields = exact_fields(algorithm, "/algorithm",
-                                   {"enabled", "type", "roi", "candidateThreshold",
-                                    "confirmationThreshold", "consecutiveFrames", "cooldownMs",
-                                    "modelReference", "modelVersion", "device", "debugOverlay"});
-        !fields)
+    const auto source_schema = root.at("configSchemaVersion").get<std::uint32_t>();
+    if (source_schema >= 5U)
+    {
+        if (auto fields = exact_fields(algorithm, "/algorithm",
+                                       {"enabled", "type", "roi", "downsampleMode", "processingFps",
+                                        "candidateThreshold", "confirmationThreshold",
+                                        "confirmationDurationMs", "cooldownMs", "modelReference",
+                                        "modelVersion", "device", "debugOverlay"});
+            !fields)
+            return Result<EdgeConfig>::failure(fields.error());
+    }
+    else if (auto fields =
+                 exact_fields(algorithm, "/algorithm",
+                              {"enabled", "type", "roi", "candidateThreshold",
+                               "confirmationThreshold", "consecutiveFrames", "cooldownMs",
+                               "modelReference", "modelVersion", "device", "debugOverlay"});
+             !fields)
+    {
         return Result<EdgeConfig>::failure(fields.error());
+    }
     auto algorithm_enabled = bool_field(algorithm, "enabled", "/algorithm");
     auto algorithm_type = string_field(algorithm, "type", "/algorithm", 64U);
     auto algorithm_roi = parse_algorithm_roi(algorithm.at("roi"), "/algorithm/roi");
@@ -774,8 +802,58 @@ Result<EdgeConfig> parse_algorithm(const Json& root, EdgeConfig result)
         finite_field(algorithm, "candidateThreshold", "/algorithm", 0.0, 1.0);
     auto confirmation_threshold =
         finite_field(algorithm, "confirmationThreshold", "/algorithm", 0.0, 1.0);
-    auto consecutive =
-        unsigned_field<std::uint32_t>(algorithm, "consecutiveFrames", "/algorithm", 1U, 1000U);
+    AlgorithmDownsampleMode downsample_mode = AlgorithmDownsampleMode::disabled;
+    AlgorithmProcessingFps processing_fps = AlgorithmProcessingFps::fps60;
+    std::uint32_t confirmation_duration_ms{};
+    if (source_schema >= 5U)
+    {
+        auto mode_text = string_field(algorithm, "downsampleMode", "/algorithm", 16U);
+        if (!mode_text)
+            return Result<EdgeConfig>::failure(mode_text.error());
+        auto mode =
+            enum_value<AlgorithmDownsampleMode>(mode_text.value(), "/algorithm/downsampleMode",
+                                                {{"disabled", AlgorithmDownsampleMode::disabled},
+                                                 {"half", AlgorithmDownsampleMode::half},
+                                                 {"quarter", AlgorithmDownsampleMode::quarter}});
+        if (!mode)
+            return Result<EdgeConfig>::failure(mode.error());
+        downsample_mode = mode.value();
+
+        auto fps =
+            unsigned_field<std::uint32_t>(algorithm, "processingFps", "/algorithm", 15U, 60U);
+        if (!fps)
+            return Result<EdgeConfig>::failure(fps.error());
+        switch (fps.value())
+        {
+        case 15U:
+            processing_fps = AlgorithmProcessingFps::fps15;
+            break;
+        case 30U:
+            processing_fps = AlgorithmProcessingFps::fps30;
+            break;
+        case 60U:
+            processing_fps = AlgorithmProcessingFps::fps60;
+            break;
+        default:
+            return Result<EdgeConfig>::failure(
+                invalid_config("processingFps 必须为 15、30 或 60", "config.validateEnum",
+                               "/algorithm/processingFps", "unsupported-enum"));
+        }
+        auto duration = unsigned_field<std::uint32_t>(algorithm, "confirmationDurationMs",
+                                                      "/algorithm", 10U, 60000U);
+        if (!duration)
+            return Result<EdgeConfig>::failure(duration.error());
+        confirmation_duration_ms = duration.value();
+    }
+    else
+    {
+        auto consecutive =
+            unsigned_field<std::uint32_t>(algorithm, "consecutiveFrames", "/algorithm", 1U, 1000U);
+        if (!consecutive)
+            return Result<EdgeConfig>::failure(consecutive.error());
+        const auto raw_ms = (static_cast<std::uint64_t>(consecutive.value()) * 1000U + 59U) / 60U;
+        confirmation_duration_ms = static_cast<std::uint32_t>(((raw_ms + 9U) / 10U) * 10U);
+    }
     auto cooldown =
         unsigned_field<std::uint32_t>(algorithm, "cooldownMs", "/algorithm", 0U, 3600000U);
     auto model_reference = string_field(algorithm, "modelReference", "/algorithm", 512U, true);
@@ -792,8 +870,6 @@ Result<EdgeConfig> parse_algorithm(const Json& root, EdgeConfig result)
         return Result<EdgeConfig>::failure(candidate_threshold.error());
     if (!confirmation_threshold)
         return Result<EdgeConfig>::failure(confirmation_threshold.error());
-    if (!consecutive)
-        return Result<EdgeConfig>::failure(consecutive.error());
     if (!cooldown)
         return Result<EdgeConfig>::failure(cooldown.error());
     if (!model_reference)
@@ -811,9 +887,11 @@ Result<EdgeConfig> parse_algorithm(const Json& root, EdgeConfig result)
     result.algorithm = {.enabled = algorithm_enabled.value(),
                         .type = std::move(algorithm_type).value(),
                         .roi = algorithm_roi.value(),
+                        .downsample_mode = downsample_mode,
+                        .processing_fps = processing_fps,
                         .candidate_threshold = candidate_threshold.value(),
                         .confirmation_threshold = confirmation_threshold.value(),
-                        .consecutive_frames = consecutive.value(),
+                        .confirmation_duration_ms = confirmation_duration_ms,
                         .cooldown_ms = cooldown.value(),
                         .model_reference = std::move(model_reference).value(),
                         .model_version = std::move(model_version).value(),
@@ -883,6 +961,11 @@ Result<EdgeConfig> parse_event(const Json& root, EdgeConfig result)
         return Result<EdgeConfig>::failure(invalid_config("事件前后窗口或合并间隔超过最大事件时长",
                                                           "config.validateDependency", "/event",
                                                           "event-window"));
+    if (static_cast<std::uint64_t>(result.algorithm.confirmation_duration_ms) >
+        static_cast<std::uint64_t>(maximum.value()) * 1000U)
+        return Result<EdgeConfig>::failure(invalid_config(
+            "算法确认持续时间不能超过候选超时", "config.validateDependency",
+            "/algorithm/confirmationDurationMs", "confirmation-exceeds-candidate-timeout"));
     if (upload_policy.value() != "never" && upload_policy.value() != "confirmed" &&
         upload_policy.value() != "all")
         return Result<EdgeConfig>::failure(
@@ -1259,7 +1342,7 @@ std::string serialize_config(const EdgeConfig& config)
                {"strobePreDelayUs", camera.line_io.strobe_pre_delay_us},
                {"strobePostDelayUs", camera.line_io.strobe_post_delay_us}}}});
     }
-    Json root = {{"configSchemaVersion", config.config_schema_version},
+    Json root = {{"configSchemaVersion", config_schema_version},
                  {"configRevision", config.config_revision},
                  {"modifiedAt", config.modified_at},
                  {"system",
@@ -1285,9 +1368,11 @@ std::string serialize_config(const EdgeConfig& config)
                   {{"enabled", config.algorithm.enabled},
                    {"type", config.algorithm.type},
                    {"roi", roi_json(config.algorithm.roi)},
+                   {"downsampleMode", downsample_mode_name(config.algorithm.downsample_mode)},
+                   {"processingFps", static_cast<std::uint32_t>(config.algorithm.processing_fps)},
                    {"candidateThreshold", config.algorithm.candidate_threshold},
                    {"confirmationThreshold", config.algorithm.confirmation_threshold},
-                   {"consecutiveFrames", config.algorithm.consecutive_frames},
+                   {"confirmationDurationMs", config.algorithm.confirmation_duration_ms},
                    {"cooldownMs", config.algorithm.cooldown_ms},
                    {"modelReference", config.algorithm.model_reference},
                    {"modelVersion", config.algorithm.model_version},

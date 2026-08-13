@@ -258,7 +258,7 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json status_json = Json::parse(status.value().payload_json);
     EXPECT_EQ(status_json.at("serviceState"), "running");
     EXPECT_TRUE(status_json.at("acceptingWrites").get<bool>());
-    EXPECT_EQ(status_json.at("configSchemaVersion"), 4);
+    EXPECT_EQ(status_json.at("configSchemaVersion"), 5);
     EXPECT_EQ(status_json.at("storedConfigRevision"), 1);
     EXPECT_FALSE(status_json.at("machineId").get<std::string>().empty());
     EXPECT_EQ(status_json.at("loggingLevel"), "info");
@@ -436,13 +436,19 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
     EXPECT_TRUE(observed_json["runtime"]["detector"].is_null());
     EXPECT_EQ(observed_json["runtime"]["metrics"]["consecutiveBacklogEvents"], 0U);
     EXPECT_EQ(observed_json["runtime"]["metrics"]["resultQueueRejected"], 0U);
+    EXPECT_EQ(observed_json["runtime"]["metrics"]["queueCapacity"], 2U);
+    EXPECT_EQ(observed_json["runtime"]["metrics"]["sampledSkippedFrames"], 0U);
+    EXPECT_EQ(observed_json["runtime"]["metrics"]["missedProcessingSlots"], 0U);
+    EXPECT_EQ(observed_json["runtime"]["metrics"]["configuredProcessingFps"], 60U);
 
     const Json algorithm{{"enabled", true},
                          {"type", "classical-vision"},
                          {"roi", {{"width", 4}, {"height", 4}, {"offsetX", 0}, {"offsetY", 0}}},
+                         {"downsampleMode", "half"},
+                         {"processingFps", 30},
                          {"candidateThreshold", 0.55},
                          {"confirmationThreshold", 0.85},
-                         {"consecutiveFrames", 2},
+                         {"confirmationDurationMs", 120},
                          {"cooldownMs", 250},
                          {"modelReference", ""},
                          {"modelVersion", "prototype-config"},
