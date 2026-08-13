@@ -420,6 +420,10 @@ class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
         }
         if (request.command == "algorithm.getConfig" || request.command == "algorithm.updateConfig")
         {
+            if (request.command == "algorithm.getConfig" && reject_next_get.exchange(false))
+                return paperbreak::Result<paperbreak::ipc::CommandResponse>::failure(
+                    paperbreak::make_error("ALGORITHM_NOT_READY", paperbreak::Severity::warning,
+                                           "temporary", "test", "algorithmClient.get", true));
             const nlohmann::json configuration{
                 {"enabled", true},
                 {"type", "classical-vision"},
@@ -526,6 +530,7 @@ class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
 
     std::mutex mutex;
     std::string last_update_payload;
+    std::atomic_bool reject_next_get{};
 };
 
 class StorageClientHandler final : public paperbreak::ipc::IRequestHandler
@@ -1417,6 +1422,15 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
     EXPECT_DOUBLE_EQ(latest.runtime.metrics.processed_fps, 59.0);
     EXPECT_DOUBLE_EQ(latest.runtime.metrics.skipped_ratio, 0.025);
     EXPECT_EQ(latest.runtime.metrics.result_queue_rejected, 4U);
+    EXPECT_EQ(latest.local_sample_sequence, 1U);
+    EXPECT_NE(latest.local_sample_time.time_since_epoch().count(), 0);
+
+    handler->reject_next_get = true;
+    client.refresh();
+    ASSERT_TRUE(wait_until([&] { return latest.stale && latest.error.has_value(); }));
+    EXPECT_EQ(latest.local_sample_sequence, 1U);
+    client.refresh();
+    ASSERT_TRUE(wait_until([&] { return !latest.stale && latest.local_sample_sequence == 2U; }));
 
     auto changed = latest.configuration;
     changed.enabled = false;
@@ -1448,9 +1462,12 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
         EXPECT_EQ(payload["algorithm"]["modelReference"], "models/prototype.bin");
         EXPECT_EQ(payload["algorithm"]["device"], "directml");
     }
+    ASSERT_TRUE(wait_until([&] { return !latest.stale && latest.local_sample_sequence == 3U; }));
 
+    const auto sample_before_test = latest.local_sample_sequence;
     ASSERT_TRUE(client.test_current_frame());
     ASSERT_TRUE(wait_until([&] { return latest.test_result.has_value(); }));
+    EXPECT_EQ(latest.local_sample_sequence, sample_before_test);
     EXPECT_TRUE(latest.test_result->isolated);
     EXPECT_FALSE(latest.test_result->candidate_created);
     EXPECT_TRUE(latest.test_result->triggered);
@@ -1463,6 +1480,7 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
 
     ASSERT_TRUE(client.select_camera("CAM02"));
     ASSERT_TRUE(wait_until([&] { return !latest.stale && latest.runtime.camera_id == "CAM02"; }));
+    EXPECT_GT(latest.local_sample_sequence, sample_before_test);
     EXPECT_EQ(latest.runtime.metrics.consecutive_backlog_events, 3U);
     EXPECT_EQ(latest.runtime.metrics.result_queue_rejected, 4U);
     auto invalid = client.select_camera("CAM99");

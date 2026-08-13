@@ -19,6 +19,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QGroupBox>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
@@ -27,6 +28,7 @@
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -354,6 +356,14 @@ int main(int argc, char* argv[])
                  return paperbreak::Result<void>::failure(paperbreak::make_error(
                      "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "算法客户端尚未初始化",
                      "console", "console.algorithm.testCurrentFrame", true));
+             },
+         .export_current_values =
+             [&algorithm_client](std::filesystem::path destination) {
+                 if (algorithm_client)
+                     return algorithm_client->export_current_values_csv(destination);
+                 return paperbreak::Result<void>::failure(paperbreak::make_error(
+                     "IPC_NOT_CONNECTED", paperbreak::Severity::warning, "算法客户端尚未初始化",
+                     "console", "console.algorithm.exportCurrentValues", true));
              }},
         {.refresh =
              [&event_client] {
@@ -855,6 +865,10 @@ int main(int argc, char* argv[])
         algorithm_smoke.runtime.detector_model_version = "none";
         algorithm_smoke.runtime.prototype_only = true;
         algorithm_smoke.runtime.has_current_frame = true;
+        algorithm_smoke.local_sample_sequence = 1U;
+        algorithm_smoke.local_sample_time = std::chrono::system_clock::now();
+        algorithm_smoke.runtime.metrics.processed_fps = 14.5;
+        algorithm_smoke.runtime.metrics.consecutive_healthy_backlog_windows = 3U;
         main_window.apply_algorithm_snapshot(algorithm_smoke);
         auto* const camera_parameter_grid =
             main_window.findChild<QWidget*>(QStringLiteral("camera-editor"));
@@ -905,6 +919,79 @@ int main(int argc, char* argv[])
                       << "/" << narrow_control_columns << " horizontalScrollVisible="
                       << (camera_scroll && camera_scroll->horizontalScrollBar()->isVisible())
                       << '\n';
+        }
+        main_window.resize(1280, 800);
+        application.processEvents();
+        const bool algorithm_page_selected = main_window.select_page(3U);
+        main_window.resize(1680, 900);
+        application.processEvents();
+        auto* const algorithm_basic_grid =
+            main_window.findChild<QWidget*>(QStringLiteral("algorithm-config-basic-grid"));
+        auto* const algorithm_roi_grid =
+            main_window.findChild<QWidget*>(QStringLiteral("algorithm-config-roi-grid"));
+        auto* const algorithm_decision_grid =
+            main_window.findChild<QWidget*>(QStringLiteral("algorithm-config-decision-grid"));
+        const int algorithm_wide_columns =
+            algorithm_basic_grid ? algorithm_basic_grid->property("layoutColumns").toInt() : 0;
+        main_window.resize(1040, 680);
+        application.processEvents();
+        const int algorithm_narrow_columns =
+            algorithm_basic_grid ? algorithm_basic_grid->property("layoutColumns").toInt() : 0;
+        auto* const algorithm_page =
+            main_window.findChild<QWidget*>(QStringLiteral("page-algorithm-configuration"));
+        auto metric_cards =
+            algorithm_page ? algorithm_page->findChildren<QPushButton*>() : QList<QPushButton*>{};
+        metric_cards.erase(std::remove_if(metric_cards.begin(), metric_cards.end(),
+                                          [](auto* card) {
+                                              return !card->objectName().startsWith(
+                                                  QStringLiteral("algorithm-metric-card-"));
+                                          }),
+                           metric_cards.end());
+        const bool metric_tooltips_present = std::ranges::all_of(
+            metric_cards, [](auto* card) { return !card->toolTip().trimmed().isEmpty(); });
+        auto* const algorithm_chart =
+            main_window.findChild<QWidget*>(QStringLiteral("algorithm-metric-chart"));
+        auto* const algorithm_export =
+            main_window.findChild<QPushButton*>(QStringLiteral("algorithm-export-current-csv"));
+        const auto runtime_groups =
+            algorithm_page ? algorithm_page->findChildren<QGroupBox*>(QRegularExpression{
+                                 QStringLiteral("algorithm-runtime-group-[0-3]")})
+                           : QList<QGroupBox*>{};
+        QString algorithm_text;
+        if (algorithm_page)
+        {
+            for (auto* label : algorithm_page->findChildren<QLabel*>())
+                algorithm_text += label->text();
+            for (auto* button : algorithm_page->findChildren<QPushButton*>())
+                algorithm_text += button->text();
+            for (auto* group : algorithm_page->findChildren<QGroupBox*>())
+                algorithm_text += group->title();
+            for (auto* combo : algorithm_page->findChildren<QComboBox*>())
+            {
+                for (int item = 0; item < combo->count(); ++item)
+                    algorithm_text += combo->itemText(item);
+            }
+        }
+        const bool algorithm_forbidden_text_removed =
+            !algorithm_text.contains(QStringLiteral("逻辑相机")) &&
+            !algorithm_text.contains(QStringLiteral("M6-00")) &&
+            !algorithm_text.contains(QStringLiteral("验收基线")) &&
+            !algorithm_text.contains(QStringLiteral("原型")) &&
+            !algorithm_text.contains(QStringLiteral("仅原型")) &&
+            !algorithm_text.contains(QStringLiteral("prototype"), Qt::CaseInsensitive);
+        const bool algorithm_layout_and_cards_ready =
+            algorithm_page_selected && algorithm_basic_grid && algorithm_roi_grid &&
+            algorithm_decision_grid && algorithm_wide_columns == 4 &&
+            algorithm_narrow_columns <= 2 && metric_cards.size() == 32 &&
+            runtime_groups.size() == 4 && metric_tooltips_present && algorithm_chart &&
+            algorithm_export && algorithm_forbidden_text_removed;
+        if (!algorithm_layout_and_cards_ready)
+        {
+            std::cerr << "algorithm UI smoke failed: selected=" << algorithm_page_selected
+                      << " columns=" << algorithm_wide_columns << "/" << algorithm_narrow_columns
+                      << " cards=" << metric_cards.size() << " groups=" << runtime_groups.size()
+                      << " tooltips=" << metric_tooltips_present
+                      << " forbiddenTextRemoved=" << algorithm_forbidden_text_removed << '\n';
         }
         main_window.resize(1280, 800);
         application.processEvents();
@@ -963,9 +1050,10 @@ int main(int argc, char* argv[])
                    !tray.preview_action_enabled() && !tray.diagnostics_action_enabled() &&
                    main_window.page_count() == 12U && main_window.current_page_index() == 0 &&
                    main_window.camera_configuration_ready() && camera_layout_responsive &&
-                   camera_action_bar_merged && preview_panes_stable_and_cycle &&
-                   camera_banner_removed && fixed_acquisition_controls_removed &&
-                   camera_discover_above_list && line_io_panels_split && first_camera_status_only &&
+                   algorithm_layout_and_cards_ready && camera_action_bar_merged &&
+                   preview_panes_stable_and_cycle && camera_banner_removed &&
+                   fixed_acquisition_controls_removed && camera_discover_above_list &&
+                   line_io_panels_split && first_camera_status_only &&
                    selected_camera_status_only && first_camera_mirroring_loaded &&
                    selected_camera_mirroring_loaded && roi_capabilities_loaded &&
                    roi_offset_aligned && empty_configuration_kept_discovery &&

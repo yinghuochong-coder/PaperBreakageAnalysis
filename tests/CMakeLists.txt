@@ -1,5 +1,6 @@
 add_executable(PaperBreakTests
     test_main.cpp
+    unit/algorithm_metrics_tests.cpp
     unit/algorithm_classical_vision_tests.cpp
     unit/algorithm_detector_lifecycle_tests.cpp
     unit/algorithm_mock_trigger_tests.cpp
@@ -78,6 +79,7 @@ set_target_properties(PaperBreakTests PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_executable(PaperBreakConsoleUiTests
     test_main_widgets.cpp
+    unit/algorithm_metric_chart_tests.cpp
     unit/event_detail_view_tests.cpp)
 target_link_libraries(PaperBreakConsoleUiTests
     PRIVATE

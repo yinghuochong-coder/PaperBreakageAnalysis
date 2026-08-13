@@ -1,5 +1,7 @@
 #include "paperbreak/console/algorithm_client.hpp"
 
+#include "paperbreak/console/algorithm_metrics.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <stdexcept>
@@ -324,6 +326,12 @@ const AlgorithmClientSnapshot& AlgorithmClient::snapshot() const noexcept
     return snapshot_;
 }
 
+Result<void> AlgorithmClient::export_current_values_csv(
+    const std::filesystem::path& destination) const
+{
+    return export_algorithm_current_values_csv(snapshot_, destination);
+}
+
 void AlgorithmClient::config_completed(const ipc::ClientRequestHandle handle,
                                        Result<ipc::ResponseMessage> result)
 {
@@ -355,6 +363,8 @@ void AlgorithmClient::config_completed(const ipc::ClientRequestHandle handle,
             snapshot_.effective_config_revision =
                 payload.value().value("effectiveConfigRevision", std::uint64_t{});
             snapshot_.runtime = runtime_value(payload.value().at("runtime"));
+            ++snapshot_.local_sample_sequence;
+            snapshot_.local_sample_time = std::chrono::system_clock::now();
             snapshot_.stale = false;
             snapshot_.error.reset();
         }

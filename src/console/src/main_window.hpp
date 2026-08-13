@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/console/algorithm_client.hpp"
+#include "paperbreak/console/algorithm_metrics.hpp"
 #include "paperbreak/console/camera_client.hpp"
 #include "paperbreak/console/client_state_store.hpp"
 #include "paperbreak/console/event_client.hpp"
@@ -14,6 +15,8 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <map>
+#include <string>
 
 class QLabel;
 class QListWidget;
@@ -34,6 +37,7 @@ namespace paperbreak::console
 {
 
 class EventDetailView;
+class AlgorithmMetricChart;
 
 struct CameraUiActions final
 {
@@ -77,6 +81,7 @@ struct AlgorithmUiActions final
     std::function<Result<void>(std::string)> select_camera;
     std::function<Result<void>(AlgorithmConfigurationValue)> update_configuration;
     std::function<Result<void>()> test_current_frame;
+    std::function<Result<void>(std::filesystem::path)> export_current_values;
 };
 
 struct StorageUiActions final
@@ -151,6 +156,8 @@ class MainWindow final : public QMainWindow
     void show_camera_result(const Result<void>& result);
     void show_operations_result(const Result<void>& result);
     void show_algorithm_result(const Result<void>& result);
+    void update_algorithm_metric_chart();
+    void request_algorithm_csv_export();
     void show_event_result(const Result<void>& result);
     void show_event_config_result(const Result<void>& result);
     void show_storage_result(const Result<void>& result);
@@ -280,8 +287,12 @@ class MainWindow final : public QMainWindow
     QLabel* algorithm_operation_status_{};
     QLabel* algorithm_test_result_{};
     QLabel* algorithm_test_preview_{};
-    QTableWidget* algorithm_metrics_{};
-    QTableWidget* algorithm_debug_metrics_{};
+    AlgorithmMetricChart* algorithm_metric_chart_{};
+    AlgorithmMetricHistory algorithm_metric_history_;
+    std::string algorithm_selected_metric_{"processedFps"};
+    std::map<std::string, QPushButton*, std::less<>> algorithm_metric_cards_;
+    std::map<std::string, QLabel*, std::less<>> algorithm_debug_metric_values_;
+    QWidget* algorithm_plugin_debug_grid_{};
     EventClientSnapshot event_snapshot_;
     QSpinBox* event_pre_seconds_{};
     QSpinBox* event_post_seconds_{};

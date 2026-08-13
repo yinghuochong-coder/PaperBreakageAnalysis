@@ -3,8 +3,10 @@
 #include "paperbreak/common/result.hpp"
 #include "paperbreak/ipc/client.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -134,6 +136,8 @@ struct AlgorithmClientSnapshot final
     std::string operation;
     std::optional<AlgorithmTestResultValue> test_result;
     std::optional<Error> error;
+    std::uint64_t local_sample_sequence{};
+    std::chrono::system_clock::time_point local_sample_time;
 };
 
 using AlgorithmClientObserver = std::function<void(const AlgorithmClientSnapshot&)>;
@@ -153,6 +157,8 @@ class AlgorithmClient final
     void refresh();
     [[nodiscard]] Result<void> update_configuration(AlgorithmConfigurationValue value);
     [[nodiscard]] Result<void> test_current_frame();
+    [[nodiscard]] Result<void> export_current_values_csv(
+        const std::filesystem::path& destination) const;
     [[nodiscard]] const AlgorithmClientSnapshot& snapshot() const noexcept;
 
   private:

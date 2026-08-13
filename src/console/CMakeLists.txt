@@ -1,4 +1,5 @@
 add_library(paperbreak_console_widgets STATIC
+    src/algorithm_metric_chart.cpp
     src/event_detail_view.cpp)
 target_link_libraries(paperbreak_console_widgets
     PUBLIC
@@ -14,6 +15,7 @@ set_target_properties(paperbreak_console_widgets PROPERTIES
 
 add_library(paperbreak_console_model STATIC
     src/algorithm_client.cpp
+    src/algorithm_metrics.cpp
     src/camera_client.cpp
     src/client_state_store.cpp
     src/event_client.cpp
