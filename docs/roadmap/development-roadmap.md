@@ -1143,6 +1143,20 @@ schema v4，v2/v3 安全迁移为 `Off`；公共相机模型、Mock、Hikrobot �
 仍被未修改的 `src/storage/src/nvme_cache.cpp:73` 既有 C28020 阻断。未执行实体相机、目标工控机
 四路 CPU/处理 FPS、正式数据集准确率或人工 UI 点击验证；M6-00 仍 blocked，算法继续标记为原型。
 
+候选事件恢复后重新布防跟进（2026-08-13）：执行记录为
+`.agent/plans/m6-03-candidate-rearm.md`。配置升级为 schema v6，v2～v5 迁移补入
+`rearmDurationMs=500`；Candidate 的三种终态均建立逐相机锁存，只有 cooldown 到期且连续严格
+正常达到配置时长才重新布防。锁存期间自动异常只累计抑制，人工触发可绕过；成功热重配置继承
+锁存和未到期 cooldown，但重新累计正常时长。IPC、监控、Qt 配置页及 Console 的 34 项运行指标
+同步。Debug 通用 unit 入口运行 421 项，420 项通过、1 项 Release-only 性能测试按设计跳过；
+Release `/W4 /WX` 全量构建与 45 项任务相关测试通过。Release 全量 CTest 的代码相关项通过，
+但运行中的 Debug 控制台造成 `qt_console_smoke` 单实例冲突；排除该项后的另一次运行仅有既有存储
+吞吐测试以 97.48 MiB/s 低于 100 MiB/s 门槛。全仓格式和 `git diff --check` 通过，任务生产源
+MSVC `/analyze` 通过；全依赖仍被未修改的 `src/storage/src/nvme_cache.cpp:73` C28020 阻断。
+未终止用户正在运行的 Debug 服务/控制台，因此 Debug 全量链接及相应 smoke 未完成；未执行实体
+相机和目标工控机验收，未作硬件结论。SQLite、manifest、事件目录、上传协议、窗口合并和 16 条
+来源上限未改变；M6-00 仍 blocked，未启动后续里程碑。
+
 算法页面紧凑化与指标可视化跟进（2026-08-13）：Qt 算法页改为“基础与执行”“检测区域”“判定与模型”三个最多四列的响应式配置分组，保留四相机切换、刷新、保存应用和隔离单帧测试，并移除页面中的里程碑、验收及原型说明文字。控制台固定登记完整 32 项运行指标（含连续健康窗口）和 11 项传统视觉调试指标，运行指标按四组卡片展示并共用轻量自绘曲线；曲线只接收成功解析的新 `algorithm.getConfig` 快照，按相机/指标在进程内最多保留 100 点。新增最新值 CSV，使用 UTF-8 BOM、标准转义和 `QSaveFile` 原子保存，过期快照拒绝导出。Debug 全量构建、30/30 CTest、12 个任务 C++ 文件格式检查和 `git diff --check` 通过；未运行 Release、实体相机、硬件性能或人工双尺寸双主题检查。服务端 `prototypeOnly`、配置 schema、IPC 和算法验收结论均未修改，M6-00 仍 blocked。
 
 退出门禁 M6：

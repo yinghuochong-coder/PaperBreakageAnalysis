@@ -258,7 +258,7 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json status_json = Json::parse(status.value().payload_json);
     EXPECT_EQ(status_json.at("serviceState"), "running");
     EXPECT_TRUE(status_json.at("acceptingWrites").get<bool>());
-    EXPECT_EQ(status_json.at("configSchemaVersion"), 5);
+    EXPECT_EQ(status_json.at("configSchemaVersion"), 6);
     EXPECT_EQ(status_json.at("storedConfigRevision"), 1);
     EXPECT_FALSE(status_json.at("machineId").get<std::string>().empty());
     EXPECT_EQ(status_json.at("loggingLevel"), "info");
@@ -440,6 +440,9 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
     EXPECT_EQ(observed_json["runtime"]["metrics"]["sampledSkippedFrames"], 0U);
     EXPECT_EQ(observed_json["runtime"]["metrics"]["missedProcessingSlots"], 0U);
     EXPECT_EQ(observed_json["runtime"]["metrics"]["configuredProcessingFps"], 60U);
+    EXPECT_FALSE(observed_json["runtime"]["metrics"]["rearmPending"].get<bool>());
+    EXPECT_EQ(observed_json["runtime"]["metrics"]["rearmSuppressedResults"], 0U);
+    EXPECT_EQ(observed_json["algorithm"]["rearmDurationMs"], 500U);
 
     const Json algorithm{{"enabled", true},
                          {"type", "classical-vision"},
@@ -450,6 +453,7 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
                          {"confirmationThreshold", 0.85},
                          {"confirmationDurationMs", 120},
                          {"cooldownMs", 250},
+                         {"rearmDurationMs", 750},
                          {"modelReference", ""},
                          {"modelVersion", "prototype-config"},
                          {"device", "cpu"},

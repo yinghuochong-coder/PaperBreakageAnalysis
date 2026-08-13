@@ -406,7 +406,7 @@ Result<EdgeConfig> parse_metadata(const Json& root)
                                                 (std::numeric_limits<std::uint32_t>::max)());
     if (!schema)
         return Result<EdgeConfig>::failure(schema.error());
-    constexpr std::array migratable_schema_versions{2U, 3U, 4U};
+    constexpr std::array migratable_schema_versions{2U, 3U, 4U, 5U};
     if (schema.value() != config_schema_version &&
         std::find(migratable_schema_versions.begin(), migratable_schema_versions.end(),
                   schema.value()) == migratable_schema_versions.end())
@@ -415,7 +415,7 @@ Result<EdgeConfig> parse_metadata(const Json& root)
             make_error("SYS_CONFIG_SCHEMA_UNSUPPORTED", Severity::error, "不支持该配置 schema 版本",
                        "config", "config.validateSchemaVersion");
         error.details.push_back({"received", std::to_string(schema.value())});
-        error.details.push_back({"supported", "2,3,4,5"});
+        error.details.push_back({"supported", "2,3,4,5,6"});
         return Result<EdgeConfig>::failure(std::move(error));
     }
     auto revision = unsigned_field<std::uint64_t>(root, "configRevision", "", 1U,
@@ -776,7 +776,17 @@ Result<EdgeConfig> parse_algorithm(const Json& root, EdgeConfig result)
 {
     const Json& algorithm = root.at("algorithm");
     const auto source_schema = root.at("configSchemaVersion").get<std::uint32_t>();
-    if (source_schema >= 5U)
+    if (source_schema >= 6U)
+    {
+        if (auto fields = exact_fields(
+                algorithm, "/algorithm",
+                {"enabled", "type", "roi", "downsampleMode", "processingFps", "candidateThreshold",
+                 "confirmationThreshold", "confirmationDurationMs", "cooldownMs", "rearmDurationMs",
+                 "modelReference", "modelVersion", "device", "debugOverlay"});
+            !fields)
+            return Result<EdgeConfig>::failure(fields.error());
+    }
+    else if (source_schema == 5U)
     {
         if (auto fields = exact_fields(algorithm, "/algorithm",
                                        {"enabled", "type", "roi", "downsampleMode", "processingFps",
@@ -856,6 +866,15 @@ Result<EdgeConfig> parse_algorithm(const Json& root, EdgeConfig result)
     }
     auto cooldown =
         unsigned_field<std::uint32_t>(algorithm, "cooldownMs", "/algorithm", 0U, 3600000U);
+    std::uint32_t rearm_duration_ms = 500U;
+    if (source_schema >= 6U)
+    {
+        auto rearm =
+            unsigned_field<std::uint32_t>(algorithm, "rearmDurationMs", "/algorithm", 0U, 3600000U);
+        if (!rearm)
+            return Result<EdgeConfig>::failure(rearm.error());
+        rearm_duration_ms = rearm.value();
+    }
     auto model_reference = string_field(algorithm, "modelReference", "/algorithm", 512U, true);
     auto model_version = string_field(algorithm, "modelVersion", "/algorithm", 128U, true);
     auto device = string_field(algorithm, "device", "/algorithm", 64U);
@@ -893,6 +912,7 @@ Result<EdgeConfig> parse_algorithm(const Json& root, EdgeConfig result)
                         .confirmation_threshold = confirmation_threshold.value(),
                         .confirmation_duration_ms = confirmation_duration_ms,
                         .cooldown_ms = cooldown.value(),
+                        .rearm_duration_ms = rearm_duration_ms,
                         .model_reference = std::move(model_reference).value(),
                         .model_version = std::move(model_version).value(),
                         .device = std::move(device).value(),
@@ -1374,6 +1394,7 @@ std::string serialize_config(const EdgeConfig& config)
                    {"confirmationThreshold", config.algorithm.confirmation_threshold},
                    {"confirmationDurationMs", config.algorithm.confirmation_duration_ms},
                    {"cooldownMs", config.algorithm.cooldown_ms},
+                   {"rearmDurationMs", config.algorithm.rearm_duration_ms},
                    {"modelReference", config.algorithm.model_reference},
                    {"modelVersion", config.algorithm.model_version},
                    {"device", config.algorithm.device},

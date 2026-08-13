@@ -1,6 +1,6 @@
 # 配置格式
 
-当前配置格式为 `configSchemaVersion = 5`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v5.schema.json`，可部署起点见 `config/default-config.json`。v1～v4 合同继续归档；程序读取 v2 时为每路相机补入安全的 Line I/O 默认值，读取 v2/v3 时把缺少的自动曝光模式补为 `Off`，读取 v2～v4 时再迁移算法抽样字段并归一化为内存 v5；下一次保存统一输出完整 v5，v1 不静默迁移。
+当前配置格式为 `configSchemaVersion = 6`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v6.schema.json`，可部署起点见 `config/default-config.json`。v1～v5 合同继续归档；程序读取 v2 时为每路相机补入安全的 Line I/O 默认值，读取 v2/v3 时把缺少的自动曝光模式补为 `Off`，读取 v2～v4 时迁移算法抽样字段，读取 v2～v5 时补入 `rearmDurationMs=500` 并归一化为内存 v6；下一次保存统一输出完整 v6，v1 不静默迁移。
 
 配置根对象包含 system、cameras、acquisition、preview、algorithm、event、storage、uplink、plantIo、logging 和 health。最多配置四路相机，逻辑编号限定为 CAM01～CAM04；启用相机必须具有唯一序列号。相机数值在 M1 只应用安全结构上限，M3 还必须按真实设备能力回读校验。每路相机的 `reverseX`、`reverseY` 分别控制水平、垂直镜像；旧 v2 配置省略时均按 `false` 处理，序列化保存后会显式写出。
 
@@ -60,11 +60,12 @@ IPC 诊断和手动重试。这三个字段均属于 `/acquisition` 待重启配
 
 - `algorithm` 是严格完整对象，包含 `enabled`、`type`、`roi`、`candidateThreshold`、
   `confirmationThreshold`、`downsampleMode`、`processingFps`、`confirmationDurationMs`、
-  `cooldownMs`、`modelReference`、`modelVersion`、`device` 和 `debugOverlay`；未知字段会被拒绝。
+  `cooldownMs`、`rearmDurationMs`、`modelReference`、`modelVersion`、`device` 和 `debugOverlay`；未知字段会被拒绝。
 - `downsampleMode` 只能为 `disabled`、`half` 或 `quarter`；`processingFps` 只能为 15、30 或
   60；`confirmationDurationMs` 范围为 10～60000 ms，且不得大于 `event.maxEventSeconds`
   对应的候选超时时间。两级阈值范围均为 0～1，且确认阈值不得低于候选阈值；冷却时间为
-  0～3,600,000 ms。模型引用、模型版本和设备名分别限制为 512、128 和 64 字节。
+  0～3,600,000 ms；`rearmDurationMs` 同样为 0～3,600,000 ms，默认 500，0 表示第一条严格
+  正常结果即可满足稳定时长但仍须满足冷却。模型引用、模型版本和设备名分别限制为 512、128 和 64 字节。
 - 新安装默认 `half + 15 FPS + 120 ms`。读取 v2～v4 时固定迁移为
   `disabled + 60 FPS`，并把旧 `consecutiveFrames` 按 60 FPS 换算后向上取整到 10 ms；例如
   7 帧迁移为 120 ms。这样升级不会直接改变旧配置的分析尺寸或处理节拍。
@@ -129,4 +130,4 @@ ADR-017 取消滚动缓存启动恢复配置与固定扫描上限。每次启动
 
 服务在目标目录创建唯一临时文件，完整写入并刷新后使用 Windows 原子替换。最近 5 份有效配置保存在 `<配置文件名>.history/`，文件名为 20 位修订号。主配置损坏时只从可完整验证的最新历史恢复；残留临时文件不会被采用。选择历史回滚时会创建新的修订，不会复用历史修订号。
 
-schema v5 不向旧程序提供降写兼容。若必须回滚到只支持 v4 的程序，须先停止服务，再从配置历史恢复最后一份 v4 文件；不得只修改版本号或把 v5 文件交给旧程序读取。
+schema v6 不向旧程序提供降写兼容。若必须回滚到只支持 v5 的程序，须先停止服务，再从配置历史恢复最后一份 v5 文件；不得只修改版本号或把 v6 文件交给旧程序读取。

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://paperbreak.local/schemas/edge-config-v6.schema.json",
+  "title": "PaperBreak Edge Configuration v6",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "configSchemaVersion", "configRevision", "modifiedAt", "system", "cameras",
+    "acquisition", "preview", "algorithm", "event", "storage", "uplink",
+    "plantIo", "logging", "health"
+  ],
+  "properties": {
+    "configSchemaVersion": { "const": 6 },
+    "configRevision": { "type": "integer", "minimum": 1 },
+    "modifiedAt": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$" },
+    "system": { "$ref": "edge-config-v5.schema.json#/properties/system" },
+    "cameras": {
+      "type": "array", "maxItems": 4,
+      "items": { "$ref": "edge-config-v5.schema.json#/properties/cameras/items" }
+    },
+    "acquisition": { "$ref": "edge-config-v5.schema.json#/properties/acquisition" },
+    "preview": { "$ref": "edge-config-v5.schema.json#/properties/preview" },
+    "algorithm": { "$ref": "#/$defs/algorithm" },
+    "event": { "$ref": "edge-config-v5.schema.json#/properties/event" },
+    "storage": { "$ref": "edge-config-v5.schema.json#/properties/storage" },
+    "uplink": { "$ref": "edge-config-v5.schema.json#/properties/uplink" },
+    "plantIo": { "$ref": "edge-config-v5.schema.json#/properties/plantIo" },
+    "logging": { "$ref": "edge-config-v5.schema.json#/properties/logging" },
+    "health": { "$ref": "edge-config-v5.schema.json#/properties/health" }
+  },
+  "$defs": {
+    "algorithm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled", "type", "roi", "candidateThreshold", "confirmationThreshold",
+        "downsampleMode", "processingFps", "confirmationDurationMs", "cooldownMs",
+        "rearmDurationMs", "modelReference", "modelVersion", "device", "debugOverlay"
+      ],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "type": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "roi": { "$ref": "edge-config-v4.schema.json#/$defs/algorithmRoi" },
+        "candidateThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "confirmationThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "downsampleMode": { "enum": ["disabled", "half", "quarter"] },
+        "processingFps": { "enum": [15, 30, 60] },
+        "confirmationDurationMs": { "type": "integer", "minimum": 10, "maximum": 60000 },
+        "cooldownMs": { "type": "integer", "minimum": 0, "maximum": 3600000 },
+        "rearmDurationMs": { "type": "integer", "minimum": 0, "maximum": 3600000 },
+        "modelReference": { "type": "string", "maxLength": 512 },
+        "modelVersion": { "type": "string", "maxLength": 128 },
+        "device": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "debugOverlay": { "type": "boolean" }
+      }
+    }
+  }
+}

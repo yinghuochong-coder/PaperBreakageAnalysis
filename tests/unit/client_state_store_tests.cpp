@@ -434,6 +434,7 @@ class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
                 {"confirmationThreshold", 0.8},
                 {"confirmationDurationMs", 120},
                 {"cooldownMs", 1000},
+                {"rearmDurationMs", 500},
                 {"modelReference", ""},
                 {"modelVersion", "prototype-config"},
                 {"device", "cpu"},
@@ -467,6 +468,8 @@ class AlgorithmClientHandler final : public paperbreak::ipc::IRequestHandler
                                            {"consecutiveBadBacklogWindows", 2},
                                            {"consecutiveHealthyBacklogWindows", 0},
                                            {"resultQueueRejected", 4},
+                                           {"rearmPending", true},
+                                           {"rearmSuppressedResults", 12},
                                            {"processCalls", 39},
                                            {"lastProcessingTimeUs", 100},
                                            {"averageProcessingTimeUs", 90},
@@ -1422,6 +1425,9 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
     EXPECT_DOUBLE_EQ(latest.runtime.metrics.processed_fps, 59.0);
     EXPECT_DOUBLE_EQ(latest.runtime.metrics.skipped_ratio, 0.025);
     EXPECT_EQ(latest.runtime.metrics.result_queue_rejected, 4U);
+    EXPECT_TRUE(latest.runtime.metrics.rearm_pending);
+    EXPECT_EQ(latest.runtime.metrics.rearm_suppressed_results, 12U);
+    EXPECT_EQ(latest.configuration.rearm_duration_ms, 500U);
     EXPECT_EQ(latest.local_sample_sequence, 1U);
     EXPECT_NE(latest.local_sample_time.time_since_epoch().count(), 0);
 
@@ -1440,6 +1446,7 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
     changed.processing_fps = 30U;
     changed.confirmation_duration_ms = 120U;
     changed.cooldown_ms = 500U;
+    changed.rearm_duration_ms = 750U;
     changed.model_reference = "models/prototype.bin";
     changed.model_version = "prototype-2";
     changed.device = "directml";
@@ -1459,6 +1466,7 @@ TEST(AlgorithmClient, SynchronizesConfigurationMetricsAndIsolatedTestResult)
         EXPECT_EQ(payload["algorithm"]["downsampleMode"], "quarter");
         EXPECT_EQ(payload["algorithm"]["processingFps"], 30U);
         EXPECT_EQ(payload["algorithm"]["confirmationDurationMs"], 120U);
+        EXPECT_EQ(payload["algorithm"]["rearmDurationMs"], 750U);
         EXPECT_EQ(payload["algorithm"]["modelReference"], "models/prototype.bin");
         EXPECT_EQ(payload["algorithm"]["device"], "directml");
     }

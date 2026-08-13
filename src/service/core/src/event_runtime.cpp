@@ -322,7 +322,8 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
                                       : event::ExternalConfirmationPolicy::not_used,
          .candidate_timeout = std::chrono::seconds{configuration.event.max_event_seconds},
          .pre_event_duration = std::chrono::seconds{configuration.event.pre_event_seconds},
-         .cooldown_duration = std::chrono::milliseconds{configuration.algorithm.cooldown_ms}});
+         .cooldown_duration = std::chrono::milliseconds{configuration.algorithm.cooldown_ms},
+         .rearm_duration = std::chrono::milliseconds{configuration.algorithm.rearm_duration_ms}});
     if (!candidates)
         return Result<std::unique_ptr<EventPipelineState>>::failure(std::move(candidates).error());
     auto windows = event::EventWindowManager::create(
@@ -626,6 +627,17 @@ struct EventRuntimeImpl final
                                                          const Lane& lane) const
     {
         std::scoped_lock lane_lock{lane.mutex};
+        event::CandidateCameraSnapshot candidate_camera;
+        if (state.candidates)
+        {
+            const auto candidates = state.candidates->snapshot();
+            if (const auto found = std::ranges::find(candidates.cameras, lane.camera_id,
+                                                     &event::CandidateCameraSnapshot::camera_id);
+                found != candidates.cameras.end())
+            {
+                candidate_camera = *found;
+            }
+        }
         const auto process_calls = lane.detector_process_calls.load();
         const auto total_processing = lane.total_algorithm_processing_us.load();
         const auto runtime_state = !state.configuration.algorithm.enabled
@@ -690,6 +702,8 @@ struct EventRuntimeImpl final
                 .processed_fps = lane.processed_fps.load(),
                 .skipped_ratio = lane.skipped_ratio.load(),
                 .result_queue_rejected = lane.result_queue_rejected.load(),
+                .rearm_pending = candidate_camera.rearm_pending,
+                .rearm_suppressed_results = candidate_camera.rearm_suppressed_results,
                 .candidates_created = lane.candidates_created.load(),
                 .confirmed_events = lane.confirmed_events.load(),
                 .rejected_candidates = lane.rejected_candidates.load()}};
@@ -1987,6 +2001,22 @@ Result<void> EventRuntime::reconfigure(const config::EdgeConfig& configuration)
         impl_->stop_and_drain(*impl_->pipeline);
     }
 
+    if (restart_workers && impl_->pipeline->candidates && next->candidates)
+    {
+        const auto seeds =
+            impl_->pipeline->candidates->rearm_seeds(impl_->pipeline->last_monotonic_time);
+        std::vector<event::CandidateRearmSeed> retained;
+        retained.reserve(seeds.size());
+        for (const auto& seed : seeds)
+        {
+            if (find_lane(*next, seed.camera_id) != nullptr)
+                retained.push_back(seed);
+        }
+        auto applied = next->candidates->apply_rearm_seeds(retained);
+        if (!applied)
+            return applied;
+    }
+
     std::unique_ptr<EventPipelineState> previous;
     std::vector<AlgorithmBacklogStateChange> removed_backlogs;
     std::vector<AlgorithmDetectorFailureStateChange> recovered_detector_failures;
@@ -2197,6 +2227,15 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
     event::CandidateEventManagerSnapshot candidates;
     if (impl_->pipeline->candidates)
         candidates = impl_->pipeline->candidates->snapshot();
+    const auto rearm_pending_lanes = static_cast<std::size_t>(std::ranges::count_if(
+        candidates.cameras, [](const auto& camera) { return camera.rearm_pending; }));
+    std::uint64_t rearm_suppressed_results = 0U;
+    for (const auto& camera : candidates.cameras)
+    {
+        const auto remaining =
+            (std::numeric_limits<std::uint64_t>::max)() - rearm_suppressed_results;
+        rearm_suppressed_results += std::min(remaining, camera.rearm_suppressed_results);
+    }
     std::size_t frame_depth{};
     std::size_t frame_capacity{};
     std::size_t frame_high_watermark{};
@@ -2311,6 +2350,8 @@ EventRuntimeSnapshot EventRuntime::snapshot() const noexcept
             .backlog_active_lanes = backlog_active_lanes,
             .detector_process_calls = process_calls,
             .result_queue_rejected = result_rejected,
+            .rearm_pending_lanes = rearm_pending_lanes,
+            .rearm_suppressed_results = rearm_suppressed_results,
             .last_algorithm_processing_time = std::chrono::microseconds{last_processing},
             .average_algorithm_processing_time =
                 std::chrono::microseconds{process_calls == 0U

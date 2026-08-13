@@ -58,10 +58,11 @@ FrameView pooled_frame(FrameBufferPool& pool, const std::string& camera_id,
 
 TriggerResult trigger_result(const std::string& camera_id, const std::uint64_t sequence,
                              const std::chrono::milliseconds time, const bool triggered,
-                             const double confidence = 0.0)
+                             const double confidence = 0.0,
+                             const TriggerSource source = TriggerSource::fixed_period)
 {
     return {.triggered = triggered,
-            .trigger_source = triggered ? TriggerSource::manual_test : TriggerSource::none,
+            .trigger_source = triggered ? source : TriggerSource::none,
             .camera_id = camera_id,
             .sequence_number = sequence,
             .camera_frame_number = sequence + 100U,
@@ -70,7 +71,7 @@ TriggerResult trigger_result(const std::string& camera_id, const std::uint64_t s
             .mean_grayscale = 0.5,
             .mean_grayscale_change = triggered ? 0.5 : 0.0,
             .paper_ratio = triggered ? 0.0 : 1.0,
-            .reason = triggered ? "manual-test" : "",
+            .reason = triggered ? "test-trigger" : "",
             .anomalous = triggered,
             .candidate_type =
                 triggered ? DetectionCandidateType::indeterminate : DetectionCandidateType::none,
@@ -89,7 +90,8 @@ class CandidateHarness final
         const ExternalConfirmationPolicy external = ExternalConfirmationPolicy::not_used,
         const std::chrono::milliseconds cooldown = 0ms,
         const std::chrono::milliseconds confirmation_duration = -1ms,
-        const std::chrono::nanoseconds processing_period = 100ms)
+        const std::chrono::nanoseconds processing_period = 100ms,
+        const std::chrono::milliseconds rearm_duration = 500ms)
         : pool_(96U, 4U)
     {
         rings_.reserve(camera_ids.size());
@@ -108,6 +110,7 @@ class CandidateHarness final
             .candidate_timeout = timeout,
             .pre_event_duration = pre_event,
             .cooldown_duration = cooldown,
+            .rearm_duration = rearm_duration,
             .notification_callback = std::move(callback),
         };
         config.cameras.reserve(camera_ids.size());
@@ -129,18 +132,18 @@ class CandidateHarness final
         manager_ = std::move(created).value();
     }
 
-    [[nodiscard]] Result<CandidateProcessOutcome> submit(const std::string& camera_id,
-                                                         const std::uint64_t sequence,
-                                                         const std::chrono::milliseconds time,
-                                                         const bool triggered,
-                                                         const double confidence = 0.0)
+    [[nodiscard]] Result<CandidateProcessOutcome> submit(
+        const std::string& camera_id, const std::uint64_t sequence,
+        const std::chrono::milliseconds time, const bool triggered, const double confidence = 0.0,
+        const TriggerSource source = TriggerSource::fixed_period)
     {
         auto frame = pooled_frame(pool_, camera_id, sequence, time);
         auto* ring = find_ring(camera_id);
         auto pushed = ring->push(std::move(frame));
         if (!pushed)
             throw std::runtime_error{"candidate test ring push failed"};
-        return manager_->process(trigger_result(camera_id, sequence, time, triggered, confidence));
+        return manager_->process(
+            trigger_result(camera_id, sequence, time, triggered, confidence, source));
     }
 
     [[nodiscard]] MemoryRing& ring(const std::string& camera_id)
@@ -302,13 +305,31 @@ TEST(EventCandidateState, RequiresExternalSignalAndHonorsExactCooldownBoundary)
     ASSERT_TRUE(cooling);
     EXPECT_EQ(cooling.value().camera.observation_state, CandidateEventState::idle);
     EXPECT_TRUE(cooling.value().camera.cooling_down);
+    EXPECT_TRUE(cooling.value().camera.rearm_pending);
+    EXPECT_EQ(cooling.value().camera.rearm_suppressed_results, 1U);
     EXPECT_FALSE(cooling.value().camera.event.has_value());
 
     auto boundary = harness.submit("CAM01", 3U, 250ms, true, 0.9);
     ASSERT_TRUE(boundary);
-    EXPECT_EQ(boundary.value().camera.observation_state, CandidateEventState::candidate);
-    EXPECT_TRUE(boundary.value().camera.event.has_value());
-    auto confirmed_again = harness.submit("CAM01", 4U, 260ms, true, 0.9);
+    EXPECT_EQ(boundary.value().camera.observation_state, CandidateEventState::idle);
+    EXPECT_TRUE(boundary.value().camera.rearm_pending);
+    EXPECT_EQ(boundary.value().camera.rearm_suppressed_results, 2U);
+
+    ASSERT_TRUE(harness.submit("CAM01", 4U, 251ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 5U, 351ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 6U, 451ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 7U, 551ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 8U, 651ms, false));
+    auto before_rearm = harness.submit("CAM01", 9U, 750ms, false);
+    ASSERT_TRUE(before_rearm);
+    EXPECT_TRUE(before_rearm.value().camera.rearm_pending);
+    auto rearmed = harness.submit("CAM01", 10U, 751ms, false);
+    ASSERT_TRUE(rearmed);
+    EXPECT_FALSE(rearmed.value().camera.rearm_pending);
+    auto candidate_again = harness.submit("CAM01", 11U, 760ms, true, 0.9);
+    ASSERT_TRUE(candidate_again);
+    EXPECT_EQ(candidate_again.value().camera.observation_state, CandidateEventState::candidate);
+    auto confirmed_again = harness.submit("CAM01", 12U, 770ms, true, 0.9);
     ASSERT_TRUE(confirmed_again);
     EXPECT_EQ(confirmed_again.value().camera.observation_state, CandidateEventState::confirmed);
 
@@ -345,6 +366,238 @@ TEST(EventCandidateState, ConfirmsByOneHundredTwentyMillisecondsAtAllConfiguredR
         EXPECT_LE(confirmed.value().camera.event->decision->monotonic_time,
                   MonotonicTime{120ms} + period);
     }
+}
+
+TEST(EventCandidateState, ContinuousAutomaticAnomalyCreatesOnlyOneCandidateAcrossCooldowns)
+{
+    CandidateHarness harness({"CAM01"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
+                             ExternalConfirmationPolicy::not_used, 100ms, 10ms, 100ms, 500ms);
+    ASSERT_TRUE(harness.submit("CAM01", 1U, 0ms, true, 0.9));
+    auto confirmed = harness.submit("CAM01", 2U, 10ms, true, 0.9);
+    ASSERT_TRUE(confirmed);
+    EXPECT_EQ(confirmed.value().camera.observation_state, CandidateEventState::confirmed);
+
+    for (std::uint64_t sequence = 3U; sequence <= 40U; ++sequence)
+    {
+        auto suppressed = harness.submit("CAM01", sequence,
+                                         std::chrono::milliseconds{sequence * 100U}, true, 0.1);
+        ASSERT_TRUE(suppressed);
+        EXPECT_TRUE(suppressed.value().camera.rearm_pending);
+        EXPECT_FALSE(suppressed.value().camera.event.has_value());
+    }
+    const auto snapshot = harness.manager().snapshot();
+    EXPECT_EQ(snapshot.events_created, 1U);
+    ASSERT_EQ(snapshot.cameras.size(), 1U);
+    EXPECT_EQ(snapshot.cameras.front().rearm_suppressed_results, 38U);
+}
+
+TEST(EventCandidateState, RecoveryRequiresStrictNormalDurationAndResetsOnAnomalyOrGap)
+{
+    CandidateHarness harness({"CAM01"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
+                             ExternalConfirmationPolicy::not_used, 0ms, 10ms, 100ms, 500ms);
+    ASSERT_TRUE(harness.submit("CAM01", 1U, 0ms, true, 0.9));
+    ASSERT_TRUE(harness.submit("CAM01", 2U, 10ms, true, 0.9));
+    ASSERT_TRUE(harness.submit("CAM01", 3U, 20ms, false));
+    auto low_confidence_anomaly = harness.submit("CAM01", 4U, 519ms, true, 0.1);
+    ASSERT_TRUE(low_confidence_anomaly);
+    EXPECT_TRUE(low_confidence_anomaly.value().camera.rearm_pending);
+    EXPECT_FALSE(low_confidence_anomaly.value().camera.recovery_started_at);
+
+    ASSERT_TRUE(harness.submit("CAM01", 5U, 520ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 6U, 620ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 7U, 720ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 8U, 820ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 9U, 920ms, false));
+    auto at_499 = harness.submit("CAM01", 10U, 1019ms, false);
+    ASSERT_TRUE(at_499);
+    EXPECT_TRUE(at_499.value().camera.rearm_pending);
+    auto exact = harness.submit("CAM01", 11U, 1020ms, false);
+    ASSERT_TRUE(exact);
+    EXPECT_FALSE(exact.value().camera.rearm_pending);
+
+    auto second = harness.submit("CAM01", 12U, 1030ms, true, 0.9);
+    ASSERT_TRUE(second);
+    ASSERT_TRUE(second.value().camera.event);
+    auto rejected = harness.manager().reject(second.value().camera.event->event_id, 1U,
+                                             MonotonicTime{1040ms}, WallClockTime{1040ms});
+    ASSERT_TRUE(rejected);
+    ASSERT_TRUE(harness.submit("CAM01", 13U, 1050ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 14U, 1250ms, false));
+    auto gap_restart = harness.submit("CAM01", 15U, 1451ms, false);
+    ASSERT_TRUE(gap_restart);
+    ASSERT_TRUE(gap_restart.value().camera.recovery_started_at);
+    EXPECT_EQ(*gap_restart.value().camera.recovery_started_at, MonotonicTime{1451ms});
+    ASSERT_TRUE(harness.submit("CAM01", 16U, 1551ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 17U, 1651ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 18U, 1751ms, false));
+    ASSERT_TRUE(harness.submit("CAM01", 19U, 1851ms, false));
+    auto gap_499 = harness.submit("CAM01", 20U, 1950ms, false);
+    ASSERT_TRUE(gap_499);
+    EXPECT_TRUE(gap_499.value().camera.rearm_pending);
+    auto gap_exact = harness.submit("CAM01", 21U, 1951ms, false);
+    ASSERT_TRUE(gap_exact);
+    EXPECT_FALSE(gap_exact.value().camera.rearm_pending);
+}
+
+TEST(EventCandidateState, RecoveryAccumulatesDuringCooldownAndZeroDurationNeedsOneNormalResult)
+{
+    CandidateHarness cooling({"CAM01"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
+                             ExternalConfirmationPolicy::not_used, 1s, 10ms, 100ms, 500ms);
+    ASSERT_TRUE(cooling.submit("CAM01", 1U, 0ms, true, 0.9));
+    ASSERT_TRUE(cooling.submit("CAM01", 2U, 10ms, true, 0.9));
+    for (std::uint64_t sequence = 3U; sequence <= 12U; ++sequence)
+    {
+        auto normal = cooling.submit("CAM01", sequence,
+                                     std::chrono::milliseconds{(sequence - 2U) * 100U}, false);
+        ASSERT_TRUE(normal);
+        EXPECT_TRUE(normal.value().camera.rearm_pending);
+    }
+    auto cooldown_boundary = cooling.submit("CAM01", 13U, 1010ms, false);
+    ASSERT_TRUE(cooldown_boundary);
+    EXPECT_FALSE(cooldown_boundary.value().camera.rearm_pending);
+
+    CandidateHarness zero({"CAM01"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
+                          ExternalConfirmationPolicy::not_used, 0ms, 10ms, 100ms, 0ms);
+    ASSERT_TRUE(zero.submit("CAM01", 1U, 0ms, true, 0.9));
+    ASSERT_TRUE(zero.submit("CAM01", 2U, 10ms, true, 0.9));
+    EXPECT_TRUE(zero.manager().snapshot().cameras.front().rearm_pending);
+    auto first_normal = zero.submit("CAM01", 3U, 20ms, false);
+    ASSERT_TRUE(first_normal);
+    EXPECT_FALSE(first_normal.value().camera.rearm_pending);
+}
+
+TEST(EventCandidateState, AllTerminalStatesLatchAndExternalSignalDoesNotRearm)
+{
+    for (const auto terminal : {CandidateEventState::confirmed, CandidateEventState::rejected,
+                                CandidateEventState::timeout})
+    {
+        CandidateHarness harness({"CAM01"}, 1U, 1U, {}, 100ms, 0ms, 0.5, 0.8,
+                                 ExternalConfirmationPolicy::required_active, 0ms, 10ms, 100ms,
+                                 500ms);
+        auto candidate = harness.submit("CAM01", 1U, 0ms, true, 0.9);
+        ASSERT_TRUE(candidate);
+        ASSERT_TRUE(candidate.value().camera.event);
+        if (terminal == CandidateEventState::confirmed)
+        {
+            ASSERT_TRUE(harness.submit("CAM01", 2U, 10ms, true, 0.9));
+            auto signal = harness.manager().update_external_signal(
+                "CAM01", true, MonotonicTime{10ms}, WallClockTime{10ms});
+            ASSERT_TRUE(signal);
+        }
+        else if (terminal == CandidateEventState::rejected)
+        {
+            ASSERT_TRUE(harness.manager().reject(candidate.value().camera.event->event_id, 1U,
+                                                 MonotonicTime{10ms}, WallClockTime{10ms}));
+        }
+        else
+        {
+            ASSERT_EQ(
+                harness.manager().advance_time(MonotonicTime{100ms}, WallClockTime{100ms}).size(),
+                1U);
+        }
+        auto snapshot = harness.manager().snapshot();
+        ASSERT_EQ(snapshot.cameras.size(), 1U);
+        EXPECT_TRUE(snapshot.cameras.front().rearm_pending);
+        auto signal = harness.manager().update_external_signal("CAM01", false, MonotonicTime{110ms},
+                                                               WallClockTime{110ms});
+        ASSERT_TRUE(signal);
+        EXPECT_TRUE(signal.value().rearm_pending);
+    }
+}
+
+TEST(EventCandidateState, ManualTriggerBypassesLatchWithoutParallelCandidateAndSeedsHotReconfigure)
+{
+    CandidateHarness old({"CAM01"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
+                         ExternalConfirmationPolicy::not_used, 1s, 10ms, 100ms, 500ms);
+    ASSERT_TRUE(old.submit("CAM01", 1U, 0ms, true, 0.9));
+    auto manual_joins = old.submit("CAM01", 2U, 5ms, true, 0.1, TriggerSource::manual_test);
+    ASSERT_TRUE(manual_joins);
+    EXPECT_EQ(old.manager().snapshot().events_created, 1U);
+    EXPECT_EQ(manual_joins.value().camera.observation_state, CandidateEventState::candidate);
+    ASSERT_TRUE(old.submit("CAM01", 3U, 15ms, true, 0.9));
+    ASSERT_TRUE(old.submit("CAM01", 4U, 25ms, true, 0.9));
+
+    auto manual = old.submit("CAM01", 5U, 30ms, true, 0.1, TriggerSource::manual_test);
+    ASSERT_TRUE(manual);
+    EXPECT_EQ(manual.value().camera.observation_state, CandidateEventState::candidate);
+    EXPECT_FALSE(manual.value().camera.rearm_pending);
+    EXPECT_EQ(old.manager().snapshot().events_created, 2U);
+
+    auto automatic_joins = old.submit("CAM01", 6U, 40ms, true, 0.9);
+    ASSERT_TRUE(automatic_joins);
+    EXPECT_EQ(old.manager().snapshot().events_created, 2U);
+    EXPECT_EQ(automatic_joins.value().camera.observation_state, CandidateEventState::candidate);
+    auto manual_confirmed = old.submit("CAM01", 7U, 50ms, true, 0.9);
+    ASSERT_TRUE(manual_confirmed);
+    EXPECT_EQ(manual_confirmed.value().camera.observation_state, CandidateEventState::confirmed);
+
+    const auto seeds = old.manager().rearm_seeds(MonotonicTime{50ms});
+    CandidateHarness replacement({"CAM01"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
+                                 ExternalConfirmationPolicy::not_used, 1s, 10ms, 100ms, 500ms);
+    ASSERT_TRUE(replacement.manager().apply_rearm_seeds(seeds));
+    auto suppressed = replacement.submit("CAM01", 1U, 60ms, true, 0.9);
+    ASSERT_TRUE(suppressed);
+    EXPECT_TRUE(suppressed.value().camera.rearm_pending);
+    EXPECT_EQ(replacement.manager().snapshot().events_created, 0U);
+}
+
+TEST(EventCandidateState, HotReconfigureSeedDropsAccumulatedRecoveryDuration)
+{
+    CandidateHarness old({"CAM01"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
+                         ExternalConfirmationPolicy::not_used, 0ms, 10ms, 100ms, 500ms);
+    ASSERT_TRUE(old.submit("CAM01", 1U, 0ms, true, 0.9));
+    ASSERT_TRUE(old.submit("CAM01", 2U, 10ms, true, 0.9));
+    for (std::uint64_t sequence = 3U; sequence <= 7U; ++sequence)
+    {
+        ASSERT_TRUE(old.submit("CAM01", sequence,
+                               std::chrono::milliseconds{20U + (sequence - 3U) * 100U}, false));
+    }
+    EXPECT_TRUE(old.manager().snapshot().cameras.front().rearm_pending);
+
+    CandidateHarness replacement({"CAM01"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
+                                 ExternalConfirmationPolicy::not_used, 0ms, 10ms, 100ms, 500ms);
+    ASSERT_TRUE(
+        replacement.manager().apply_rearm_seeds(old.manager().rearm_seeds(MonotonicTime{420ms})));
+    for (std::uint64_t sequence = 1U; sequence <= 5U; ++sequence)
+    {
+        ASSERT_TRUE(replacement.submit(
+            "CAM01", sequence, std::chrono::milliseconds{430U + (sequence - 1U) * 100U}, false));
+    }
+    auto before = replacement.submit("CAM01", 6U, 929ms, false);
+    ASSERT_TRUE(before);
+    EXPECT_TRUE(before.value().camera.rearm_pending);
+    auto exact = replacement.submit("CAM01", 7U, 930ms, false);
+    ASSERT_TRUE(exact);
+    EXPECT_FALSE(exact.value().camera.rearm_pending);
+}
+
+TEST(EventCandidateState, FourCameraRecoveryAndSuppressionRemainIndependent)
+{
+    CandidateHarness harness({"CAM01", "CAM02", "CAM03", "CAM04"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
+                             ExternalConfirmationPolicy::not_used, 0ms, 10ms, 100ms, 500ms);
+    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
+    {
+        ASSERT_TRUE(harness.submit(camera_id, 1U, 0ms, true, 0.9));
+        ASSERT_TRUE(harness.submit(camera_id, 2U, 10ms, true, 0.9));
+    }
+    for (std::uint64_t sequence = 3U; sequence <= 8U; ++sequence)
+    {
+        ASSERT_TRUE(harness.submit("CAM01", sequence,
+                                   std::chrono::milliseconds{20U + (sequence - 3U) * 100U}, false));
+    }
+    ASSERT_TRUE(harness.submit("CAM02", 3U, 20ms, true, 0.1));
+
+    const auto snapshot = harness.manager().snapshot();
+    const auto find = [&](const std::string_view camera_id) -> const CandidateCameraSnapshot& {
+        return *std::ranges::find(snapshot.cameras, camera_id, &CandidateCameraSnapshot::camera_id);
+    };
+    EXPECT_FALSE(find("CAM01").rearm_pending);
+    EXPECT_TRUE(find("CAM02").rearm_pending);
+    EXPECT_EQ(find("CAM02").rearm_suppressed_results, 1U);
+    EXPECT_TRUE(find("CAM03").rearm_pending);
+    EXPECT_EQ(find("CAM03").rearm_suppressed_results, 0U);
+    EXPECT_TRUE(find("CAM04").rearm_pending);
+    EXPECT_EQ(find("CAM04").rearm_suppressed_results, 0U);
 }
 
 TEST(EventCandidateState, ResetsOnlyBeyondTwoPeriodsAndRejectsStaleExternalConfirmation)

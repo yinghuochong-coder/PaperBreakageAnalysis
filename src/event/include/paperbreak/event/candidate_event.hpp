@@ -67,7 +67,18 @@ struct CandidateCameraSnapshot final
     bool external_signal_active{};
     bool cooling_down{};
     std::optional<camera::MonotonicTime> cooldown_until;
+    bool rearm_pending{};
+    std::optional<camera::MonotonicTime> recovery_started_at;
+    std::uint64_t rearm_suppressed_results{};
     std::optional<CandidateEventSnapshot> event;
+};
+
+struct CandidateRearmSeed final
+{
+    std::string camera_id;
+    bool rearm_pending{};
+    std::optional<camera::MonotonicTime> cooldown_until;
+    std::uint64_t rearm_suppressed_results{};
 };
 
 enum class ExternalConfirmationPolicy
@@ -110,6 +121,7 @@ struct CandidateEventManagerConfig final
     std::chrono::milliseconds candidate_timeout{5000};
     std::chrono::milliseconds pre_event_duration{1000};
     std::chrono::milliseconds cooldown_duration{};
+    std::chrono::milliseconds rearm_duration{500};
     CandidateEventNotificationCallback notification_callback;
 };
 
@@ -189,6 +201,9 @@ class CandidateEventManager final
                                                            camera::WallClockTime wall_clock_time);
 
     [[nodiscard]] CandidateEventManagerSnapshot snapshot() const;
+    [[nodiscard]] std::vector<CandidateRearmSeed> rearm_seeds(
+        camera::MonotonicTime monotonic_time) const;
+    [[nodiscard]] Result<void> apply_rearm_seeds(const std::vector<CandidateRearmSeed>& seeds);
 
   private:
     struct Impl;

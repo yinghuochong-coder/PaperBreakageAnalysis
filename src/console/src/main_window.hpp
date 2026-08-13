@@ -276,6 +276,7 @@ class MainWindow final : public QMainWindow
     QComboBox* algorithm_processing_fps_{};
     QSpinBox* algorithm_confirmation_duration_ms_{};
     QSpinBox* algorithm_cooldown_ms_{};
+    QSpinBox* algorithm_rearm_duration_ms_{};
     QLineEdit* algorithm_model_reference_{};
     QLineEdit* algorithm_model_version_{};
     QComboBox* algorithm_device_{};

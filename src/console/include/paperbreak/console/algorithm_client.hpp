@@ -35,6 +35,7 @@ struct AlgorithmConfigurationValue final
     double confirmation_threshold{0.8};
     std::uint32_t confirmation_duration_ms{120U};
     std::uint32_t cooldown_ms{1000U};
+    std::uint32_t rearm_duration_ms{500U};
     std::string model_reference;
     std::string model_version;
     std::string device{"cpu"};
@@ -59,6 +60,8 @@ struct AlgorithmMetricValue final
     std::uint64_t consecutive_bad_backlog_windows{};
     std::uint64_t consecutive_healthy_backlog_windows{};
     std::uint64_t result_queue_rejected{};
+    bool rearm_pending{};
+    std::uint64_t rearm_suppressed_results{};
     std::uint64_t process_calls{};
     std::int64_t last_processing_time_us{};
     std::int64_t average_processing_time_us{};

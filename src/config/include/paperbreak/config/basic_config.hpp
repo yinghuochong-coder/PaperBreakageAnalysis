@@ -12,7 +12,7 @@ namespace paperbreak::config
 {
 
 inline constexpr std::size_t config_max_bytes = 1024U * 1024U;
-inline constexpr std::uint32_t config_schema_version = 5U;
+inline constexpr std::uint32_t config_schema_version = 6U;
 inline constexpr std::size_t maximum_camera_count = 4U;
 
 enum class PixelFormat
@@ -151,6 +151,7 @@ struct AlgorithmConfig final
     double confirmation_threshold{0.8};
     std::uint32_t confirmation_duration_ms{120U};
     std::uint32_t cooldown_ms{1000U};
+    std::uint32_t rearm_duration_ms{500U};
     std::string model_reference;
     std::string model_version;
     std::string device{"cpu"};
@@ -257,7 +258,7 @@ struct BasicConfigInfo final
     std::size_t file_size_bytes{};
 };
 
-/// Parses strict schema v5 or migrates schema v2-v4 with compatibility defaults.
+/// Parses strict schema v6 or migrates schema v2-v5 with compatibility defaults.
 [[nodiscard]] Result<EdgeConfig> parse_config(
     std::string_view contents, const std::filesystem::path& config_directory) noexcept;
 [[nodiscard]] std::string serialize_config(const EdgeConfig& config);

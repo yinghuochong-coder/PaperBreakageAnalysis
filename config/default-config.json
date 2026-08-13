@@ -20,6 +20,7 @@
     "modelReference": "",
     "modelVersion": "",
     "processingFps": 15,
+    "rearmDurationMs": 500,
     "roi": {
       "height": 0,
       "offsetX": 0,
@@ -159,7 +160,7 @@
     }
   ],
   "configRevision": 91,
-  "configSchemaVersion": 5,
+  "configSchemaVersion": 6,
   "event": {
     "generatePreviewVideo": true,
     "keyFrameCount": 7,

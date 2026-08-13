@@ -1226,6 +1226,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             algorithm_confirmation_duration_ms_->setRange(10, 60000);
             algorithm_cooldown_ms_ = make_child<QSpinBox>(decision_grid);
             algorithm_cooldown_ms_->setRange(0, 3600000);
+            algorithm_rearm_duration_ms_ = make_child<QSpinBox>(decision_grid);
+            algorithm_rearm_duration_ms_->setRange(0, 3600000);
             algorithm_model_reference_ = make_child<QLineEdit>(decision_grid);
             algorithm_model_reference_->setMaxLength(512);
             algorithm_model_version_ = make_child<QLineEdit>(decision_grid);
@@ -1244,6 +1246,9 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                                                          algorithm_confirmation_duration_ms_));
             decision_grid->add_widget(make_compact_field(
                 decision_grid, QStringLiteral("冷却时间 (ms)"), algorithm_cooldown_ms_));
+            decision_grid->add_widget(make_compact_field(decision_grid,
+                                                         QStringLiteral("重新布防稳定时间 (ms)"),
+                                                         algorithm_rearm_duration_ms_));
             decision_grid->add_widget(make_compact_field(decision_grid, QStringLiteral("模型引用"),
                                                          algorithm_model_reference_));
             decision_grid->add_widget(make_compact_field(
@@ -1436,6 +1441,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                      .confirmation_duration_ms =
                          static_cast<std::uint32_t>(algorithm_confirmation_duration_ms_->value()),
                      .cooldown_ms = static_cast<std::uint32_t>(algorithm_cooldown_ms_->value()),
+                     .rearm_duration_ms =
+                         static_cast<std::uint32_t>(algorithm_rearm_duration_ms_->value()),
                      .model_reference = algorithm_model_reference_->text().toStdString(),
                      .model_version = algorithm_model_version_->text().toStdString(),
                      .device = algorithm_device_->currentText().toStdString(),
@@ -3221,6 +3228,7 @@ void MainWindow::apply_algorithm_snapshot(const AlgorithmClientSnapshot& snapsho
         algorithm_confirmation_duration_ms_->setValue(
             static_cast<int>(value.confirmation_duration_ms));
         algorithm_cooldown_ms_->setValue(static_cast<int>(value.cooldown_ms));
+        algorithm_rearm_duration_ms_->setValue(static_cast<int>(value.rearm_duration_ms));
         algorithm_model_reference_->setText(QString::fromStdString(value.model_reference));
         algorithm_model_version_->setText(QString::fromStdString(value.model_version));
         algorithm_device_->setEditText(QString::fromStdString(value.device));
@@ -3911,10 +3919,10 @@ bool MainWindow::algorithm_page_ready() const noexcept
            algorithm_candidate_threshold_ && algorithm_confirmation_threshold_ &&
            algorithm_downsample_mode_ && algorithm_processing_fps_ &&
            algorithm_confirmation_duration_ms_ && algorithm_cooldown_ms_ &&
-           algorithm_model_reference_ && algorithm_model_version_ && algorithm_device_ &&
-           algorithm_debug_overlay_ && algorithm_save_ && algorithm_test_ &&
+           algorithm_rearm_duration_ms_ && algorithm_model_reference_ && algorithm_model_version_ &&
+           algorithm_device_ && algorithm_debug_overlay_ && algorithm_save_ && algorithm_test_ &&
            algorithm_runtime_status_ && algorithm_metric_chart_ && algorithm_test_result_ &&
-           algorithm_test_preview_ && algorithm_metric_cards_.size() == 32U &&
+           algorithm_test_preview_ && algorithm_metric_cards_.size() == 34U &&
            algorithm_debug_metric_values_.size() >= 11U &&
            findChild<QPushButton*>(QStringLiteral("algorithm-export-current-csv"));
 }

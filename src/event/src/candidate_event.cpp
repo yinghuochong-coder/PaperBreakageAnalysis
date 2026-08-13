@@ -236,6 +236,10 @@ struct CandidateEventManager::Impl final
         std::optional<camera::MonotonicTime> external_signal_time;
         std::optional<camera::WallClockTime> external_signal_wall_time;
         std::optional<camera::MonotonicTime> cooldown_until;
+        bool rearm_pending{};
+        std::optional<camera::MonotonicTime> recovery_started_at;
+        std::optional<camera::MonotonicTime> last_recovery_normal_at;
+        std::uint64_t rearm_suppressed_results{};
         std::optional<algorithm::TriggerResult> first_suspicious_trigger;
         std::optional<algorithm::TriggerResult> last_result;
         std::optional<ActiveEvent> event;
@@ -278,6 +282,9 @@ struct CandidateEventManager::Impl final
                 .external_signal_active = camera.external_signal_active,
                 .cooling_down = camera.cooldown_until.has_value(),
                 .cooldown_until = camera.cooldown_until,
+                .rearm_pending = camera.rearm_pending,
+                .recovery_started_at = camera.recovery_started_at,
+                .rearm_suppressed_results = camera.rearm_suppressed_results,
                 .event = camera.event ? std::optional{camera.event->snapshot} : std::nullopt};
     }
 
@@ -309,6 +316,54 @@ struct CandidateEventManager::Impl final
         camera.consecutive_confirmation_frames = 0U;
         camera.confirmation_started_at.reset();
         camera.last_confirmation_qualified_at.reset();
+    }
+
+    static void reset_recovery_interval(CameraTracker& camera) noexcept
+    {
+        camera.recovery_started_at.reset();
+        camera.last_recovery_normal_at.reset();
+    }
+
+    void latch_rearm(CameraTracker& camera) const noexcept
+    {
+        camera.rearm_pending = true;
+        reset_recovery_interval(camera);
+    }
+
+    [[nodiscard]] bool observe_recovery(CameraTracker& camera,
+                                        const algorithm::TriggerResult& result) const noexcept
+    {
+        if (result.triggered)
+        {
+            reset_recovery_interval(camera);
+            if (result.trigger_source != algorithm::TriggerSource::manual_test &&
+                camera.rearm_suppressed_results < (std::numeric_limits<std::uint64_t>::max)())
+            {
+                ++camera.rearm_suppressed_results;
+            }
+            return false;
+        }
+
+        if (!camera.recovery_started_at ||
+            (camera.last_recovery_normal_at &&
+             result.monotonic_time - *camera.last_recovery_normal_at >
+                 config.processing_period * 2))
+        {
+            camera.recovery_started_at = result.monotonic_time;
+        }
+        camera.last_recovery_normal_at = result.monotonic_time;
+        if (camera.cooldown_until && result.monotonic_time >= *camera.cooldown_until)
+            camera.cooldown_until.reset();
+        const bool cooldown_satisfied = !camera.cooldown_until;
+        const bool duration_satisfied =
+            camera.recovery_started_at && result.monotonic_time >= *camera.recovery_started_at &&
+            result.monotonic_time - *camera.recovery_started_at >= config.rearm_duration;
+        if (!cooldown_satisfied || !duration_satisfied)
+            return false;
+
+        camera.rearm_pending = false;
+        reset_recovery_interval(camera);
+        return true;
     }
 
     void observe_confirmation(CameraTracker& camera, const algorithm::TriggerResult& result,
@@ -455,6 +510,7 @@ struct CandidateEventManager::Impl final
         else if (state == CandidateEventState::timeout)
             ++timed_out_events;
         camera.cooldown_until = add_saturating(monotonic_time, config.cooldown_duration);
+        latch_rearm(camera);
         notifications.push_back(
             {.kind = CandidateNotificationKind::decision_changed, .event = camera.event->snapshot});
     }
@@ -600,7 +656,8 @@ Result<std::unique_ptr<CandidateEventManager>> CandidateEventManager::create(
         config.confirmation_duration > config.candidate_timeout ||
         config.candidate_timeout <= std::chrono::milliseconds::zero() ||
         config.pre_event_duration < std::chrono::milliseconds::zero() ||
-        config.cooldown_duration < std::chrono::milliseconds::zero())
+        config.cooldown_duration < std::chrono::milliseconds::zero() ||
+        config.rearm_duration < std::chrono::milliseconds::zero())
     {
         return Result<std::unique_ptr<CandidateEventManager>>::failure(
             config_error({}, "invalid-event-duration"));
@@ -609,7 +666,7 @@ Result<std::unique_ptr<CandidateEventManager>> CandidateEventManager::create(
         camera::MonotonicTime::duration::max());
     if (config.candidate_timeout > maximum_duration ||
         config.pre_event_duration > maximum_duration ||
-        config.cooldown_duration > maximum_duration ||
+        config.cooldown_duration > maximum_duration || config.rearm_duration > maximum_duration ||
         config.confirmation_duration > maximum_duration ||
         config.processing_period > maximum_duration)
     {
@@ -720,23 +777,29 @@ Result<CandidateProcessOutcome> CandidateEventManager::process(
                 camera->first_suspicious_trigger.reset();
             }
 
-            if (camera->cooldown_until && result.monotonic_time >= *camera->cooldown_until)
+            const bool manual_result =
+                result.trigger_source == algorithm::TriggerSource::manual_test;
+            if (camera->rearm_pending && manual_result && result.triggered)
+            {
+                camera->rearm_pending = false;
                 camera->cooldown_until.reset();
-
-            const bool cooling_down = camera->cooldown_until.has_value();
+                Impl::reset_recovery_interval(*camera);
+            }
             const bool candidate_eligible =
                 result.triggered &&
-                result.confidence >= impl_->config.candidate_confidence_threshold;
+                (manual_result ||
+                 result.confidence >= impl_->config.candidate_confidence_threshold);
             const bool confirmation_eligible =
                 result.triggered &&
                 result.confidence >= impl_->config.confirmation_confidence_threshold;
 
-            if (cooling_down)
+            if (camera->rearm_pending)
             {
                 camera->state = CandidateEventState::idle;
                 camera->consecutive_triggered_frames = 0U;
                 Impl::reset_confirmation_interval(*camera);
                 camera->first_suspicious_trigger.reset();
+                static_cast<void>(impl_->observe_recovery(*camera, result));
             }
             else if (camera->state == CandidateEventState::candidate)
             {
@@ -782,8 +845,8 @@ Result<CandidateProcessOutcome> CandidateEventManager::process(
                     impl_->observe_confirmation(*camera, result, confirmation_eligible);
                 }
 
-                if (camera->consecutive_triggered_frames >=
-                    impl_->config.candidate_consecutive_frames)
+                if (manual_result || camera->consecutive_triggered_frames >=
+                                         impl_->config.candidate_consecutive_frames)
                 {
                     auto created = impl_->create_candidate(*camera, result, notifications);
                     if (!created)
@@ -849,8 +912,6 @@ Result<CandidateCameraSnapshot> CandidateEventManager::update_external_signal(
         }
         else
         {
-            if (camera->cooldown_until && monotonic_time >= *camera->cooldown_until)
-                camera->cooldown_until.reset();
             if (camera->state == CandidateEventState::candidate && camera->event &&
                 monotonic_time >= camera->event->snapshot.candidate_deadline)
             {
@@ -974,6 +1035,67 @@ CandidateEventManagerSnapshot CandidateEventManager::snapshot() const
     for (const auto& camera : impl_->cameras)
         result.cameras.push_back(Impl::camera_snapshot(camera));
     return result;
+}
+
+std::vector<CandidateRearmSeed> CandidateEventManager::rearm_seeds(
+    const camera::MonotonicTime monotonic_time) const
+{
+    std::scoped_lock lock{impl_->mutex};
+    std::vector<CandidateRearmSeed> seeds;
+    seeds.reserve(impl_->cameras.size());
+    for (const auto& camera : impl_->cameras)
+    {
+        seeds.push_back(
+            {.camera_id = camera.camera_id,
+             .rearm_pending = camera.rearm_pending,
+             .cooldown_until = camera.cooldown_until && *camera.cooldown_until > monotonic_time
+                                   ? camera.cooldown_until
+                                   : std::nullopt,
+             .rearm_suppressed_results = camera.rearm_suppressed_results});
+    }
+    return seeds;
+}
+
+Result<void> CandidateEventManager::apply_rearm_seeds(const std::vector<CandidateRearmSeed>& seeds)
+{
+    std::scoped_lock lock{impl_->mutex};
+    if (impl_->stopped)
+    {
+        return Result<void>::failure(candidate_error("EVENT_INVALID_TRANSITION", Severity::error,
+                                                     "停止后的候选事件状态机不能导入重新布防状态",
+                                                     "event.candidate.applyRearmSeeds", {},
+                                                     "manager-stopped"));
+    }
+    for (std::size_t index = 0U; index < seeds.size(); ++index)
+    {
+        const auto& seed = seeds[index];
+        if (impl_->find_camera(seed.camera_id) == nullptr)
+        {
+            return Result<void>::failure(candidate_error(
+                "SYS_CONFIG_INVALID", Severity::error, "重新布防种子引用了未配置相机",
+                "event.candidate.applyRearmSeeds", seed.camera_id, "unknown-camera"));
+        }
+        for (std::size_t previous = 0U; previous < index; ++previous)
+        {
+            if (seeds[previous].camera_id == seed.camera_id)
+            {
+                return Result<void>::failure(candidate_error(
+                    "SYS_CONFIG_INVALID", Severity::error, "重新布防种子包含重复相机",
+                    "event.candidate.applyRearmSeeds", seed.camera_id, "duplicate-camera"));
+            }
+        }
+    }
+    for (const auto& seed : seeds)
+    {
+        auto* camera = impl_->find_camera(seed.camera_id);
+        if (camera == nullptr)
+            continue;
+        camera->rearm_pending = seed.rearm_pending;
+        camera->cooldown_until = seed.rearm_pending ? seed.cooldown_until : std::nullopt;
+        camera->rearm_suppressed_results = seed.rearm_suppressed_results;
+        Impl::reset_recovery_interval(*camera);
+    }
+    return Result<void>::success();
 }
 
 } // namespace paperbreak::event

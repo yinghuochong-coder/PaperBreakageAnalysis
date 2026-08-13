@@ -149,6 +149,14 @@ constexpr std::array metric_descriptors{
         "累计因全局算法结果入口满载而被拒绝的当前相机结果数；运行时重建或服务重启后重置。",
         read_member<&AlgorithmMetricValue::result_queue_rejected>},
     AlgorithmMetricDescriptor{
+        "rearmPending", "等待重新布防", "状态", AlgorithmMetricGroup::backlog_stability,
+        "当前相机是否仍需同时满足冷却和稳定正常画面条件；人工测试可显式绕过。",
+        read_member<&AlgorithmMetricValue::rearm_pending>},
+    AlgorithmMetricDescriptor{
+        "rearmSuppressedResults", "重新布防抑制结果", "次", AlgorithmMetricGroup::backlog_stability,
+        "累计在等待重新布防期间被正常抑制的非人工异常结果；不增加候选或窗口触发。",
+        read_member<&AlgorithmMetricValue::rearm_suppressed_results>},
+    AlgorithmMetricDescriptor{
         "skippedRatio", "窗口跳帧率", "%", AlgorithmMetricGroup::backlog_stability,
         "最近统计窗口内积压跳帧占比；范围为当前相机，窗口滚动更新，界面按百分比显示。",
         read_skipped_ratio_percent},

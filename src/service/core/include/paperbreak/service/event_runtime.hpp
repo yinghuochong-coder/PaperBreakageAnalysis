@@ -119,6 +119,8 @@ struct AlgorithmLaneMetrics final
     double processed_fps{};
     double skipped_ratio{};
     std::uint64_t result_queue_rejected{};
+    bool rearm_pending{};
+    std::uint64_t rearm_suppressed_results{};
     std::uint64_t candidates_created{};
     std::uint64_t confirmed_events{};
     std::uint64_t rejected_candidates{};
@@ -155,6 +157,8 @@ struct EventRuntimeSnapshot final
     std::size_t backlog_active_lanes{};
     std::uint64_t detector_process_calls{};
     std::uint64_t result_queue_rejected{};
+    std::size_t rearm_pending_lanes{};
+    std::uint64_t rearm_suppressed_results{};
     std::chrono::microseconds last_algorithm_processing_time{};
     std::chrono::microseconds average_algorithm_processing_time{};
     std::chrono::microseconds maximum_algorithm_processing_time{};

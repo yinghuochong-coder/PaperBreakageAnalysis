@@ -406,12 +406,14 @@ Hikrobot 适配器根据设备 `GevTimestampTickFrequency` 转换能力范围、
 - `algorithm.getConfig`：payload 为 `{"cameraId":"CAM01"}`。返回完整保存配置
   `algorithm`、实际有效配置 `effectiveAlgorithm`、两项配置修订和 `runtime`。运行时包含实际
   检测器信息、`active` / `partially-degraded` / `disabled` / `manual-trigger-only` 状态、当前帧可用性及序号；
-  `algorithm` 对象使用 schema v5 的 `downsampleMode`、`processingFps` 和
-  `confirmationDurationMs`，不再接受 `consecutiveFrames`。`metrics` 包含两个容量 1 槽位的
+  `algorithm` 对象使用 schema v6 的 `downsampleMode`、`processingFps`、
+  `confirmationDurationMs` 和 `rearmDurationMs`，不再接受 `consecutiveFrames`。`metrics` 包含两个容量 1 槽位的
   汇总深度/容量/高水位、提交/处理/跳过/失败帧、处理调用与
   最近/平均/最大耗时、候选/确认/拒绝计数，并追加 `consecutiveBacklogEvents` 和
   `resultQueueRejected`；`sampledSkippedFrames` 只统计 latest-wins 正常抽样，
-  `missedProcessingSlots` 只统计检测超时错过的节拍，`configuredProcessingFps` 返回配置节拍。
+  `missedProcessingSlots` 只统计检测超时错过的节拍，`configuredProcessingFps` 返回配置节拍；
+  `rearmPending` 返回当前相机是否等待重新布防，`rearmSuppressedResults` 返回锁存期间正常抑制
+  的非人工异常结果累计数。抑制不返回错误、不触发报警。
   状态和指标均来自请求 `cameraId` 对应的独立 Lane，不再返回共享汇总；
   禁用时 `detector` 为 `null`。
 - `algorithm.updateConfig`：payload 必须且只能包含 `cameraId`、无符号

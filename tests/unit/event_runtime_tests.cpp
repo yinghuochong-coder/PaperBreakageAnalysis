@@ -510,7 +510,46 @@ TEST(EventRuntimeIntegration, FrozenCandidateMappingSurvivesUntilConfirmationAnd
         return record && record.value().decision_state == "Confirmed";
     }));
     EXPECT_EQ(runtime.value()->snapshot().events_started, 1U);
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(5U, 1400ms)));
+    for (std::uint64_t sequence = 5U; sequence <= 20U; ++sequence)
+    {
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(sequence, std::chrono::milliseconds{1400U + (sequence - 5U) * 100U})));
+        ASSERT_TRUE(wait_until([&] {
+            std::scoped_lock lock{behavior->mutex};
+            return std::ranges::find(behavior->completed_sequences["CAM01"], sequence) !=
+                   behavior->completed_sequences["CAM01"].end();
+        }));
+    }
+    ASSERT_TRUE(wait_until([&] {
+        auto lane = runtime.value()->algorithm_snapshot("CAM01");
+        return lane && lane.value().metrics.rearm_pending &&
+               lane.value().metrics.rearm_suppressed_results > 0U;
+    }));
+    EXPECT_EQ(runtime.value()->snapshot().events_started, 1U);
+
+    {
+        std::scoped_lock lock{behavior->mutex};
+        behavior->triggered_cameras.clear();
+    }
+    for (std::uint64_t sequence = 21U; sequence <= 26U; ++sequence)
+    {
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(sequence, std::chrono::milliseconds{3000U + (sequence - 21U) * 100U})));
+        ASSERT_TRUE(wait_until([&] {
+            std::scoped_lock lock{behavior->mutex};
+            return std::ranges::find(behavior->completed_sequences["CAM01"], sequence) !=
+                   behavior->completed_sequences["CAM01"].end();
+        }));
+    }
+    ASSERT_TRUE(wait_until([&] {
+        auto lane = runtime.value()->algorithm_snapshot("CAM01");
+        return lane && !lane.value().metrics.rearm_pending;
+    }));
+    {
+        std::scoped_lock lock{behavior->mutex};
+        behavior->triggered_cameras.insert("CAM01");
+    }
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(27U, 3600ms)));
     ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 2U; }));
     auto second_page = shared_database->query_events({.limit = 10U});
     ASSERT_TRUE(second_page);
@@ -521,7 +560,7 @@ TEST(EventRuntimeIntegration, FrozenCandidateMappingSurvivesUntilConfirmationAnd
     EXPECT_EQ(event_ids.size(), 2U);
     EXPECT_TRUE(event_ids.contains(first_id));
 
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(6U, 2500ms)));
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(28U, 4700ms)));
     ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_frozen == 2U; }));
     EXPECT_EQ(runtime.value()->snapshot().events_started, 2U);
     runtime.value()->request_stop();
@@ -573,7 +612,29 @@ TEST(EventRuntimeIntegration, FrozenCandidateTimeoutDoesNotReuseIdAndLaterCandid
     }));
     EXPECT_EQ(runtime.value()->snapshot().events_started, 1U);
 
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(4U, 4200ms)));
+    {
+        std::scoped_lock lock{behavior->mutex};
+        behavior->triggered_cameras.clear();
+    }
+    for (std::uint64_t sequence = 4U; sequence <= 13U; ++sequence)
+    {
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(sequence, std::chrono::milliseconds{3200U + (sequence - 4U) * 100U})));
+        ASSERT_TRUE(wait_until([&] {
+            std::scoped_lock lock{behavior->mutex};
+            return std::ranges::find(behavior->completed_sequences["CAM01"], sequence) !=
+                   behavior->completed_sequences["CAM01"].end();
+        }));
+    }
+    ASSERT_TRUE(wait_until([&] {
+        auto lane = runtime.value()->algorithm_snapshot("CAM01");
+        return lane && !lane.value().metrics.rearm_pending;
+    }));
+    {
+        std::scoped_lock lock{behavior->mutex};
+        behavior->triggered_cameras.insert("CAM01");
+    }
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(14U, 4200ms)));
     ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 2U; }));
     auto second_page = shared_database->query_events({.limit = 10U});
     ASSERT_TRUE(second_page);
@@ -629,7 +690,29 @@ TEST(EventRuntimeIntegration, ExternalConfirmationAfterFreezeUpdatesOriginalAndR
         auto record = shared_database->get_event(first_id);
         return record && record.value().decision_state == "Confirmed";
     }));
-    ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 1400ms)));
+    {
+        std::scoped_lock lock{behavior->mutex};
+        behavior->triggered_cameras.clear();
+    }
+    for (std::uint64_t sequence = 3U; sequence <= 8U; ++sequence)
+    {
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(sequence, std::chrono::milliseconds{1400U + (sequence - 3U) * 100U})));
+        ASSERT_TRUE(wait_until([&] {
+            std::scoped_lock lock{behavior->mutex};
+            return std::ranges::find(behavior->completed_sequences["CAM01"], sequence) !=
+                   behavior->completed_sequences["CAM01"].end();
+        }));
+    }
+    ASSERT_TRUE(wait_until([&] {
+        auto lane = runtime.value()->algorithm_snapshot("CAM01");
+        return lane && !lane.value().metrics.rearm_pending;
+    }));
+    {
+        std::scoped_lock lock{behavior->mutex};
+        behavior->triggered_cameras.insert("CAM01");
+    }
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(9U, 2000ms)));
     ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().events_started == 2U; }));
     auto second_page = shared_database->query_events({.limit = 10U});
     ASSERT_TRUE(second_page);
@@ -1810,6 +1893,181 @@ TEST(EventRuntimeLanes, PartialThreadPreparationFailureKeepsOldRuntimeActive)
     EXPECT_FALSE(startup_failure.value()->snapshot().accepting);
 }
 
+TEST(EventRuntimeLanes, HotReconfigurePreservesRearmLatchAndFailedAttemptLeavesItUntouched)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto behavior = std::make_shared<ControlledDetectorBehavior>();
+    behavior->triggered_cameras = {"CAM01"};
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "controlled-runtime-test";
+    configuration.algorithm.confirmation_duration_ms = 10U;
+    configuration.algorithm.rearm_duration_ms = 500U;
+    std::atomic_bool fail_worker{};
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration,
+         .event_root = event_root,
+         .database = shared_database,
+         .detector_registry_configurer = controlled_detector_registration(behavior),
+         .thread_start_gate = [&](const std::string_view name) {
+             if (fail_worker.load() && name == "algorithm-worker-cam01")
+                 return Result<void>::failure(make_error("SYS_INTERNAL_ERROR", Severity::critical,
+                                                         "注入的线程创建失败", "event",
+                                                         "event.test.threadStart"));
+             return Result<void>::success();
+         }});
+    ASSERT_TRUE(runtime);
+    ASSERT_TRUE(runtime.value()->start());
+    for (const auto [sequence, time] :
+         std::array{std::pair{1U, 0ms}, std::pair{2U, 100ms}, std::pair{3U, 200ms}})
+    {
+        ASSERT_TRUE(runtime.value()->submit_frame(frame(sequence, time)));
+        ASSERT_TRUE(wait_until([&] {
+            std::scoped_lock lock{behavior->mutex};
+            return std::ranges::find(behavior->completed_sequences["CAM01"], sequence) !=
+                   behavior->completed_sequences["CAM01"].end();
+        }));
+    }
+    ASSERT_TRUE(wait_until([&] {
+        auto lane = runtime.value()->algorithm_snapshot("CAM01");
+        return lane && lane.value().metrics.rearm_pending &&
+               lane.value().metrics.rearm_suppressed_results == 1U;
+    }));
+    EXPECT_EQ(runtime.value()->snapshot().candidates_created, 1U);
+
+    configuration.config_revision += 1U;
+    ASSERT_TRUE(runtime.value()->reconfigure(configuration));
+    auto after_success = runtime.value()->algorithm_snapshot("CAM01");
+    ASSERT_TRUE(after_success);
+    EXPECT_TRUE(after_success.value().metrics.rearm_pending);
+    EXPECT_EQ(after_success.value().metrics.rearm_suppressed_results, 1U);
+    ASSERT_TRUE(runtime.value()->submit_frame(frame(4U, 300ms)));
+    ASSERT_TRUE(wait_until([&] {
+        auto lane = runtime.value()->algorithm_snapshot("CAM01");
+        return lane && lane.value().metrics.rearm_suppressed_results == 2U;
+    }));
+    EXPECT_EQ(runtime.value()->algorithm_snapshot("CAM01").value().metrics.candidates_created, 1U);
+
+    fail_worker.store(true);
+    configuration.config_revision += 1U;
+    auto failed = runtime.value()->reconfigure(configuration);
+    ASSERT_FALSE(failed);
+    EXPECT_EQ(failed.error().business_code, "SYS_INTERNAL_ERROR");
+    auto after_failure = runtime.value()->algorithm_snapshot("CAM01");
+    ASSERT_TRUE(after_failure);
+    EXPECT_TRUE(after_failure.value().metrics.rearm_pending);
+    EXPECT_EQ(after_failure.value().metrics.rearm_suppressed_results, 2U);
+    EXPECT_EQ(after_failure.value().config_revision, configuration.config_revision - 1U);
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeLanes, FourCameraContinuousAnomalyCreatesOneSourcePerCameraAndOneEvent)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto behavior = std::make_shared<ControlledDetectorBehavior>();
+    behavior->triggered_cameras = {"CAM01", "CAM02", "CAM03", "CAM04"};
+    auto configuration = four_camera_runtime_config();
+    configuration.algorithm.rearm_duration_ms = 500U;
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration,
+         .event_root = event_root,
+         .database = shared_database,
+         .detector_registry_configurer = controlled_detector_registration(behavior)});
+    ASSERT_TRUE(runtime);
+    ASSERT_TRUE(runtime.value()->start());
+
+    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
+        ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 0ms, camera_id)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().candidates_created == 4U; }));
+    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
+        ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 100ms, camera_id)));
+    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().confirmed_events == 4U; }));
+    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
+        ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 200ms, camera_id)));
+    ASSERT_TRUE(wait_until([&] {
+        return std::ranges::all_of(runtime.value()->algorithm_snapshots(), [](const auto& lane) {
+            return lane.metrics.rearm_pending && lane.metrics.rearm_suppressed_results == 1U;
+        });
+    }));
+    const auto aggregate = runtime.value()->snapshot();
+    EXPECT_EQ(aggregate.candidates_created, 4U);
+    EXPECT_EQ(aggregate.events_started, 1U);
+    EXPECT_EQ(aggregate.rearm_pending_lanes, 4U);
+    EXPECT_EQ(aggregate.rearm_suppressed_results, 4U);
+    auto page = shared_database->query_events({.limit = 10U});
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page.value().events.size(), 1U);
+    EXPECT_EQ(page.value().events.front().trigger_count, 4U);
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
+TEST(EventRuntimeLanes, SingleCameraContinuousAnomalyPersistsOneTriggerWithoutCapacityFailure)
+{
+    TemporaryDirectory temporary;
+    const auto event_root = temporary.path() / "events";
+    auto database =
+        EventMetadataDatabase::open({.database_path = temporary.path() / "database" / "events.db",
+                                     .event_root = event_root,
+                                     .backup_directory = temporary.path() / "backups"});
+    ASSERT_TRUE(database);
+    std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
+    auto behavior = std::make_shared<ControlledDetectorBehavior>();
+    behavior->triggered_cameras = {"CAM01"};
+    auto configuration = runtime_config();
+    configuration.algorithm.enabled = true;
+    configuration.algorithm.type = "controlled-runtime-test";
+    configuration.algorithm.confirmation_duration_ms = 10U;
+    configuration.algorithm.rearm_duration_ms = 500U;
+    auto runtime = EventRuntime::create(
+        {.configuration = configuration,
+         .event_root = event_root,
+         .database = shared_database,
+         .detector_registry_configurer = controlled_detector_registration(behavior)});
+    ASSERT_TRUE(runtime);
+    ASSERT_TRUE(runtime.value()->start());
+
+    for (std::uint64_t sequence = 1U; sequence <= 40U; ++sequence)
+    {
+        ASSERT_TRUE(runtime.value()->submit_frame(
+            frame(sequence, std::chrono::milliseconds{(sequence - 1U) * 100U})));
+        ASSERT_TRUE(wait_until([&] {
+            std::scoped_lock lock{behavior->mutex};
+            return std::ranges::find(behavior->completed_sequences["CAM01"], sequence) !=
+                   behavior->completed_sequences["CAM01"].end();
+        }));
+    }
+    ASSERT_TRUE(wait_until([&] {
+        auto lane = runtime.value()->algorithm_snapshot("CAM01");
+        return lane && lane.value().metrics.rearm_pending &&
+               lane.value().metrics.rearm_suppressed_results == 38U;
+    }));
+    const auto aggregate = runtime.value()->snapshot();
+    EXPECT_EQ(aggregate.candidates_created, 1U);
+    EXPECT_EQ(aggregate.events_started, 1U);
+    auto page = shared_database->query_events({.limit = 10U});
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page.value().events.size(), 1U);
+    EXPECT_EQ(page.value().events.front().trigger_count, 1U);
+    runtime.value()->request_stop();
+    EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
+}
+
 TEST(EventRuntimeLanes, RepeatedStartStopLeavesNoRegisteredRuntimeThreads)
 {
     TemporaryDirectory temporary;
@@ -1889,6 +2147,8 @@ TEST(EventRuntimeLanes, PublishesAggregateAndPerCameraMonitoringMetrics)
     EXPECT_TRUE(names.contains("algorithm.sampled_skipped_frames_total"));
     EXPECT_TRUE(names.contains("algorithm.missed_processing_slots_total"));
     EXPECT_TRUE(names.contains("algorithm.configured_processing_fps"));
+    EXPECT_TRUE(names.contains("algorithm.rearm_pending_lanes"));
+    EXPECT_TRUE(names.contains("algorithm.rearm_suppressed_results_total"));
     for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
     {
         const std::string prefix = "algorithm." + std::string{camera_id};
@@ -1905,6 +2165,8 @@ TEST(EventRuntimeLanes, PublishesAggregateAndPerCameraMonitoringMetrics)
         EXPECT_TRUE(names.contains(prefix + ".sampled_skipped_frames_total"));
         EXPECT_TRUE(names.contains(prefix + ".missed_processing_slots_total"));
         EXPECT_TRUE(names.contains(prefix + ".configured_processing_fps"));
+        EXPECT_TRUE(names.contains(prefix + ".rearm_pending"));
+        EXPECT_TRUE(names.contains(prefix + ".rearm_suppressed_results_total"));
     }
     runtime.value()->request_stop();
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));

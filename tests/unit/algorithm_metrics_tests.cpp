@@ -46,6 +46,8 @@ TEST(AlgorithmMetrics, RegistryContainsAllUniqueDocumentedMetrics)
                                                    "consecutiveBadBacklogWindows",
                                                    "consecutiveHealthyBacklogWindows",
                                                    "resultQueueRejected",
+                                                   "rearmPending",
+                                                   "rearmSuppressedResults",
                                                    "processCalls",
                                                    "lastProcessingTimeUs",
                                                    "averageProcessingTimeUs",
@@ -63,7 +65,7 @@ TEST(AlgorithmMetrics, RegistryContainsAllUniqueDocumentedMetrics)
                                                    "confirmedEvents",
                                                    "rejectedCandidates"};
     const auto descriptors = paperbreak::console::algorithm_metric_descriptors();
-    ASSERT_EQ(descriptors.size(), 32U);
+    ASSERT_EQ(descriptors.size(), 34U);
     std::set<std::string_view> keys;
     std::set<paperbreak::console::AlgorithmMetricGroup> groups;
     for (const auto& descriptor : descriptors)
@@ -154,7 +156,7 @@ TEST(AlgorithmMetrics, CsvExportsExactCurrentValuesAndEscapesPluginText)
     EXPECT_NE(contents.find("连续健康窗口"), std::string::npos);
     EXPECT_NE(contents.find("\"插件,\"\"值\"\"\""), std::string::npos);
     EXPECT_NE(contents.find("\"调试指标\""), std::string::npos);
-    EXPECT_EQ(static_cast<std::size_t>(std::count(contents.begin(), contents.end(), '\n')), 35U);
+    EXPECT_EQ(static_cast<std::size_t>(std::count(contents.begin(), contents.end(), '\n')), 37U);
     std::filesystem::remove(path, ignored);
 }
 
