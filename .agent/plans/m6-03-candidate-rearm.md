@@ -145,6 +145,7 @@ ctest --preset local-windows-vs2026-release
 - 2026-08-13：读取 ExecPlan 规范、需求、架构、路线图及相关源码/测试；确认工作树干净并创建独立跟进计划，状态 `in-progress`。
 - 2026-08-13：完成 schema v6、候选重新布防状态、热重配置种子、运行指标、IPC、Qt 页面和自动化测试；同步需求、架构、配置、IPC 与路线图。
 - 2026-08-13：完成 Debug 单元与 Release 构建/定向验证，记录运行中 Debug 实例造成的全量构建/单实例 smoke 阻断，以及既有存储性能和静态分析阻断；状态更新为 `completed`。
+- 2026-08-13：用户停止旧 Debug 进程后完成全量重建，Debug/Release 服务均成功校验 schema v6；同步更新算法页 smoke 的 34 张指标卡断言，Debug CTest 最终 30/30。
 
 ## 决策记录
 
@@ -156,6 +157,7 @@ ctest --preset local-windows-vs2026-release
 
 - 当前 cooldown 到期会在处理同一条结果前直接清除，导致持续异常周期性重新触发；现有双单槽和单事件线程边界足以在不新增队列的情况下修复。
 - 验证期间发现用户正在运行 Debug 服务和控制台；未终止这些进程，因此 Debug 全量链接分别被两个 exe 文件锁阻断，服务/Qt smoke 也受 IPC/单实例互斥影响。
+- 旧进程停止后发现其 Debug 二进制仍是 schema v5 版本；全量重建消除 `SYS_CONFIG_SCHEMA_UNSUPPORTED`。重建后的算法页 smoke 还暴露旧的 32 张指标卡断言，更新为 34 后通过。
 - Release 性能测试一次测得 97.48 MiB/s，低于既有 100 MiB/s 门槛；全仓 MSVC 静态分析仍被未修改的 `src/storage/src/nvme_cache.cpp:73` C28020 阻断，均未越界修改。
 
 ## 验证证据
@@ -165,10 +167,11 @@ ctest --preset local-windows-vs2026-release
 | 2026-08-13 | `git status --short` | 通过 | 任务开始时无输出 |
 | 2026-08-13 | Debug/Release `PaperBreakTests` 定向测试 | 通过 | Candidate、配置、IPC、Qt 客户端、指标、热重配置及单/四相机场景共 45 项通过 |
 | 2026-08-13 | `ctest --preset local-windows-vs2026-debug -R '^unit$'` | 通过 | 421 项：420 通过，1 项 Release-only 性能测试按设计跳过 |
-| 2026-08-13 | Debug 全量 build/CTest | 环境阻断 | 用户运行中的 Debug 服务和控制台锁定两个 exe；CTest 的服务/Qt smoke 与现有 IPC/单实例互斥冲突，未终止用户进程 |
+| 2026-08-13 | Debug 全量 build/CTest | 通过 | 旧进程停止后全量构建成功；修正 34 张指标卡 smoke 断言后 CTest 30/30 |
+| 2026-08-13 | Debug/Release `--validate-config` | 通过 | 两个服务均以退出码 0 接受 `configSchemaVersion=6` |
 | 2026-08-13 | Release configure/build | 通过 | `/W4 /WX` 全量构建成功；最终变更后重复构建成功 |
 | 2026-08-13 | Release 任务相关 `PaperBreakTests` | 通过 | 45/45，通过 Candidate、配置、客户端、指标、单/四相机持续异常及热重配置场景 |
-| 2026-08-13 | `ctest --preset local-windows-vs2026-release` | 部分通过 | 29/30；唯一失败为运行中 Debug 控制台导致 `qt_console_smoke` 单实例冲突 |
+| 2026-08-13 | `ctest --preset local-windows-vs2026-release` | 部分通过 | 初次 29/30；当时运行中的 Debug 控制台导致 `qt_console_smoke` 单实例冲突；重建后该 smoke 已在 Release 单独通过 |
 | 2026-08-13 | Release CTest 排除 Qt smoke | 既有性能阻断 | 28/29；存储吞吐 97.48 MiB/s，低于既有 100 MiB/s 门槛；另外 417 个单测通过 |
 | 2026-08-13 | `format-check`、`git diff --check` | 通过 | 全仓 C++ 格式及差异空白检查通过 |
 | 2026-08-13 | MSVC `/analyze` | 任务源通过 | event、config、console model 目标通过；service-core 与 Console 源直接 `ClCompile` 通过；全依赖被未修改的 NVMe C28020 阻断 |
@@ -176,4 +179,4 @@ ctest --preset local-windows-vs2026-release
 
 ## 完成摘要
 
-已完成候选事件恢复后重新布防：同相机终态后保持锁存，cooldown 与连续严格正常时长同时满足才解除；自动异常只累计抑制，人工可显式绕过。配置升级为 schema v6，服务、IPC、监控、Qt 配置页及 34 项 Console 指标同步；热重配置继承锁存和未到期 cooldown，不继承正常累计时长。SQLite、manifest、事件目录、上传协议、事件窗口与 16 条来源上限未修改。软件验证除已记录的运行中实例冲突、既有存储性能门槛和既有 NVMe 静态分析告警外通过；实体相机和目标工控机验收未执行。
+已完成候选事件恢复后重新布防：同相机终态后保持锁存，cooldown 与连续严格正常时长同时满足才解除；自动异常只累计抑制，人工可显式绕过。配置升级为 schema v6，服务、IPC、监控、Qt 配置页及 34 项 Console 指标同步；热重配置继承锁存和未到期 cooldown，不继承正常累计时长。SQLite、manifest、事件目录、上传协议、事件窗口与 16 条来源上限未修改。Debug 全量构建和 CTest 最终通过，Debug/Release 服务均已验证可读取 v6；剩余限制仅为已记录的既有 Release 存储性能门槛和既有 NVMe 静态分析告警。实体相机和目标工控机验收未执行。

@@ -982,7 +982,7 @@ int main(int argc, char* argv[])
         const bool algorithm_layout_and_cards_ready =
             algorithm_page_selected && algorithm_basic_grid && algorithm_roi_grid &&
             algorithm_decision_grid && algorithm_wide_columns == 4 &&
-            algorithm_narrow_columns <= 2 && metric_cards.size() == 32 &&
+            algorithm_narrow_columns <= 2 && metric_cards.size() == 34 &&
             runtime_groups.size() == 4 && metric_tooltips_present && algorithm_chart &&
             algorithm_export && algorithm_forbidden_text_removed;
         if (!algorithm_layout_and_cards_ready)
