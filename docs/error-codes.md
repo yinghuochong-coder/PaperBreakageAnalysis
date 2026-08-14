@@ -95,6 +95,7 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | 业务码 | 默认级别 | 默认可重试 | 触发条件和处理语义 |
 | --- | --- | ---: | --- |
 | `SYS_INTERNAL_ERROR` | Error | 否 | 未分类的内部不变量或顶层异常；必须保留模块/操作并限频，不能掩盖为成功 |
+| `SYS_BUSY` | Warning | 是 | 普通控制通道达到固定容量；拒绝最新请求，停止等保留控制不依赖普通队列空位 |
 | `SYS_DIAGNOSTIC_TOO_LARGE` | Error | 否 | 脱敏诊断 ZIP 的条目、条目数或总大小超过 8 MiB 内部上限；拒绝返回部分包 |
 | `SYS_DIAGNOSTIC_EXPORT_FAILED` | Error | 视 I/O | Qt 客户端无法创建、写入或原子提交用户选择的诊断/报警导出文件；现有目标不被部分覆盖 |
 | `SYS_SERVICE_START_FAILED` | Critical | 视阶段 | 必需启动阶段失败；按逆序回滚已启动组件 |
@@ -104,8 +105,13 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `SYS_SERVICE_RESTART_CANCELLED` | Warning | 否 | Qt 客户端退出时取消尚未完成的重启等待；不再启动新的 SCM 操作，保留服务实际状态 |
 | `SYS_SERVICE_CONTROL_FAILED` | Critical | 视操作 | SCM 调度、控制回调注册或状态上报失败；服务进入受控停止并保留 Win32 原始码 |
 | `SYS_SERVICE_STOPPING` | Warning | 是 | 服务已拒绝新的写命令；客户端可在服务重新运行后重试 |
+| `SYS_NOT_SUPPORTED` | Error | 否 | 已知操作或能力没有由当前组件/会话声明；拒绝且不进入业务 dispatcher，不用厂商“不支持”码替代 |
 | `SYS_SHUTDOWN_TIMEOUT` | Critical | 否 | 组件未在共享关闭截止时间内停止；记录未完成阶段 |
 | `SYS_TIME_JUMP_DETECTED` | Warning | 否 | 墙上时间与单调时间增量显著不一致；继续单调计时并降低时间质量 |
+| `TIME_PROBE_UNAVAILABLE` | Warning | 是 | 当前系统或相机时间探针不支持、超时或暂不可用；按固定优先级降级并保留适配器原始诊断 |
+| `TIME_MODEL_INVALID` | Error | 否 | 探针样本、频率、锚点、修订或 checked arithmetic 不能形成有效模型；不发布半成品模型 |
+| `TIME_MAPPING_UNAVAILABLE` | Error | 是 | 没有覆盖目标 T0/ticks 的已发布模型或映射溢出；保留原始/接收时间并明确标为未同步 |
+| `TIME_SYNC_DEGRADED` | Warning | 是 | 当前来源或不确定度只能满足降级语义；不得报告硬件同步或未经实测的精度 |
 | `SYS_ID_COLLISION` | Critical | 是 | 新生成 ID 命中本地唯一约束；重新生成并记录生成器健康状态 |
 | `SYS_ID_GENERATION_FAILED` | Critical | 是 | 本地 UUIDv7 时间范围或系统熵源不可用；拒绝创建无可靠身份的事件并报警 |
 | `SYS_CONFIG_INVALID` | Error | 否 | 配置 JSON、schema、类型、范围或依赖校验失败；保持最后有效配置 |
@@ -170,6 +176,9 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `EVENT_NOT_FOUND` | Error | 否 | 请求的 `EventId` 不存在或不可见 |
 | `EVENT_VERSION_CONFLICT` | Warning | 否 | 事件命令的期望版本过期；返回当前版本，不覆盖新状态 |
 | `EVENT_INVALID_TRANSITION` | Error | 否 | 命令不符合事件状态机且不是可识别的幂等重复 |
+| `EVENT_LOCK_CONFLICT` | Critical | 否 | 相同全局 eventId 携带不同 T0、触发节点/相机/来源或窗口；保留首次持久结果并拒绝覆盖 |
+| `EVENT_LOCK_OUT_OF_RANGE` | Error | 否 | T0 过度超前或早于全部内存/NVMe 可用范围；返回 FAILED 和实际可用范围，不创建虚假完整事件 |
+| `EVENT_LOCK_CAPACITY_FULL` | Critical | 是 | 活动事件/租约容量不足以接受新的外部 T0；拒绝最新请求，禁止 drop-oldest 或阻塞采集 |
 | `EVENT_BUFFER_INCOMPLETE` | Critical | 否 | 前后窗口缺帧或租约不足；保留可用证据并明确标为不完整 |
 | `EVENT_KEYFRAME_SELECTION_FAILED` | Error | 否 | 冻结窗口、逐帧证据、确认帧引用或分数非法；拒绝本次选择并保留完整原始事件序列 |
 | `EVENT_KEYFRAME_QUEUE_FULL` | Error | 否 | 固定关键帧任务队列容量不足、内存预算不足或已经停止接收；事件内任务整批拒绝并标记关键帧不完整，原始事件仍优先 |
@@ -236,9 +245,11 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `UPLINK_PROTOCOL_VERSION_UNSUPPORTED` | Error | 否 | 对端没有共同的 Uplink 协议版本；拒绝建立会话并报告双方版本 |
 | `UPLINK_SERVER_BUSY` | Warning | 是 | 设备、活动上传、存储任务或设备命令队列达到有界容量；按服务端提示退避 |
 | `UPLINK_AUTH_FAILED` | Error | 否 | 认证/证书拒绝；不得记录凭据，不以紧循环重试 |
-| `UPLINK_COMMAND_NOT_CONFIRMED` | Error | 否 | 除状态查询外的远程命令缺少 `operatorConfirmed=true`；不进入服务命令 dispatcher |
+| `UPLINK_COMMAND_NOT_CONFIRMED` | Error | 否 | 除状态查询和自动 `event.lockByUtc` 外的远程命令缺少 `operatorConfirmed=true`；不进入服务命令 dispatcher |
 | `UPLINK_COMMAND_EXPIRED` | Warning | 否 | 远程命令的 RFC 3339 截止时间已过；缓存并返回拒绝结果，不执行副作用 |
 | `UPLINK_COMMAND_CONFLICT` | Error | 否 | 相同 `commandId` 携带不同类型、正文、截止时间或确认状态；保留原结果并拒绝冲突内容 |
+| `STATUS_PAYLOAD_TOO_LARGE` | Error | 否 | 完整状态序列化超过 1 MiB；拒绝整条消息并报警，不发送截断 JSON |
+| `PREVIEW_FRAME_TOO_LARGE` | Warning | 否 | 远程预览头超过 64 KiB 或 JPEG 超过 2 MiB；只丢当前预览并计数，不反压采集或可靠上传 |
 | `UPLOAD_ENQUEUE_FAILED` | Critical | 是 | 已提交事件无法建立持久上传任务；事件保持本地并报警 |
 | `UPLOAD_JOB_CONFLICT` | Error | 否 | 相同上传幂等键携带不同事件、资源、路径、摘要或负载；保留原任务并拒绝覆盖 |
 | `UPLOAD_JOB_INVALID` | Error | 否 | 持久任务缺少事件、逻辑文件、受限相对路径或 manifest 字段；拒绝执行并保留诊断 |

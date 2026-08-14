@@ -1,0 +1,24 @@
+{
+  "protocolVersion": 1,
+  "messageType": "alarm",
+  "messageId": "alarm-break-001",
+  "machineId": "EDGE-001",
+  "sequence": 501,
+  "timestamp": "2026-08-14T08:12:15.124Z",
+  "payload": {
+    "code": "BREAK_EVENT_TRIGGERED",
+    "eventId": "019c8c55-2f20-7a31-8b52-6e3b9ca1d88f",
+    "triggerTimestampUtcNs": "1786671135123456789",
+    "triggerMachineId": "EDGE-001",
+    "triggerCameraId": "CAM01",
+    "triggerSource": "ALGORITHM",
+    "eventType": "PAPER_BREAK",
+    "eventLevel": "ALARM",
+    "syncState": "SYNCED",
+    "uncertaintyNs": "500000",
+    "clockModelRevision": 17,
+    "preEventMs": 10000,
+    "postEventMs": 10000,
+    "configRevision": 93
+  }
+}

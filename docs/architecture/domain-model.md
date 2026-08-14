@@ -152,7 +152,7 @@ EVT-019870f2-6c80-7a31-9b52-6e3b9ca1d88f
 
 ## 4. 时间语义
 
-### 4.1 三类时间
+### 4.1 三类时间与稳定枚举
 
 | 类型 | 来源 | 必须用于 | 不得用于 |
 | --- | --- | --- | --- |
@@ -162,15 +162,90 @@ EVT-019870f2-6c80-7a31-9b52-6e3b9ca1d88f
 
 `Duration` 是两个同一单调时钟点的差值，使用明确单位的整数或 `std::chrono` 类型。配置字段必须在名称中带单位，例如 `postEventMs` 或在 schema 中声明单位，禁止无单位裸数。
 
-### 4.2 帧与事件时间
+时间来源 `ClockSource` 冻结为下列值，C++ 使用 `enum class`，SQLite 使用受
+`CHECK` 约束的文本值，JSON 使用完全相同的大写字符串：
 
-每帧至少记录：
+| 值 | 语义 | 允许的最佳状态 |
+| --- | --- | --- |
+| `PTP_HARDWARE` | 目标网卡/相机硬件时间链路已由探针确认 | `SYNCED` |
+| `PTP_SOFTWARE` | 操作系统软件时间戳 PTP | `SYNCED` |
+| `NTP` | 操作系统 NTP 同步 | `SYNCED` |
+| `OFFSET_MODEL` | 相机 ticks 与本机 UTC 的估计偏移模型 | `DEGRADED` |
+| `RECEIVE_CLOCK` | 仅使用驱动取帧完成附近的本机 UTC | `DEGRADED` |
+| `UNKNOWN` | 来源未知或尚未采样 | `UNKNOWN` |
 
-- `receivedMonotonicTime`：工控机接收的单调时间；
-- `receivedWallClockTime`：同一接收点附近采样的墙上时间；
-- 可选 `cameraTimestamp`、原始计时单位和 `cameraTimestampQuality`。
+同步状态 `SyncState` 冻结为 `SYNCED`、`SYNCING`、`DEGRADED`、`UNSYNCED`、
+`UNKNOWN`。枚举值未知时必须拒绝，不得映射为 `UNKNOWN`；`UNKNOWN` 只表示发送方明确报告
+未知。没有硬件探针证据时不得报告 `PTP_HARDWARE`；没有可用校正 UTC 时必须为
+`UNSYNCED` 或 `UNKNOWN`。
 
-每个已创建事件至少记录：
+### 4.2 冻结的时间值对象
+
+下列结构是跨 T1、E3、O4、D2 的契约，不表示 R0-02 已实现对应 C++ 类型。所有 `*Ns`
+成员在 C++ 和 SQLite 中使用有符号 64 位整数；非负量仍使用 `int64_t` 并校验
+`0..INT64_MAX`，避免 SQLite 无符号整数语义不一致。相机原始 ticks、频率、帧号和序号不是
+纳秒字段，在 C++ 中保持 `uint64_t`。
+
+`FrameTimeMetadata`：
+
+| 字段 | C++ 类型 | 可空 | 约束 |
+| --- | --- | ---: | --- |
+| `cameraTimestampTicks` | `optional<uint64_t>` | 是 | 厂商原始计数，不得被校正值覆盖 |
+| `cameraTimestampFrequencyHz` | `optional<uint64_t>` | 是 | 与 ticks 同时有值或同时为空；必须大于 0 |
+| `receivedMonotonicNs` | `int64_t` | 否 | 当前进程 `steady_clock` epoch；不跨重启序列化复用 |
+| `receivedUtcNs` | `int64_t` | 否 | 取帧完成附近的 Unix epoch ns |
+| `correctedCaptureUtcNs` | `optional<int64_t>` | 是 | 模型映射的采集 UTC；失步时为空 |
+| `clockSource` | `ClockSource` | 否 | 生成本帧时间元数据时的来源 |
+| `clockOffsetNs` | `optional<int64_t>` | 是 | 原始时间到 UTC 的有符号估计偏移 |
+| `uncertaintyNs` | `optional<int64_t>` | 是 | 非负保守误差上界 |
+| `syncState` | `SyncState` | 否 | 与校正时间和来源一致 |
+| `clockModelRevision` | `uint64_t` | 否 | 生成该帧所用模型修订；0 表示没有已发布模型 |
+
+该结构在帧离开采集适配器前一次性形成，此后不可修改。`correctedCaptureUtcNs` 有值时
+`clockModelRevision` 必须大于 0，`uncertaintyNs` 必须有值，状态不得为 `UNSYNCED` 或
+`UNKNOWN`。没有校正值仍必须保留 ticks、接收 UTC 和接收单调时间。
+
+`ClockModelSnapshot` 是模型计算使用的不可变快照：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `modelRevision` | `uint64_t` | 进程内严格递增，0 保留为“无模型” |
+| `cameraId` | `optional<CameraId>` | 空表示工控机模型；有值表示逐相机模型 |
+| `clockSource` / `syncState` | 稳定枚举 | 快照来源与质量 |
+| `anchorMonotonicNs` / `anchorUtcNs` | `int64_t` | UTC↔单调映射锚点 |
+| `anchorCameraTicks` | `optional<uint64_t>` | 相机模型的 ticks 锚点 |
+| `cameraTimestampFrequencyHz` | `optional<uint64_t>` | 相机模型的计数频率 |
+| `offsetNs` | `optional<int64_t>` | 当前估计偏移 |
+| `uncertaintyNs` | `optional<int64_t>` | 非负保守误差上界 |
+| `maximumObservedOffsetNs` | `optional<int64_t>` | 非负观测绝对偏移最大值 |
+| `validFromMonotonicNs` | `int64_t` | 模型开始适用的本进程单调时间 |
+| `lastSynchronizedUtcNs` | `optional<int64_t>` | 最近成功同步 UTC |
+| `grandmasterIdentity` | `optional<string>` | 探针确实提供时保存，否则为空 |
+| `lastErrorCode` | `optional<string>` | 稳定业务错误码，不以厂商码替代 |
+
+模型只允许使用锚点差值映射，所有加减乘除必须检查溢出。相机 ticks 映射使用频率的商/余数
+分解做整数舍入，不依赖 `double`，也不假设 MSVC 支持 `__int128`。T0 映射使用接收命令时
+已经发布且覆盖该时间范围的同一快照；事件保存模型修订和映射结果，后续模型不得回写历史。
+
+`ClockSyncSnapshot` 是状态/报警使用的不可变投影：
+
+| 字段 | 类型 | 规则 |
+| --- | --- | --- |
+| `available` | `bool` | 是否已有可解释快照 |
+| `currentUtcNs` | `optional<int64_t>` | `available=false` 时为空 |
+| `clockSource` / `syncState` | 稳定枚举 | 不可用时分别为 `UNKNOWN` |
+| `offsetNs` / `uncertaintyNs` / `maximumObservedOffsetNs` | `optional<int64_t>` | 每项另有同名 `Available` 布尔字段 |
+| `lastSynchronizedUtcNs` | `optional<int64_t>` | 另有 `lastSynchronizedUtcNsAvailable` |
+| `grandmasterIdentity` | `optional<string>` | 另有 `grandmasterAvailable`；不支持不得虚构 |
+| `modelRevision` | `uint64_t` | 无模型为 0 |
+| `lastErrorCode` | `optional<string>` | 无错误为空，不用空字符串冒充错误 |
+
+可用性布尔值与对应可空值必须一致；真实数值 0 必须以 `available=true` 与不可用区分。
+
+### 4.3 帧与事件时间
+
+每帧必须保存完整 `FrameTimeMetadata`；相机原始计数、接收时间和校正时间是并列证据，任一
+派生值不得覆盖其他字段。每个已创建事件至少记录：
 
 - 候选、确认（若有）、窗口开始和结束的单调时间，供本进程正确执行窗口；
 - 对应墙上时间，供清单、数据库和 UI 使用；
@@ -180,9 +255,10 @@ EVT-019870f2-6c80-7a31-9b52-6e3b9ca1d88f
 NVMe 滚动缓存的索引和租约也只在当前 session 有效；新进程不扫描或恢复旧 session，更不会拿
 上次进程的 `steady_clock` 数值继续计时。
 
-### 4.3 外部时间格式和时区
+### 4.4 外部时间格式和时区
 
-JSON、IPC、事件清单、审计导出和网络协议的规范输出统一为 UTC RFC 3339，固定三位毫秒：
+人类可读信封时间、命令截止时间、日志、审计和 UI API 的规范输出统一为 UTC RFC 3339，
+固定三位毫秒：
 
 ```text
 2026-07-30T05:47:00.123Z
@@ -193,13 +269,18 @@ JSON、IPC、事件清单、审计导出和网络协议的规范输出统一为 
 - 输出必须使用 `Z`，不得省略时区，也不得输出未标注的本地时间；
 - 输入可以接受等价的 `Z` 或显式 `±HH:MM` 偏移，校验后立即归一化为 UTC；
 - 不接受时区缩写（如 `CST`）、本地化日期、无偏移时间或闰秒 `:60`；
-- SQLite 物理列可以使用 UTC Unix epoch 毫秒整数以便排序，但 schema 必须明确单位，API 输出仍转换为上述格式；
+- 字段名以 `Ns` 结尾或协议明确声明单位为纳秒时是例外：JSON 必须使用规范十进制字符串，C++ 和 SQLite 必须使用有符号 64 位整数；
+- 纳秒字符串只允许 `0` 或 `-?[1-9][0-9]{0,18}`，解析后必须落在 `INT64_MIN..INT64_MAX`；不接受 JSON 数字、前导 `+`、前导零、指数或小数；不确定度等非负字段还必须在 `0..INT64_MAX`；
+- SQLite 列名必须带 `_ns` 并使用 `INTEGER`；可空值使用 SQL `NULL`，schema 对非负值和枚举加 `CHECK`；
 - UI 必须将墙上时间转换为运行控制台的操作系统本地时区，例如 `2026-07-30 13:47:00.123 +08:00`，并同时显示偏移；本地展示值不得参与 ID、冲突检测或幂等判断；
 - 目录可以按配置的工厂本地日期分组，但完整 `EventId` 才是目录身份，夏令时或时间回拨不得覆盖已有目录。
 
-### 4.4 系统时间跳变和质量
+### 4.5 系统时间跳变和质量
 
-`clockQuality` 至少支持 `Unknown`、`Synchronized`、`Degraded`、`JumpDetected`。健康监测通过比较墙上时间增量与单调时间增量识别显著跳变，阈值由后续配置 schema 定义。
+兼容字段 `clockQuality` 不再作为新接口事实源；新代码使用 `SyncState`。读取旧事件时
+`Unknown`→`UNKNOWN`、`Synchronized`→`SYNCED`、`Degraded`→`DEGRADED`，
+`JumpDetected`→`DEGRADED` 并保留跳变错误码。健康监测通过比较墙上时间增量与单调时间
+增量识别显著跳变，阈值由后续配置 schema 定义。
 
 发现跳变时必须：
 

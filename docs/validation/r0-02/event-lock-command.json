@@ -1,0 +1,22 @@
+{
+  "protocolVersion": 1,
+  "messageType": "command",
+  "messageId": "command-lock-001",
+  "machineId": "EDGE-002",
+  "sequence": 612,
+  "timestamp": "2026-08-14T08:12:15.150Z",
+  "payload": {
+    "commandId": "lock-019c8c55-edge-002",
+    "commandType": "event.lockByUtc",
+    "deadline": "2026-08-14T08:12:20.150Z",
+    "body": {
+      "eventId": "019c8c55-2f20-7a31-8b52-6e3b9ca1d88f",
+      "triggerTimestampUtcNs": "1786671135123456789",
+      "triggerMachineId": "EDGE-001",
+      "triggerCameraId": "CAM01",
+      "triggerSource": "ALGORITHM",
+      "preEventMs": 10000,
+      "postEventMs": 10000
+    }
+  }
+}

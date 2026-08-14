@@ -1,0 +1,19 @@
+{
+  "protocolVersion": 1,
+  "requestId": "session-r0-02-001",
+  "sessionId": "session-edge-001",
+  "machineId": "EDGE-001",
+  "serverTime": "2026-08-14T08:00:00.000Z",
+  "heartbeatSeconds": 5,
+  "webSocketUrl": "ws://192.0.2.10:18080/api/uplink/v1/sessions/session-edge-001/stream",
+  "extensions": {
+    "paperbreak": {
+      "capabilityContractVersion": 1,
+      "acceptedCapabilities": [
+        "event.lockByUtc",
+        "preview.frame.time",
+        "status.timeSync"
+      ]
+    }
+  }
+}

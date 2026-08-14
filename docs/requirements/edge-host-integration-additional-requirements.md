@@ -22,7 +22,7 @@
 - **传统模式**：仅有 Uplink v1 基础能力，不能按外部 T0 锁定其他工控机缓存的模式。
 - **P0**：首版集成闭环必须完成；**P1**：生产增强；**P2**：后续演进。
 
-JSON 中的纳秒时间使用十进制字符串传输，避免通用 JSON 数值实现丢失 64 位整数精度；工控机内部和持久层使用 64 位整数。
+JSON 中的纳秒时间使用十进制字符串传输，避免通用 JSON 数值实现丢失 64 位整数精度；工控机内部和持久层统一使用有符号 64 位整数，非负纳秒量通过范围约束保证。
 
 ## 3. 当前实现基线与差距
 
@@ -77,7 +77,7 @@ JSON 中的纳秒时间使用十进制字符串传输，避免通用 JSON 数值
 | `correctedCaptureUtcNs` | int64/null | 经时钟模型校正的真实采集 UTC 时间 |
 | `clockSource` | enum | `PTP_HARDWARE`、`PTP_SOFTWARE`、`NTP`、`OFFSET_MODEL`、`RECEIVE_CLOCK`、`UNKNOWN` |
 | `clockOffsetNs` | int64/null | 原始时间到 UTC 的估计偏移 |
-| `uncertaintyNs` | uint64/null | 校正时间的不确定度 |
+| `uncertaintyNs` | int64/null | 校正时间的不确定度；非负 |
 | `syncState` | enum | `SYNCED`、`SYNCING`、`DEGRADED`、`UNSYNCED`、`UNKNOWN` |
 
 | ID | 优先级 | 需求 |
@@ -90,7 +90,7 @@ JSON 中的纳秒时间使用十进制字符串传输，避免通用 JSON 数值
 
 ### 4.3 同步状态快照
 
-工控机级和每相机级状态至少包含：`currentUtcNs`、`clockSource`、`offsetNs`、`uncertaintyNs`、`maximumObservedOffsetNs`、`lastSynchronizedAt`、`syncState`、`grandmasterIdentity`（可空）、`modelRevision` 和最近错误码。
+工控机级和每相机级状态至少包含：`currentUtcNs`、`clockSource`、`offsetNs`、`uncertaintyNs`、`maximumObservedOffsetNs`、`lastSynchronizedUtcNs`、`syncState`、`grandmasterIdentity`（可空）、`modelRevision` 和最近错误码。
 
 ## 5. 严格统一 T0 事件协同
 
@@ -108,7 +108,7 @@ JSON 中的纳秒时间使用十进制字符串传输，避免通用 JSON 数值
 ```json
 {
   "code": "BREAK_EVENT_TRIGGERED",
-  "eventId": "EDGE-001-...",
+  "eventId": "019c8c55-2f20-7a31-8b52-6e3b9ca1d88f",
   "triggerTimestampUtcNs": "1786671135123456789",
   "triggerMachineId": "EDGE-001",
   "triggerCameraId": "CAM01",
@@ -117,6 +117,7 @@ JSON 中的纳秒时间使用十进制字符串传输，避免通用 JSON 数值
   "eventLevel": "ALARM",
   "syncState": "SYNCED",
   "uncertaintyNs": "500000",
+  "clockModelRevision": 17,
   "preEventMs": 10000,
   "postEventMs": 10000,
   "configRevision": 93
@@ -131,7 +132,7 @@ JSON 中的纳秒时间使用十进制字符串传输，避免通用 JSON 数值
 
 ```json
 {
-  "eventId": "EDGE-001-...",
+  "eventId": "019c8c55-2f20-7a31-8b52-6e3b9ca1d88f",
   "triggerTimestampUtcNs": "1786671135123456789",
   "triggerMachineId": "EDGE-001",
   "triggerCameraId": "CAM01",
@@ -158,7 +159,7 @@ JSON 中的纳秒时间使用十进制字符串传输，避免通用 JSON 数值
 
 ```json
 {
-  "eventId": "EDGE-001-...",
+  "eventId": "019c8c55-2f20-7a31-8b52-6e3b9ca1d88f",
   "machineId": "EDGE-002",
   "duplicate": false,
   "lockStatus": "PARTIAL",
@@ -168,15 +169,16 @@ JSON 中的纳秒时间使用十进制字符串传输，避免通用 JSON 数值
   "actualEndUtcNs": "1786671145123456789",
   "syncState": "DEGRADED",
   "uncertaintyNs": "3000000",
+  "clockModelRevision": 22,
   "cameras": [
     {
       "cameraId": "CAM01",
-      "status": "LOCKED",
+      "status": "PARTIAL",
       "frameCount": 1180,
       "firstCaptureUtcNs": "1786671126123456789",
       "lastCaptureUtcNs": "1786671145100000000",
       "sequenceGaps": 2,
-      "errorCode": ""
+      "errorCode": "EVENT_BUFFER_INCOMPLETE"
     }
   ]
 }

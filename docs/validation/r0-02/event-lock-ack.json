@@ -1,0 +1,36 @@
+{
+  "protocolVersion": 1,
+  "messageType": "command.result",
+  "messageId": "command-lock-result-001",
+  "machineId": "EDGE-002",
+  "sequence": 613,
+  "timestamp": "2026-08-14T08:12:15.190Z",
+  "payload": {
+    "commandId": "lock-019c8c55-edge-002",
+    "success": true,
+    "result": {
+      "eventId": "019c8c55-2f20-7a31-8b52-6e3b9ca1d88f",
+      "machineId": "EDGE-002",
+      "duplicate": false,
+      "lockStatus": "PARTIAL",
+      "requestedStartUtcNs": "1786671125123456789",
+      "requestedEndUtcNs": "1786671145123456789",
+      "actualStartUtcNs": "1786671126123456789",
+      "actualEndUtcNs": "1786671145123456789",
+      "syncState": "DEGRADED",
+      "uncertaintyNs": "3000000",
+      "clockModelRevision": 22,
+      "cameras": [
+        {
+          "cameraId": "CAM01",
+          "status": "PARTIAL",
+          "frameCount": 1180,
+          "firstCaptureUtcNs": "1786671126123456789",
+          "lastCaptureUtcNs": "1786671145100000000",
+          "sequenceGaps": 2,
+          "errorCode": "EVENT_BUFFER_INCOMPLETE"
+        }
+      ]
+    }
+  }
+}

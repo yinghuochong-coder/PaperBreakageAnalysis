@@ -1,0 +1,13 @@
+{
+  "requestId": "session-r0-02-001",
+  "machineId": "EDGE-001",
+  "productionLineId": "LINE-01",
+  "softwareVersion": "0.2.0",
+  "supportedProtocolVersions": [1],
+  "capabilities": [
+    "event.lockByUtc",
+    "preview.frame.time",
+    "status.timeSync",
+    "system.requestStatus"
+  ]
+}

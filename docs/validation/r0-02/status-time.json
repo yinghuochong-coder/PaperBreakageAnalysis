@@ -1,0 +1,60 @@
+{
+  "protocolVersion": 1,
+  "messageType": "status",
+  "messageId": "status-time-001",
+  "machineId": "EDGE-001",
+  "sequence": 700,
+  "timestamp": "2026-08-14T08:12:16.123Z",
+  "payload": {
+    "timeSync": {
+      "available": true,
+      "currentUtcNs": "1786671136123456789",
+      "clockSource": "PTP_HARDWARE",
+      "offsetNs": "125000",
+      "offsetAvailable": true,
+      "uncertaintyNs": "500000",
+      "uncertaintyAvailable": true,
+      "maximumObservedOffsetNs": "640000",
+      "maximumObservedOffsetAvailable": true,
+      "lastSynchronizedUtcNs": "1786671136000000000",
+      "lastSynchronizedUtcNsAvailable": true,
+      "syncState": "SYNCED",
+      "grandmasterIdentity": "00-1D-C1-FF-FE-12-34-56",
+      "grandmasterAvailable": true,
+      "modelRevision": 17,
+      "lastErrorCode": null
+    },
+    "cameras": [
+      {
+        "cameraId": "CAM01",
+        "timeSync": {
+          "available": true,
+          "currentUtcNs": "1786671136123456789",
+          "clockSource": "OFFSET_MODEL",
+          "offsetNs": "-245000",
+          "offsetAvailable": true,
+          "uncertaintyNs": "3000000",
+          "uncertaintyAvailable": true,
+          "maximumObservedOffsetNs": "4200000",
+          "maximumObservedOffsetAvailable": true,
+          "lastSynchronizedUtcNs": "1786671136000000000",
+          "lastSynchronizedUtcNsAvailable": true,
+          "syncState": "DEGRADED",
+          "grandmasterIdentity": null,
+          "grandmasterAvailable": false,
+          "modelRevision": 18,
+          "lastErrorCode": "TIME_SYNC_DEGRADED"
+        },
+        "lastFrameTime": {
+          "receivedUtcNs": "1786671136123000000",
+          "correctedCaptureUtcNs": "1786671136121000000",
+          "correctedCaptureUtcNsAvailable": true,
+          "syncState": "DEGRADED",
+          "uncertaintyNs": "3000000",
+          "uncertaintyAvailable": true,
+          "clockModelRevision": 18
+        }
+      }
+    ]
+  }
+}

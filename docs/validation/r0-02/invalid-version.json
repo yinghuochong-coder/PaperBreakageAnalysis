@@ -1,0 +1,9 @@
+{
+  "protocolVersion": 2,
+  "messageType": "status",
+  "messageId": "invalid-version-001",
+  "machineId": "EDGE-001",
+  "sequence": 1,
+  "timestamp": "2026-08-14T08:12:16.123Z",
+  "payload": {}
+}

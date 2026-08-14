@@ -1,0 +1,16 @@
+{
+  "protocolVersion": 1,
+  "messageType": "preview.frame",
+  "messageId": "preview-time-001",
+  "machineId": "EDGE-001",
+  "cameraId": "CAM01",
+  "sequence": 810,
+  "timestamp": "2026-08-14T08:12:16.200Z",
+  "jpegBytes": 4096,
+  "correctedCaptureUtcNs": "1786671136121000000",
+  "correctedCaptureUtcNsAvailable": true,
+  "syncState": "DEGRADED",
+  "uncertaintyNs": "3000000",
+  "uncertaintyAvailable": true,
+  "clockModelRevision": 18
+}

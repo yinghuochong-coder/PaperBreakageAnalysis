@@ -5,11 +5,11 @@
 | 项目 | 内容 |
 | --- | --- |
 | 状态 | 架构基线 |
-| 版本 | 1.0 |
-| 基线日期 | 2026-07-31 |
+| 版本 | 1.1 |
+| 基线日期 | 2026-08-14 |
 | 适用版本 | 首期边缘工控机软件 |
-| 需求来源 | `docs/requirements/edge-system-requirements.md` |
-| 路线图来源 | `docs/roadmap/development-roadmap.md`，任务 G0-01 |
+| 需求来源 | `docs/requirements/edge-system-requirements.md`、`docs/requirements/edge-host-integration-additional-requirements.md` |
+| 路线图来源 | `docs/roadmap/development-roadmap.md`，任务 G0-01、R0-02 |
 | 目标平台 | Windows 10/11 x64、Visual Studio 2026 MSVC、C++20、Qt 6、CMake |
 | 目标设备 | 最多四台 Hikrobot MV-CS020-60GM |
 
@@ -153,9 +153,9 @@ Qt 桌面客户端只承担：
 │                    │                                                  │
 │                    ▼                                                  │
 │           ServiceRuntime（生命周期/所有权根）                           │
-│   ┌──────────┬───────────┬──────────┬──────────┬──────────────┐       │
-│   ▼          ▼           ▼          ▼          ▼              ▼       │
-│ Config   CameraManager  Pipeline  EventMgr   Monitoring     IPC Server │
+│   ┌──────────┬──────────┬───────────┬──────────┬──────────────┐       │
+│   ▼          ▼          ▼           ▼          ▼              ▼       │
+│ Config   TimeSync   CameraManager  Pipeline  EventMgr    Monitoring/IPC│
 │              │           │  │        │             │            │      │
 │      ICameraProvider     │  │        ├─ Storage    │            │      │
 │             │            │  │        ├─ SQLite     │            │      │
@@ -179,13 +179,14 @@ Qt 桌面客户端只承担：
 | 目标 | 职责 | 可依赖 | 禁止依赖 |
 | --- | --- | --- | --- |
 | `paperbreak_common` | 领域基础类型、时间、错误、Result、版本、通用有界容器 | C++ 标准库、批准的基础依赖 | Widgets、MVS、SCM、具体上传协议 |
+| `paperbreak_time` | 稳定时间值对象、探针端口、`TimeSyncRuntime`、模型选择/发布和 UTC↔单调映射 | common | Win32、MVS、Qt Network、SQLite、业务状态 |
 | `paperbreak_platform` | 文件原子替换、ACL、凭据、进程指标和服务控制等窄平台端口 | common | Win32 头文件和具体平台实现 |
-| `paperbreak_platform_windows` | Windows 平台端口及系统健康指标源实现 | platform、common、monitoring 接口、Windows API | 业务状态、Widgets、MVS |
+| `paperbreak_platform_windows` | Windows 平台端口、系统健康指标源和操作系统 PTP/NTP 探针实现 | platform、common、time/monitoring 接口、Windows API | 业务状态、Widgets、MVS |
 | `paperbreak_config` | 强类型配置、schema 校验、版本、原子存储 | common、JSON、受控平台文件适配 | 相机实现、UI、上传实现 |
 | `paperbreak_logging` | 日志门面、分类、脱敏、滚动和刷新 | common、spdlog | 业务模块反向依赖 |
-| `paperbreak_camera` | 相机接口、能力、状态机、FramePacket、最多六路的运维控制会话 | common、monitoring 接口 | MVS 头文件、Widgets |
+| `paperbreak_camera` | 相机接口、能力、状态机、FramePacket、时间模型读取端口、最多四路的运维控制会话 | common、time、monitoring 接口 | MVS 头文件、Widgets |
 | `paperbreak_camera_mock` | 仅在 `BUILD_TESTING=ON` 时提供模拟设备、模拟帧和故障注入；不安装 | camera、common | MVS、生产应用 |
-| `paperbreak_camera_hikrobot` | MVS 枚举、句柄、参数、取流和错误翻译 | camera、common、MVS SDK | UI、事件、上传 |
+| `paperbreak_camera_hikrobot` | MVS 枚举、句柄、参数、取流、相机时钟探针和错误翻译 | camera、time、common、MVS SDK | UI、事件、上传 |
 | `paperbreak_pipeline` | 预处理节点、帧路由、顺序和背压策略 | common、camera、algorithm 接口、event 接口 | MVS、SQLite、网络实现 |
 | `paperbreak_algorithm` | `IBreakDetector`、结果模型、候选判定接口 | common、camera 的只读帧视图 | MVS、存储、UI |
 | `paperbreak_algorithm_mock` | 手动/周期/灰度等模拟检测器 | algorithm | 相机或存储实现 |
@@ -234,6 +235,8 @@ UI ──仅通过 IPC──> 服务用例
 7. 只有进程组合根可以装配 Hikrobot 生产适配器；测试目标可显式注入 Mock；
 8. 平台类型、SDK 句柄、Qt Widget、SQLite 句柄不得出现在领域公开头文件中。
 9. 通用业务模块只依赖 `paperbreak_platform` 的窄端口；除 Hikrobot 适配器因 SDK 所需外，Win32 类型只允许出现在 Windows 平台实现和服务宿主。
+10. `paperbreak_time` 定义无平台类型的 `ISystemClockProbe`、`ICameraClockProbe` 和不可变快照；Windows/Hikrobot 目标实现端口，`TimeSyncRuntime` 不直接调用 Win32 或 MVS。
+11. event、uplink、monitoring 只能读取时间快照/映射接口，不得反向修改模型；采集侧不得等待时间线程。
 
 ### 5.4 禁止依赖的机械检查
 
@@ -259,8 +262,7 @@ struct FramePacket {
     CameraId cameraId;
     std::uint64_t cameraFrameNumber;
     std::uint64_t sequenceNumber;
-    MonotonicTime monotonicTime;
-    WallClockTime wallClockTime;
+    FrameTimeMetadata time;
     FrameGeometry geometry;
     PixelFormat pixelFormat;
     std::shared_ptr<const FrameBuffer> buffer;
@@ -287,6 +289,10 @@ struct FramePacket {
 | 相机时间戳 | 设备诊断和多相机关联，标记有效性 | 在未同步/未验证时作为唯一事件时钟 |
 
 系统时间跳变不改变已在进行的单调计时窗口，但必须产生健康事件并在 manifest 记录时钟状态。
+`ClockSource`、`SyncState`、`FrameTimeMetadata`、`ClockModelSnapshot` 和
+`ClockSyncSnapshot` 的字段、空值和整数规则以
+[`domain-model.md`](domain-model.md#42-冻结的时间值对象) 为唯一领域定义。采集完成后
+`FrameTimeMetadata` 不可修改；时钟模型切换只影响随后形成的帧和事件映射。
 
 ### 6.3 配置快照
 
@@ -324,6 +330,10 @@ ProcessMain
       ├─ MetricsRegistry / AlarmRegistry
       ├─ DatabaseRuntime
       ├─ StorageRuntime
+      ├─ TimeSyncRuntime
+      │  ├─ ISystemClockProbe
+      │  ├─ ICameraClockProbe[最多 4]
+      │  └─ ImmutableClockModelStore
       ├─ CameraManager
       │  └─ CameraSession[0..4]
       │     ├─ ICameraDevice
@@ -357,10 +367,10 @@ ProcessMain
 | IPC 事件线程 | 1 | 本机连接、解帧、请求关联和推送调度 |
 | IPC 控制工作线程 | 1 | 按接收顺序串行执行有副作用或未知命令；慢控制不占用查询执行器 |
 | IPC 查询工作线程 | 固定 2 | 执行状态、指标、报警和缓存相机快照等只读查询 |
-| 相机采集线程 | 每启用相机 1 个，最多 6 | 获取帧、复制/接管到池、填元数据、入队 |
-| 相机线路 I/O 分发线程 | 固定 1 | 消费六个每相机容量 1 的 latest-wins 槽，在 MVS 回调栈外更新快照和通知服务观察者 |
-| 每相机预处理执行器 | 每启用相机 1 个，最多 6 | 保序预处理、内存缓存登记和分支路由 |
-| 算法工作线程 | 每启用相机 1 个，最多 6 | 独占该相机的 `DetectorHost`，按配置节拍串行处理自动 latest-wins 槽并优先处理人工保留槽；单 Lane 阻塞或降级不影响其他相机 |
+| 相机采集线程 | 每启用相机 1 个，最多 4 | 获取帧、复制/接管到池、填元数据、入队 |
+| 相机线路 I/O 分发线程 | 固定 1 | 消费四个每相机容量 1 的 latest-wins 槽，在 MVS 回调栈外更新快照和通知服务观察者 |
+| 每相机预处理执行器 | 每启用相机 1 个，最多 4 | 保序预处理、内存缓存登记和分支路由 |
+| 算法工作线程 | 每启用相机 1 个，最多 4 | 独占该相机的 `DetectorHost`，按配置节拍串行处理自动 latest-wins 槽并优先处理人工保留槽；单 Lane 阻塞或降级不影响其他相机 |
 | 预览编码线程 | 固定 1～2 | 抽样、缩放、覆盖层和 JPEG |
 | 事件管理线程 | 1 | 候选状态、窗口租约、合并和事件状态串行化 |
 | 关键帧/事件写线程 | 固定有界，首期各 1 | 关键帧编码和事件事务写入 |
@@ -368,6 +378,7 @@ ProcessMain
 | 上传线程 | 固定 1～2 | 心跳之外的持久化上传任务 |
 | Plant IO 线程 | 0 或 1 | 有界轮询/写入；未配置时不创建 |
 | 健康监测线程 | 1 | 周期采样、阈值和报警 |
+| 时间同步线程 | 1 | 串行调用系统/相机时间探针，选择来源并发布不可变工控机/逐相机模型；不执行采集、网络发送或业务持久化 |
 | 日志后台线程 | 日志库固定 1 | 异步日志落盘和轮转 |
 
 线程数量是配置上限而不是按任务动态无界增长。算法、预览、事件写和上传不得为每帧/每事件创建新线程。
@@ -394,6 +405,25 @@ ProcessMain
 - 客户端每连接最多保留 128 个待响应请求，达到上限时拒绝新请求并提示 busy；
 - 不把高频 `preview.frame` 直接堆积为无界 Qt queued signal，状态推送按 key 合并，预览始终 latest-wins。
 
+### 7.5 `TimeSyncRuntime` 所有权、探针和发布
+
+`ServiceRuntime` 独占一个 `TimeSyncRuntime`。时间线程是探针调用和模型修订的唯一写者；
+配置、健康监测、采集、事件和 Uplink 不持有探针实现，也不能在各自线程执行探针调用。
+
+- `ISystemClockProbe` 只返回操作系统 PTP/NTP 可用性、来源、偏移、不确定度、Grandmaster
+  标识和稳定业务错误；Win32 服务名、句柄和状态码只存在于 `paperbreak_platform_windows`；
+- `ICameraClockProbe` 只返回相机 ticks/频率、PTP 能力和采样时间；所有 MVS 调用、节点名和
+  厂商错误翻译只存在于 `paperbreak_camera_hikrobot`；Mock 可注入来源、偏移、漂移和不可用；
+- 工控机不固定承担 Grandmaster，探针不得隐式修改现场 PTP/NTP 配置；
+- 探针调用由时间线程按有界周期执行，单次调用必须有截止或可取消；失败发布降级快照并保留
+  上一修订供历史对象引用，不原地修改旧对象；
+- 发布存储是“系统 1 槽 + 每相机 1 槽”的原子不可变快照。写者构造完整
+  `shared_ptr<const ClockModelSnapshot>` 后 release 发布，读者 acquire 读取；没有等待、回调或队列；
+- 采集线程每帧最多读取一次相机模型并把所需值复制到帧；无模型或算术溢出时仍保存原始
+  ticks/接收时间，并以 `UNSYNCED` 和空校正时间降级，不阻塞或调用探针；
+- 模型修订在进程内严格递增。状态可读最新快照，事件和帧必须保存创建时修订，禁止用新模型
+  回算并覆盖历史。
+
 ## 8. 跨线程通道与背压
 
 ### 8.1 容量原则
@@ -410,6 +440,8 @@ ProcessMain
 | 通道 | 生产者 → 消费者 | 初始容量/上限 | 满载策略 | 停止与排空 | 严重性 |
 | --- | --- | --- | --- | --- | --- |
 | `service.control` | SCM/Console/IPC → 主控制线程 | 128 条；停止信号独立 | 普通命令返回 `SYS_BUSY`；停止不丢弃 | 停止接收新普通命令，处理已接受控制事务 | Warning |
+| `time.control` | 配置/健康/主控制 → 时间同步线程 | 16 条；停止信号独立 | 拒绝最新普通请求并返回 `SYS_BUSY` | 关闭入口、取消/唤醒探针、发布最终停止快照并 join | Warning |
+| `time.model.latest` | 时间同步线程 → 采集/事件/状态 | 系统 1 槽 + 每相机 1 槽，固定最多 4 个相机槽 | 原子 `latest-wins`；旧对象由持有者只读保留，不排队 | 相机停止且事件不再映射 T0 后释放 | Info |
 | `camera.command[i]` | 主控制 → 相机会话 | 32 条/相机 | 拒绝新普通命令；stop/close 走优先控制 | 取消未开始操作，当前 SDK 调用必须有超时 | Warning |
 | `camera.lineInput[i]` | MVS C 边沿回调 → 相机线路 I/O 分发线程 | 1 项/相机，固定 6 槽 | `latest-wins`；回调侧仍递增该槽修订 | 先关闭事件通知/设备回调来源，再请求停止、唤醒并确定性 join | Info |
 | `acquisition.frames[i]` | 采集 → 每相机预处理 | 16 帧/相机 | 丢弃最旧未处理帧，记录序号缺口；绝不阻塞采集 | 停采后关闭生产端，消费者排空至截止时间 | Warning，持续超限升级 Error |
@@ -418,7 +450,10 @@ ProcessMain
 | `algorithm.results` | 算法执行器 → 事件管理 | 256 条 | 不静默覆盖；拒绝新结果并触发 Error，后续帧进入降级状态 | 关闭算法生产端后排空并完成排序窗口 | Error |
 | `preview.latest[i]` | 预处理/结果叠加 → 预览编码 | 每相机 1 个槽 | `latest-wins`，按该相机订阅的最高目标帧率抽样并覆盖旧帧 | 无订阅立即清空；停止时直接丢弃 | Info |
 | `preview.encoded[i]` | 编码 → IPC 推送 | 每订阅/相机 1 个合并槽；单 JPEG 有字节上限 | 同一相机编码一次后按订阅目标帧率限速；`latest-wins` | 断开/停止直接丢弃 | Info |
+| `preview.remote.latest[i]` | 预览编码 → Uplink 远程预览线程 | 每相机 1 个槽，最多 4；JPEG 2 MiB、头 64 KiB | `latest-wins`；断网、慢消费和过大帧只丢当前预览并计数 | 先关闭生产端，断线/停止直接清空，不排空 | Info/Warning（协议越界） |
 | `event.commands` | 事件检测/人工/复核 → 事件管理 | 256 条 | 事件触发不能静默丢弃；拒绝并触发 Critical；复核命令返回 busy | 停止新候选后处理已接受状态转换 | Critical（候选/确认） |
+| `event.lock.requests` | Uplink 命令入口 → 外部 T0 锁定引擎 | 64 条且总计 1 MiB | 拒绝最新请求并返回 `UPLINK_SERVER_BUSY`；禁止 drop-oldest | 先拒绝新请求；已接受请求形成 ACK 或明确 `SYS_SERVICE_STOPPING` | Critical |
+| `event.trigger.outbox` | 事件管理 → Uplink 可靠通知 | SQLite 持久预算默认 4096 条且 16 MiB | 满载拒绝新 outbox 行并触发 Critical；不得撤销本地事件或覆盖旧通知 | 停止生产后提交事务；未发送行留待重启，不等待网络排空 | Critical |
 | `event.persist` | 事件管理 → 事件写入 | 默认 8 个事件，不超过 `maxConcurrentEvents` | 不扩容；无法接收新事件时保护现有租约并触发 Critical | 截止时间内提交；超时保留可恢复临时目录 | Critical |
 | `keyframe.jobs` | 事件管理 → 关键帧线程 | 默认 32 个任务 | 拒绝并标记事件不完整，触发 Error；原始事件仍优先 | 尝试完成已接受任务，超时由恢复流程补偿 | Error |
 | `nvme.blocks` | 预处理 → NVMe 写线程 | 默认 2 个时间块/相机 | 停止普通滚动块、记录缺口并报警；不反压采集 | 停止新块，完成当前块或留下可扫描尾块 | Warning/Error |
@@ -832,10 +867,11 @@ M8-03 的 `PersistentUploadScheduler` 位于 uplink 编排层，SQLite 状态转
 5. 打开 SQLite，执行迁移、健康检查和备份策略
 6. 扫描恢复临时事件、事件/数据库对账、NVMe 索引恢复
 7. 创建存储、帧池、队列和工作执行器（尚不接收帧）
-8. 启动 IPC，只发布 Starting/受限命令
-9. 创建相机 Provider，发现/绑定并逐路启动会话
-10. 启动处理、事件、健康和已启用的上传/Plant IO
-11. 进入 Running，向 IPC/SCM 发布实际状态
+8. 创建并启动 `TimeSyncRuntime`，完成首轮系统/相机能力探测；探针失败允许发布可解释降级快照
+9. 启动 IPC，只发布 Starting/受限命令
+10. 创建相机 Provider，发现/绑定并逐路启动会话；每路只读取已发布模型，不等待首次同步
+11. 启动处理、事件、健康和已启用的上传/Plant IO
+12. 进入 Running，向 IPC/SCM 发布实际状态
 ```
 
 启动失败时，按已完成步骤的逆序停止。配置、数据库或必要事件恢复失败是否阻止采集必须由错误分类明确决定；不能在无法保证事件保存时悄然进入“正常”状态。
@@ -843,19 +879,21 @@ M8-03 的 `PersistentUploadScheduler` 位于 uplink 编排层，SQLite 状态转
 ### 13.2 关闭顺序
 
 ```text
-1. ServiceRuntime 原子进入 StopRequested；停止接受配置和外部写命令
-2. 停止上位机命令和新上传任务领取；持久化上传 checkpoint
-3. 通知 IPC 客户端服务正在停止；停止新预览订阅
-4. 请求全部相机停止采集，取消重连和 SDK 等待
-5. 关闭 acquisition.frames 生产端
-6. 在截止时间内排空预处理与已接受算法帧；禁止产生新候选
-7. 事件管理器封闭当前窗口，完成或标记现有事件
-8. 关键帧、事件写入和 NVMe 当前块完成提交，或留下可恢复状态
-9. 提交数据库状态并关闭连接
-10. 取消 Plant IO、健康和上传 I/O，等待线程 join
-11. 停止 IPC，关闭客户端
-12. 刷新并关闭日志
-13. 向宿主/SCM 报告 Stopped
+1. ServiceRuntime 原子进入 StopRequested；停止接受配置和普通外部写命令
+2. 关闭 `event.lockByUtc` 和远程预览入口；新锁定返回 `SYS_SERVICE_STOPPING`，清空预览槽
+3. 停止新上传任务领取并持久化 checkpoint；触发通知 outbox 仍允许本地事务提交，不等待网络
+4. 通知 IPC 客户端服务正在停止；停止新预览订阅
+5. 请求全部相机停止采集，取消重连和 SDK 等待
+6. 关闭 acquisition.frames 生产端
+7. 在截止时间内排空预处理与已接受算法帧；禁止产生新候选
+8. 事件管理器封闭当前窗口，完成已接受外部锁定 ACK、事件和 outbox 登记
+9. 关键帧、事件写入和 NVMe 当前块完成提交，或留下可解释状态
+10. 停止 `TimeSyncRuntime`：关闭控制入口、取消探针、发布最终快照并限时 join；此后不得再映射 T0
+11. 提交数据库状态并关闭连接
+12. 取消 Plant IO、健康和上传 I/O，等待线程 join
+13. 停止 IPC，关闭客户端
+14. 刷新并关闭日志
+15. 向宿主/SCM 报告 Stopped
 ```
 
 每一步接收同一总截止时间的剩余预算，而不是各自无限等待。所有阻塞 SDK、网络、文件和数据库调用必须具备超时、取消或可被关闭句柄唤醒的路径。
@@ -1124,6 +1162,10 @@ SCM 启停阶段的 `service-scm-status` 在线程日志运行时创建之前工
 | 第 12 节：安全权限 | 第 11、16 节 |
 | 第 13 节：稳定性、性能和正确性 | 第 2、8、12～14、17、19 节 |
 | 第 16 节：代码约束 | 第 2、5～8、13、15、19 节 |
+| EDGE-TS-001～004、010～014 | 第 5.2、6.1～6.2、7.1～7.5、8.2、13 节；领域字段见 `domain-model.md` 第 4 节 |
+| EDGE-EVT-001～004、010～017 | 第 6.4、8.2、9.3、12.6～12.8、13 节；线上字段见 `uplink-protocol-v1.md` |
+| EDGE-STAT-001～004、EDGE-PRV-001～004 | 第 7.5、8.2、9.4、12.6～12.8、13 节；线上字段见 `uplink-protocol-v1.md` |
+| EDGE-COMP-001～004 | 第 5.3、8.2、12.6～12.8、15 节及 Uplink v1 协议能力协商 |
 
 ## 22. 架构合规门禁
 
