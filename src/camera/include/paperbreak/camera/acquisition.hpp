@@ -96,6 +96,7 @@ struct AcquisitionWorkerOptions final
     std::chrono::milliseconds statistics_window{std::chrono::seconds{1}};
     std::size_t consecutive_timeout_limit{3U};
     std::optional<std::chrono::milliseconds> software_trigger_interval;
+    const time::ImmutableClockModelStore* clock_model_store{};
     ThreadRegistrationFactory register_thread;
     DebugDiagnosticSink diagnostics;
 };

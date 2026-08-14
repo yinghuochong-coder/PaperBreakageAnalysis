@@ -1,0 +1,211 @@
+{
+    "schemaVersion":  4,
+    "eventId":  "EVT-R0-03-multi-frame",
+    "decisionState":  "Confirmed",
+    "triggerCount":  1,
+    "candidateTime":  "2026-08-14T00:00:00.000Z",
+    "confirmedTime":  "2026-08-14T00:00:00.100Z",
+    "startTime":  "2026-08-13T23:59:59.000Z",
+    "endTime":  "2026-08-14T00:00:01.000Z",
+    "cameraIds":  [
+                      "CAM01"
+                  ],
+    "triggerCameraId":  "CAM01",
+    "triggerFrameNumber":  2000,
+    "triggerReason":  "R0-03 golden vector",
+    "confidence":  0.95,
+    "preEventSeconds":  1,
+    "postEventSeconds":  1,
+    "algorithmName":  "contract-golden",
+    "algorithmVersion":  "1.0.0",
+    "configVersion":  "schema-8-revision-42",
+    "machineId":  "EDGE-01",
+    "productionLineId":  "LINE-01",
+    "paperType":  "test",
+    "paperSpeed":  null,
+    "uploadState":  "Pending",
+    "timeQuality":  "Synchronized",
+    "writeMode":  "buffered",
+    "powerLossDurable":  false,
+    "verification":  "upload-or-on-demand",
+    "destinationRelativePath":  "2026/08/14/EVT-R0-03-multi-frame",
+    "windowComplete":  true,
+    "truncatedByMaximumDuration":  false,
+    "stoppedEarly":  false,
+    "eventT0":  {
+                    "available":  true,
+                    "timestampUtcNs":  "1786665599998000000",
+                    "triggerSource":  "ALGORITHM",
+                    "triggerMachineId":  "EDGE-01",
+                    "triggerCameraId":  "CAM01",
+                    "triggerNodeId":  "EDGE-01/CAM01"
+                },
+    "cameraActualRanges":  [
+                               {
+                                   "machineId":  "EDGE-01",
+                                   "cameraId":  "CAM01",
+                                   "receivedStartUtcNs":  "1786665600000000000",
+                                   "receivedEndUtcNs":  "1786665600033333334",
+                                   "correctedStartUtcNsAvailable":  true,
+                                   "correctedStartUtcNs":  "1786665599998000000",
+                                   "correctedEndUtcNsAvailable":  true,
+                                   "correctedEndUtcNs":  "1786665600031333334",
+                                   "frameCount":  3,
+                                   "sequenceGaps":  0,
+                                   "complete":  true,
+                                   "syncState":  "SYNCED",
+                                   "uncertaintyAvailable":  true,
+                                   "maximumUncertaintyNs":  "500000",
+                                   "timeRuntimeInstanceId":  "019fff90-3082-74b2-97cd-c9a4a6eccd3b",
+                                   "clockModelRevisions":  [
+                                                               7,
+                                                               8
+                                                           ]
+                               }
+                           ],
+    "clockModels":  [
+                        {
+                            "machineId":  "EDGE-01",
+                            "timeRuntimeInstanceId":  "019fff90-3082-74b2-97cd-c9a4a6eccd3b",
+                            "cameraId":  "CAM01",
+                            "modelRevision":  7,
+                            "clockSource":  "PTP_HARDWARE",
+                            "syncState":  "SYNCED",
+                            "uncertaintyAvailable":  true,
+                            "uncertaintyNs":  "500000"
+                        },
+                        {
+                            "machineId":  "EDGE-01",
+                            "timeRuntimeInstanceId":  "019fff90-3082-74b2-97cd-c9a4a6eccd3b",
+                            "cameraId":  "CAM01",
+                            "modelRevision":  8,
+                            "clockSource":  "PTP_HARDWARE",
+                            "syncState":  "SYNCED",
+                            "uncertaintyAvailable":  true,
+                            "uncertaintyNs":  "500000"
+                        }
+                    ],
+    "overallTimeQuality":  {
+                               "syncState":  "SYNCED",
+                               "maximumUncertaintyAvailable":  true,
+                               "maximumUncertaintyNs":  "500000",
+                               "reasonCodes":  [
+
+                                               ]
+                           },
+    "rawBlocks":  [
+                      {
+                          "path":  "raw/CAM01/block.pbnvme3",
+                          "cameraId":  "CAM01",
+                          "format":  "PBNVME3",
+                          "formatVersion":  3,
+                          "frameCount":  3,
+                          "firstSequenceNumber":  200,
+                          "lastSequenceNumber":  202,
+                          "receivedStartUtcNs":  "1786665600000000000",
+                          "receivedEndUtcNs":  "1786665600033333334",
+                          "correctedStartUtcNsAvailable":  true,
+                          "correctedStartUtcNs":  "1786665599998000000",
+                          "correctedEndUtcNsAvailable":  true,
+                          "correctedEndUtcNs":  "1786665600031333334",
+                          "containsIncompleteFrame":  false,
+                          "sizeBytes":  16384,
+                          "sha256":  "sha256:db0e531ca3b9c9a282c33b367f8312b51c7c922f4e2b0cee59dc8a49237d1788",
+                          "headerCrc32c":  1246885331,
+                          "indexCrc32c":  2060292670,
+                          "dataCrc32c":  274587772,
+                          "footerCrc32c":  3498180685
+                      }
+                  ],
+    "keyFrames":  [
+
+                  ],
+    "cameraConfigSnapshots":  [
+                                  {
+                                      "cameraId":  "CAM01",
+                                      "serialNumber":  "R003GOLDEN0001",
+                                      "model":  "MV-CS020-60GM",
+                                      "capturedAtUtcNs":  "1786665600000000000",
+                                      "configSchemaVersion":  8,
+                                      "configRevision":  42,
+                                      "parameters":  {
+                                                         "exposureTimeUs":  {
+                                                                                "available":  true,
+                                                                                "value":  500,
+                                                                                "errorCode":  null
+                                                                            },
+                                                         "gainDb":  {
+                                                                        "available":  true,
+                                                                        "value":  3,
+                                                                        "errorCode":  null
+                                                                    },
+                                                         "actualFps":  {
+                                                                           "available":  true,
+                                                                           "value":  60,
+                                                                           "errorCode":  null
+                                                                       },
+                                                         "roi":  {
+                                                                     "available":  true,
+                                                                     "value":  {
+                                                                                   "offsetX":  0,
+                                                                                   "offsetY":  0,
+                                                                                   "width":  2,
+                                                                                   "height":  2
+                                                                               },
+                                                                     "errorCode":  null
+                                                                 },
+                                                         "width":  {
+                                                                       "available":  true,
+                                                                       "value":  2,
+                                                                       "errorCode":  null
+                                                                   },
+                                                         "height":  {
+                                                                        "available":  true,
+                                                                        "value":  2,
+                                                                        "errorCode":  null
+                                                                    },
+                                                         "pixelFormat":  {
+                                                                             "available":  true,
+                                                                             "value":  "Mono8",
+                                                                             "errorCode":  null
+                                                                         },
+                                                         "triggerMode":  {
+                                                                             "available":  true,
+                                                                             "value":  "Off",
+                                                                             "errorCode":  null
+                                                                         },
+                                                         "triggerSource":  {
+                                                                               "available":  false,
+                                                                               "value":  null,
+                                                                               "errorCode":  "SYS_NOT_SUPPORTED"
+                                                                           },
+                                                         "packetSizeBytes":  {
+                                                                                 "available":  true,
+                                                                                 "value":  1500,
+                                                                                 "errorCode":  null
+                                                                             },
+                                                         "transmissionDelayNs":  {
+                                                                                     "available":  true,
+                                                                                     "value":  "0",
+                                                                                     "errorCode":  null
+                                                                                 },
+                                                         "timeSyncCapability":  {
+                                                                                    "available":  true,
+                                                                                    "value":  "PTP_HARDWARE",
+                                                                                    "errorCode":  null
+                                                                                },
+                                                         "timeSyncState":  {
+                                                                               "available":  true,
+                                                                               "value":  "SYNCED",
+                                                                               "errorCode":  null
+                                                                           }
+                                                     }
+                                  }
+                              ],
+    "fileChecksums":  {
+                          "raw/CAM01/block.pbnvme3":  "sha256:db0e531ca3b9c9a282c33b367f8312b51c7c922f4e2b0cee59dc8a49237d1788"
+                      },
+    "fileSizes":  {
+                      "raw/CAM01/block.pbnvme3":  16384
+                  }
+}

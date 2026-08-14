@@ -54,6 +54,23 @@ bool wait_until(const std::function<bool()>& predicate,
     return predicate();
 }
 
+time::ClockModelSnapshot acquisition_clock_model(const std::uint64_t revision,
+                                                 const std::int64_t anchor_utc_ns)
+{
+    return {.model_revision = revision,
+            .camera_id = "CAM01",
+            .clock_source = time::ClockSource::offset_model,
+            .sync_state = time::SyncState::degraded,
+            .anchor_monotonic_ns = 0,
+            .anchor_utc_ns = anchor_utc_ns,
+            .anchor_camera_ticks = 100U,
+            .camera_timestamp_frequency_hz = 1'000U,
+            .offset_ns = 50,
+            .uncertainty_ns = 1'000'000,
+            .maximum_observed_offset_ns = 100,
+            .valid_from_monotonic_ns = 0};
+}
+
 bool has_text(const std::string_view text, const std::string_view expected) noexcept
 {
     return text.find(expected) != std::string_view::npos;
@@ -440,6 +457,46 @@ TEST(CameraAcquisitionWorker, ContinuesAfterTimeoutAndPublishesCompleteMetadata)
     EXPECT_EQ(dequeued.packet->buffer->size(), 4U);
     EXPECT_NE(dequeued.packet->received_monotonic_time, MonotonicTime{});
     EXPECT_NE(dequeued.packet->received_wall_clock_time, WallClockTime{});
+    EXPECT_EQ(dequeued.packet->time_metadata.camera_timestamp_ticks, 100U);
+    EXPECT_EQ(dequeued.packet->time_metadata.camera_timestamp_frequency_hz, 1'000U);
+    EXPECT_FALSE(dequeued.packet->time_metadata.corrected_capture_utc_ns);
+    EXPECT_EQ(dequeued.packet->time_metadata.sync_state, time::SyncState::unsynced);
+    EXPECT_EQ(dequeued.packet->time_metadata.clock_model_revision, 0U);
+}
+
+TEST(CameraAcquisitionWorker, CopiesOnePublishedModelIntoFrameAndKeepsHistoryImmutable)
+{
+    time::ImmutableClockModelStore models;
+    models.publish(
+        std::make_shared<const time::ClockModelSnapshot>(acquisition_clock_model(11U, 10'000)));
+    ScriptedCameraDevice device{{CaptureAction::success, CaptureAction::permanent_error}};
+    FrameBufferPool pool{2U, 4U};
+    AcquisitionQueue queue{2U};
+    AcquisitionWorker worker{
+        device,
+        pool,
+        queue,
+        {.camera_id = "CAM01", .receive_timeout = 10ms, .clock_model_store = &models}};
+
+    ASSERT_TRUE(worker.start());
+    ASSERT_TRUE(worker.join(std::chrono::steady_clock::now() + 1s));
+    auto dequeued = queue.wait_pop({}, 0ms);
+    ASSERT_EQ(dequeued.status, FrameDequeueStatus::frame);
+    ASSERT_TRUE(dequeued.packet);
+    const auto historical_time = dequeued.packet->time_metadata;
+    EXPECT_EQ(historical_time.corrected_capture_utc_ns, 10'000);
+    EXPECT_EQ(historical_time.clock_model_revision, 11U);
+    EXPECT_EQ(historical_time.clock_source, time::ClockSource::offset_model);
+    EXPECT_EQ(historical_time.sync_state, time::SyncState::degraded);
+    const auto historical_view = make_frame_view(*dequeued.packet);
+    ASSERT_TRUE(historical_view);
+    EXPECT_EQ(historical_view.value().time_metadata(), historical_time);
+
+    models.publish(
+        std::make_shared<const time::ClockModelSnapshot>(acquisition_clock_model(12U, 20'000)));
+    EXPECT_EQ(dequeued.packet->time_metadata, historical_time);
+    EXPECT_EQ(dequeued.packet->time_metadata.clock_model_revision, 11U);
+    EXPECT_EQ(historical_view.value().time_metadata(), historical_time);
 }
 
 TEST(CameraAcquisitionWorker, ClassifiesStartupBuffersAndSuppressesOnlyUnwrittenPayload)

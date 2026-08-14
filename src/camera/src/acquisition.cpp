@@ -518,6 +518,27 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
             }
             const auto received_monotonic_time = std::chrono::steady_clock::now();
             const auto received_wall_clock_time = std::chrono::system_clock::now();
+            const auto received_monotonic_ns =
+                time::monotonic_time_to_nanoseconds(received_monotonic_time);
+            const auto received_utc_ns = time::utc_time_to_nanoseconds(received_wall_clock_time);
+            if (!received_monotonic_ns || !received_utc_ns)
+            {
+                finish(acquisition_error("TIME_MAPPING_UNAVAILABLE", Severity::error,
+                                         "帧接收时间超出可表示范围", "camera.acquisition.capture",
+                                         options_.camera_id),
+                       sequence_number - 1U);
+                return;
+            }
+            const auto model =
+                options_.clock_model_store ? options_.clock_model_store->load() : nullptr;
+            const auto frame_time = time::build_frame_time_metadata(
+                metadata.camera_timestamp
+                    ? std::optional<std::uint64_t>{metadata.camera_timestamp->ticks}
+                    : std::nullopt,
+                metadata.camera_timestamp
+                    ? std::optional<std::uint64_t>{metadata.camera_timestamp->frequency_hz}
+                    : std::nullopt,
+                *received_monotonic_ns, *received_utc_ns, model);
             if (previous_camera_frame_number > 0U &&
                 metadata.camera_frame_number > previous_camera_frame_number &&
                 metadata.camera_frame_number - previous_camera_frame_number > 1U)
@@ -547,6 +568,7 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
                                .received_monotonic_time = received_monotonic_time,
                                .received_wall_clock_time = received_wall_clock_time,
                                .camera_timestamp = metadata.camera_timestamp,
+                               .time_metadata = frame_time.metadata,
                                .geometry = metadata.geometry,
                                .pixel_format = metadata.pixel_format,
                                .buffer = std::move(acquired.buffer),

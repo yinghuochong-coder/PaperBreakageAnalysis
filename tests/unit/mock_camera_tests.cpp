@@ -302,6 +302,18 @@ TEST(CameraMockFaults, ExecutesRuntimeFaultsAndReconnectsAfterDisconnect)
     EXPECT_TRUE(opened.device->capture_into(buffer, 50ms));
 }
 
+TEST(CameraMockFrameTimeBoundary, ReturnsPairedRawTicksAndFrequencyWithoutClaimingSynchronization)
+{
+    auto opened = open_camera(camera_config());
+    FrameBuffer buffer{64U};
+
+    const auto first = capture(*opened.device, buffer);
+    ASSERT_TRUE(first.camera_timestamp);
+    EXPECT_EQ(first.camera_timestamp->ticks, first.camera_frame_number);
+    EXPECT_EQ(first.camera_timestamp->frequency_hz, 1U);
+    EXPECT_EQ(first.camera_timestamp->quality, CameraTimestampQuality::unsynchronized);
+}
+
 TEST(CameraMockFaults, RunsScheduledFaultsInOrderAndBoundsRuntimeQueue)
 {
     auto config = camera_config();

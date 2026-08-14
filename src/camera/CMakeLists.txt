@@ -6,7 +6,8 @@ add_library(paperbreak_camera STATIC
     src/frame_pool.cpp
     src/state.cpp
     src/module.cpp)
-target_link_libraries(paperbreak_camera PUBLIC paperbreak_common paperbreak_compiler_options)
+target_link_libraries(paperbreak_camera
+    PUBLIC paperbreak_common paperbreak_time paperbreak_compiler_options)
 target_include_directories(paperbreak_camera PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)

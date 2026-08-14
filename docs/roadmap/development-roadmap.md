@@ -141,7 +141,11 @@ R0-02 和 R0-03 可在 R0-01 完成后分别领取。O4 可在 T1 契约稳定�
 
 ### R0-03 PBNVME3 与 manifest v4 格式门禁
 
-- 状态：`not-started`
+- 状态：`completed`
+- 负责人：Codex
+- 开始日期：2026-08-14
+- 完成日期：2026-08-14
+- ExecPlan：`.agent/plans/r0-03-pbnvme3-manifest-v4-contract.md`
 - 前置：R0-01
 
 交付：
@@ -153,16 +157,37 @@ R0-02 和 R0-03 可在 R0-01 完成后分别领取。O4 可在 T1 契约稳定�
 
 验收：独立格式检查器和黄金样例能发现损坏、尾标缺失、越界及错误版本；旧格式回归不变。
 
+验收证据：ADR-018/019 已冻结不可变时间证据、模型身份、PBNVME3 的 4096 B 小端头尾页、
+160 B 逐帧索引、数据范围、CRC32C、manifest SHA-256、固定上限和不覆盖原子发布，以及
+manifest v4 的 T0、触发节点、实际范围、模型、时间质量和实际配置快照。四组确定性黄金样例覆盖
+最小、多帧、不完整帧和无校正时间；独立检查器通过并稳定拒绝头/索引/负载损坏、尾页截断、
+重算 CRC 后的数据越界、未来 PBNVME/manifest 版本和错误 SHA，同时只读确认 PBNVME2/
+manifest v3 合同未变。Debug/Release 配置和构建通过，最终全量 CTest 均为 33/33，MSVC 静态
+分析构建通过，`git diff --check` 通过。实体相机、PTP/Grandmaster、生产 NVMe、物理断电和
+正式上位机导入未执行，继续留待 T1/D2/V5；未开始 D2-01。
+
 ## 6. T1：时间基础
 
 ### T1-01 不可变帧时间模型
 
-- 状态：`not-started`
+- 状态：`completed`
+- 负责人：Codex
+- 开始日期：2026-08-14
+- 完成日期：2026-08-14
+- ExecPlan：`.agent/plans/t1-01-immutable-frame-time-model.md`
 - 前置：R0-02
 
 扩展帧领域模型，保留原始相机 ticks/频率、接收单调时间和接收 UTC，并增加可空校正 UTC、时钟源、偏移、不确定度、同步状态和模型修订。采集完成后字段不可修改；相机回调只复制已发布的时钟模型并做有界算术。
 
 测试：字段验证、溢出/缺失 ticks、UNSYNCED、模型切换后历史帧不变，以及 Mock/Hikrobot 适配器边界回归。
+
+验收证据：新增无平台依赖的 `paperbreak_time` 目标，落实冻结枚举、帧/模型值对象、字段一致性校验、
+容量 1 的原子不可变模型发布槽及不依赖浮点或宽整数扩展的 checked ticks→UTC 映射。采集线程每帧
+最多 acquire 读取一次已发布模型并复制值；无模型、缺 ticks、频率不匹配、模型尚未生效或算术溢出
+均保留原始/接收证据，以 `UNSYNCED` 和空校正 UTC 发布。`FrameView` 保存值副本，模型切换不改变
+历史帧；既有接收时间和相机时间访问器保持兼容。Mock 与 fake MVS 边界、441 项单元行为、完整 Debug
+构建和非硬件 CTest 33/33 通过，格式及 diff 检查通过。未执行实体 MV-CS020-60GM、PTP/
+Grandmaster 或亚毫秒精度测试，继续待 V5-02 硬件联调；未开始 T1-02。
 
 ### T1-02 TimeSyncRuntime 与时钟模型
 

@@ -40,6 +40,7 @@ include(PaperBreakVersion)
 paperbreak_generate_version(PAPERBREAK_VERSION_SOURCE PAPERBREAK_GENERATED_INCLUDE_DIR)
 
 add_subdirectory(src/common)
+add_subdirectory(src/time)
 add_subdirectory(src/logging)
 add_subdirectory(src/monitoring)
 add_subdirectory(src/platform)

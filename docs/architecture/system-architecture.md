@@ -1141,6 +1141,8 @@ SCM 启停阶段的 `service-scm-status` 在线程日志运行时创建之前工
 | ADR-014 | Deferred | 安装器技术 | M9-01 |
 | ADR-015 | Accepted | VS 2026/v145、CMake 4.2、外部 SDK 与 vcpkg manifest 基线 | `decisions/adr-015-windows-toolchain-dependencies.md` |
 | [ADR-017](decisions/adr-017-buffered-event-persistence-nonrecoverable-nvme-cache.md) | Accepted | 缓冲事件写入、按需完整校验、非恢复式 session 级 NVMe 缓存 | M5/M7 合并优化 |
+| [ADR-018](decisions/adr-018-immutable-time-evidence-model.md) | Accepted | 原始、接收和校正帧时间并列保存，模型身份复合且历史不可回写 | R0-03/T1/D2 |
+| [ADR-019](decisions/adr-019-pbnvme3-manifest-v4-format.md) | Accepted | PBNVME3 160 B 严格时间索引、manifest v4、CRC/SHA 和独立版本拒绝 | R0-03/D2 |
 
 ## 21. 需求追踪
 
@@ -1165,6 +1167,7 @@ SCM 启停阶段的 `service-scm-status` 在线程日志运行时创建之前工
 | EDGE-TS-001～004、010～014 | 第 5.2、6.1～6.2、7.1～7.5、8.2、13 节；领域字段见 `domain-model.md` 第 4 节 |
 | EDGE-EVT-001～004、010～017 | 第 6.4、8.2、9.3、12.6～12.8、13 节；线上字段见 `uplink-protocol-v1.md` |
 | EDGE-STAT-001～004、EDGE-PRV-001～004 | 第 7.5、8.2、9.4、12.6～12.8、13 节；线上字段见 `uplink-protocol-v1.md` |
+| EDGE-DATA-001～005、EDGE-CFG-001～004 | ADR-018/019；机器合同和黄金文件见 `docs/validation/r0-03/` |
 | EDGE-COMP-001～004 | 第 5.3、8.2、12.6～12.8、15 节及 Uplink v1 协议能力协商 |
 
 ## 22. 架构合规门禁

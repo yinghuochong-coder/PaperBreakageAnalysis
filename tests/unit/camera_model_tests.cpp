@@ -540,6 +540,12 @@ TEST(CameraFrameView, PreservesMetadataAndSharesReadOnlyBufferWithoutCopy)
     EXPECT_EQ(result.value().received_wall_clock_time(), wall);
     ASSERT_TRUE(result.value().camera_timestamp());
     EXPECT_EQ(result.value().camera_timestamp()->ticks, 77U);
+    EXPECT_EQ(result.value().time_metadata().camera_timestamp_ticks, 77U);
+    EXPECT_EQ(result.value().time_metadata().camera_timestamp_frequency_hz, 1000U);
+    EXPECT_EQ(result.value().time_metadata().received_monotonic_ns, 123'000'000);
+    EXPECT_EQ(result.value().time_metadata().received_utc_ns, 456'000'000);
+    EXPECT_FALSE(result.value().time_metadata().corrected_capture_utc_ns);
+    EXPECT_EQ(result.value().time_metadata().sync_state, time::SyncState::unsynced);
     EXPECT_TRUE(result.value().flags().incomplete);
     EXPECT_EQ(result.value().bytes().data(), original_data);
     EXPECT_EQ(result.value().buffer_owner().get(), buffer.get());

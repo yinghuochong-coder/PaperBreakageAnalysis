@@ -1,0 +1,94 @@
+{
+  "contractVersion": 1,
+  "format": {
+    "name": "PaperBreak strict-time raw block",
+    "magicAsciiEscaped": "PBNVME3\\0",
+    "formatVersion": 3,
+    "byteOrder": "little-endian",
+    "headerBytes": 4096,
+    "indexEntryBytes": 160,
+    "footerBytes": 4096,
+    "alignmentBytes": 4096,
+    "blockDurationMs": 1000,
+    "compression": "none",
+    "footerMagicAscii": "PBCOMMIT",
+    "commitMarkerAsciiEscaped": "COMMIT3\\0"
+  },
+  "limits": {
+    "maximumCameraIdBytes": 16,
+    "maximumIndexCapacity": 4096,
+    "maximumFrameBytes": 134217728,
+    "maximumBlockBytes": 68719476736,
+    "maximumManifestBytes": 8388608,
+    "maximumCameras": 6,
+    "maximumRawBlocks": 262144,
+    "maximumClockModels": 64,
+    "maximumFileEntries": 262208
+  },
+  "stableIds": {
+    "pixelFormats": {
+      "Mono8": 1,
+      "Mono10LE16": 2,
+      "Mono12LE16": 3,
+      "BayerRG8": 4
+    },
+    "clockSources": {
+      "UNKNOWN": 0,
+      "PTP_HARDWARE": 1,
+      "PTP_SOFTWARE": 2,
+      "NTP": 3,
+      "OFFSET_MODEL": 4,
+      "RECEIVE_CLOCK": 5
+    },
+    "syncStates": {
+      "UNKNOWN": 0,
+      "SYNCED": 1,
+      "SYNCING": 2,
+      "DEGRADED": 3,
+      "UNSYNCED": 4
+    },
+    "indexFlags": {
+      "incompleteBit": 0,
+      "cameraTimestampAvailableBit": 1,
+      "correctedCaptureUtcAvailableBit": 2,
+      "clockOffsetAvailableBit": 3,
+      "uncertaintyAvailableBit": 4
+    },
+    "footerFlags": {
+      "containsIncompleteFrameBit": 0
+    }
+  },
+  "integrity": {
+    "crc": "CRC-32C",
+    "polynomialReflectedHex": "82F63B78",
+    "initialHex": "FFFFFFFF",
+    "xorOutHex": "FFFFFFFF",
+    "checkInputAscii": "123456789",
+    "checkValueHex": "E3069283",
+    "contentDigest": "SHA-256",
+    "contentDigestLocation": "manifest-v4",
+    "digestText": "sha256:<64-lowercase-hex>"
+  },
+  "layout": {
+    "headerCrc32cOffset": 128,
+    "indexOffset": 4096,
+    "indexPayloadCrc32cOffset": 112,
+    "indexEntryCrc32cOffset": 116,
+    "indexReservedOffset": 120,
+    "indexReservedBytes": 40,
+    "indexRegionFormula": "align4096(indexCapacity * 160)",
+    "dataRegionFormula": "align4096(indexCapacity * maxFrameBytes)",
+    "footerPlacement": "fixed-after-maximum-data-region",
+    "footerCrc32cOffsetWithinFooter": 4084,
+    "commitMarkerOffsetWithinFooter": 4088,
+    "maximumBlockBytesFormula": "4096 + indexRegionBytes + dataRegionBytes + 4096"
+  },
+  "writePolicy": {
+    "mode": "buffered",
+    "writeThrough": false,
+    "flushFileBuffers": false,
+    "publish": "close-then-same-volume-atomic-rename-no-overwrite",
+    "powerLossDurable": false,
+    "verification": "upload-or-on-demand"
+  }
+}

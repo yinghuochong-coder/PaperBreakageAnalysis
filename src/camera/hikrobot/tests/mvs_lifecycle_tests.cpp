@@ -1376,6 +1376,31 @@ TEST_F(MvsLifecycleTest, CapturesIntoPreallocatedBufferAndMapsFrameMetadata)
               context_.calls.end());
 }
 
+TEST_F(MvsLifecycleTest, MissingDeviceTicksRemainUnavailableAtAdapterBoundary)
+{
+    context_.integers["GevTimestampTickFrequency"] = {1000000000, 1, 1000000000, 1};
+    context_.frame_payload = {1U, 2U, 3U, 4U};
+    context_.frame_info.nWidth = 2U;
+    context_.frame_info.nHeight = 2U;
+    context_.frame_info.enPixelType = PixelType_Gvsp_Mono8;
+    context_.frame_info.nFrameNum = 1U;
+    context_.frame_info.nDevTimeStampHigh = 0U;
+    context_.frame_info.nDevTimeStampLow = 0U;
+    context_.frame_info.nFrameLen = 4U;
+    auto handle_result = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(handle_result);
+    auto handle = std::move(handle_result).value();
+    auto stream_result = handle.start_streaming();
+    ASSERT_TRUE(stream_result);
+    auto stream = std::move(stream_result).value();
+    FrameBuffer buffer{4U};
+
+    const auto captured = handle.capture_into(buffer, std::chrono::milliseconds{10});
+
+    ASSERT_TRUE(captured);
+    EXPECT_FALSE(captured.value().camera_timestamp);
+}
+
 TEST_F(MvsLifecycleTest, MapsCaptureTimeoutAndDisconnectWithNativeDiagnostics)
 {
     auto handle_result = DeviceHandle::open(fake_api, context_.device_info);

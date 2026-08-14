@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/common/result.hpp"
+#include "paperbreak/time/time_model.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -87,6 +88,7 @@ struct FramePacket final
     MonotonicTime received_monotonic_time;
     WallClockTime received_wall_clock_time;
     std::optional<CameraTimestamp> camera_timestamp;
+    time::FrameTimeMetadata time_metadata;
     FrameGeometry geometry;
     PixelFormat pixel_format{PixelFormat::mono8};
     std::shared_ptr<const FrameBuffer> buffer;
@@ -103,6 +105,7 @@ class FrameView final
     [[nodiscard]] MonotonicTime received_monotonic_time() const noexcept;
     [[nodiscard]] WallClockTime received_wall_clock_time() const noexcept;
     [[nodiscard]] const std::optional<CameraTimestamp>& camera_timestamp() const noexcept;
+    [[nodiscard]] const time::FrameTimeMetadata& time_metadata() const noexcept;
     [[nodiscard]] FrameGeometry geometry() const noexcept;
     [[nodiscard]] PixelFormat pixel_format() const noexcept;
     [[nodiscard]] FrameFlags flags() const noexcept;
@@ -118,6 +121,7 @@ class FrameView final
     MonotonicTime received_monotonic_time_;
     WallClockTime received_wall_clock_time_;
     std::optional<CameraTimestamp> camera_timestamp_;
+    time::FrameTimeMetadata time_metadata_;
     FrameGeometry geometry_;
     PixelFormat pixel_format_{PixelFormat::mono8};
     std::shared_ptr<const FrameBuffer> buffer_;

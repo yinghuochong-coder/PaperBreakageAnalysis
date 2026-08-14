@@ -200,6 +200,9 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `STORAGE_CHECKSUM_MISMATCH` | Error | 视来源 | 通用存储对象读回校验失败；隔离对象并触发恢复 |
 | `NVME_QUEUE_FULL` | Warning | 是 | 每相机两个待写块已满；拒绝当前完整普通块、记录缺口，不阻塞采集 |
 | `NVME_BLOCK_INVALID` | Error | 否 | 帧序号、相机、布局、负载或块边界违反 NVMe v2 声明；当前普通块不提交 |
+| `NVME_FORMAT_UNSUPPORTED` | Error | 否 | PBNVME magic 或版本不在显式支持范围；读取任何声明负载前拒绝，不猜测或降级解析 |
+| `NVME_BLOCK_INCOMPLETE` | Error | 否 | 文件短于声明固定布局、尾页或完整提交标记缺失；不作为已提交块使用并保留证据 |
+| `NVME_BLOCK_CORRUPT` | Critical | 否 | PBNVME3 结构、保留位、范围、CRC32C 或尾页回显不一致；隔离/拒绝且不返回部分完整结果 |
 | `NVME_CACHE_UNAVAILABLE` | Error | 是 | 当前 session 缓存根或容量准入不可安全使用；降级为内存缓存 |
 | `NVME_CACHE_PROTECTED` | Error | 是 | 固定容量内没有零租约已提交块可回收；不得覆盖事件证据，普通滚动缓存降级并记录缺口 |
 | `NVME_WRITE_TIMEOUT` | Error | 是 | 单块写入未在配置总截止时间内完成；保留临时尾块并降级内存 |

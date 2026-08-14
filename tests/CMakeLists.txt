@@ -30,6 +30,7 @@ add_executable(PaperBreakTests
     unit/storage_policy_tests.cpp
     unit/service_runtime_tests.cpp
     unit/system_command_tests.cpp
+    unit/time_model_tests.cpp
     unit/uplink_protocol_tests.cpp
     unit/uplink_mock_transport_tests.cpp
     unit/uplink_runtime_tests.cpp
@@ -108,7 +109,7 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Algorithm*:Camera*:Pipeline*:Event*:Storage*:Common*:Result*:Version*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:Uplink*:WindowsControl*:WindowsScm*)
+    COMMAND PaperBreakTests --gtest_filter=Algorithm*:Camera*:Pipeline*:Event*:Storage*:Common*:Result*:Version*:TimeModel*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:Uplink*:WindowsControl*:WindowsScm*)
 set_tests_properties(unit PROPERTIES
     LABELS "unit"
     ENVIRONMENT "PATH=$<TARGET_FILE_DIR:Qt6::Core>\\;$<TARGET_FILE_DIR:opencv_core>\\;$ENV{PATH}")
@@ -294,6 +295,13 @@ add_test(NAME m7_01_nvme_design
         "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
         -P "${PROJECT_SOURCE_DIR}/cmake/ValidateM701NvmeDesign.cmake")
 set_tests_properties(m7_01_nvme_design PROPERTIES LABELS "validation")
+
+add_test(NAME r0_03_format_contract
+    COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tools/validate-r0-03-formats.ps1")
+set_tests_properties(r0_03_format_contract PROPERTIES
+    LABELS "validation"
+    TIMEOUT 30)
 
 set(path_scan_inputs "$ENV{PAPERBREAK_QT_ROOT}|${OpenCV_DIR}|$ENV{VCPKG_ROOT}")
 if(DEFINED PAPERBREAK_MVS_ROOT AND NOT PAPERBREAK_MVS_ROOT STREQUAL "")

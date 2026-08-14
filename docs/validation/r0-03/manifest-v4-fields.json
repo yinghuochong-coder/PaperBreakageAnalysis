@@ -1,0 +1,171 @@
+{
+  "contractVersion": 1,
+  "schemaVersion": 4,
+  "encoding": "UTF-8-without-BOM",
+  "unknownRootFields": "reject-except-extensions-object",
+  "nanosecondJsonEncoding": "canonical-signed-int64-decimal-string-or-null",
+  "requiredRootFields": [
+    "schemaVersion",
+    "eventId",
+    "decisionState",
+    "candidateTime",
+    "confirmedTime",
+    "startTime",
+    "endTime",
+    "cameraIds",
+    "triggerCameraId",
+    "triggerReason",
+    "algorithmName",
+    "algorithmVersion",
+    "configVersion",
+    "machineId",
+    "productionLineId",
+    "uploadState",
+    "writeMode",
+    "powerLossDurable",
+    "verification",
+    "destinationRelativePath",
+    "eventT0",
+    "cameraActualRanges",
+    "clockModels",
+    "overallTimeQuality",
+    "rawBlocks",
+    "keyFrames",
+    "cameraConfigSnapshots",
+    "fileChecksums",
+    "fileSizes"
+  ],
+  "objects": {
+    "eventT0": {
+      "required": [
+        "available",
+        "timestampUtcNs",
+        "triggerSource",
+        "triggerMachineId",
+        "triggerCameraId",
+        "triggerNodeId"
+      ],
+      "triggerSourceEnum": [
+        "ALGORITHM",
+        "MANUAL",
+        "PLANT_IO",
+        "EXTERNAL"
+      ]
+    },
+    "cameraActualRange": {
+      "required": [
+        "machineId",
+        "cameraId",
+        "receivedStartUtcNs",
+        "receivedEndUtcNs",
+        "correctedStartUtcNsAvailable",
+        "correctedStartUtcNs",
+        "correctedEndUtcNsAvailable",
+        "correctedEndUtcNs",
+        "frameCount",
+        "sequenceGaps",
+        "complete",
+        "syncState",
+        "uncertaintyAvailable",
+        "maximumUncertaintyNs",
+        "timeRuntimeInstanceId",
+        "clockModelRevisions"
+      ]
+    },
+    "clockModel": {
+      "required": [
+        "machineId",
+        "timeRuntimeInstanceId",
+        "cameraId",
+        "modelRevision",
+        "clockSource",
+        "syncState",
+        "uncertaintyAvailable",
+        "uncertaintyNs"
+      ],
+      "identity": "machineId+timeRuntimeInstanceId+cameraId-or-null+modelRevision"
+    },
+    "overallTimeQuality": {
+      "required": [
+        "syncState",
+        "maximumUncertaintyAvailable",
+        "maximumUncertaintyNs",
+        "reasonCodes"
+      ]
+    },
+    "rawBlock": {
+      "required": [
+        "path",
+        "cameraId",
+        "format",
+        "formatVersion",
+        "frameCount",
+        "firstSequenceNumber",
+        "lastSequenceNumber",
+        "receivedStartUtcNs",
+        "receivedEndUtcNs",
+        "correctedStartUtcNsAvailable",
+        "correctedStartUtcNs",
+        "correctedEndUtcNsAvailable",
+        "correctedEndUtcNs",
+        "containsIncompleteFrame",
+        "sizeBytes",
+        "sha256",
+        "headerCrc32c",
+        "indexCrc32c",
+        "dataCrc32c",
+        "footerCrc32c"
+      ],
+      "format": "PBNVME3",
+      "formatVersion": 3
+    },
+    "cameraConfigSnapshot": {
+      "required": [
+        "cameraId",
+        "serialNumber",
+        "model",
+        "capturedAtUtcNs",
+        "configSchemaVersion",
+        "configRevision",
+        "parameters"
+      ],
+      "parameterEncoding": {
+        "required": [
+          "available",
+          "value",
+          "errorCode"
+        ],
+        "unavailableRule": "available=false implies value=null"
+      },
+      "minimumParameters": [
+        "exposureTimeUs",
+        "gainDb",
+        "actualFps",
+        "roi",
+        "width",
+        "height",
+        "pixelFormat",
+        "triggerMode",
+        "triggerSource",
+        "packetSizeBytes",
+        "transmissionDelayNs",
+        "timeSyncCapability",
+        "timeSyncState"
+      ]
+    }
+  },
+  "limits": {
+    "manifestBytes": 8388608,
+    "cameras": 6,
+    "rawBlocks": 262144,
+    "clockModels": 64,
+    "fileEntries": 262208,
+    "identifierUtf8Bytes": 128,
+    "textUtf8Bytes": 4096
+  },
+  "compatibility": {
+    "manifestV3": "read-validate-export-upload-only-no-in-place-rewrite",
+    "pbnvme2": "read-validate-export-upload-only-no-in-place-rewrite",
+    "futureVersion": "reject-before-payload-interpretation"
+  }
+}
