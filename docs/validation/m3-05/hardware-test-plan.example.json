@@ -5,7 +5,9 @@
     { "cameraId": "CAM01", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_1" },
     { "cameraId": "CAM02", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_2" },
     { "cameraId": "CAM03", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_3" },
-    { "cameraId": "CAM04", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_4" }
+    { "cameraId": "CAM04", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_4" },
+    { "cameraId": "CAM05", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_5" },
+    { "cameraId": "CAM06", "serialNumber": "REPLACE_WITH_APPROVED_SERIAL_6" }
   ],
   "parameters": {
     "exposureUs": 1000.0,

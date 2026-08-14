@@ -155,7 +155,7 @@ struct CandidateEventManagerSnapshot final
     std::vector<CandidateCameraSnapshot> cameras;
 };
 
-/// Bounded, thread-safe M5 candidate state manager for at most four logical cameras.
+/// Bounded, thread-safe candidate state manager for at most six logical cameras.
 class CandidateEventManager final
 {
   public:

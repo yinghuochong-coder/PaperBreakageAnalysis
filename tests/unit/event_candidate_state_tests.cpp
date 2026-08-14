@@ -1,4 +1,5 @@
 #include "paperbreak/camera/frame_pool.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/event/candidate_event.hpp"
 #include "paperbreak/event/memory_ring.hpp"
 
@@ -571,11 +572,12 @@ TEST(EventCandidateState, HotReconfigureSeedDropsAccumulatedRecoveryDuration)
     EXPECT_FALSE(exact.value().camera.rearm_pending);
 }
 
-TEST(EventCandidateState, FourCameraRecoveryAndSuppressionRemainIndependent)
+TEST(EventCandidateState, SixCameraRecoveryAndSuppressionRemainIndependent)
 {
-    CandidateHarness harness({"CAM01", "CAM02", "CAM03", "CAM04"}, 1U, 1U, {}, 10s, 0ms, 0.5, 0.8,
-                             ExternalConfirmationPolicy::not_used, 0ms, 10ms, 100ms, 500ms);
-    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
+    CandidateHarness harness({"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"}, 1U, 1U, {},
+                             10s, 0ms, 0.5, 0.8, ExternalConfirmationPolicy::not_used, 0ms, 10ms,
+                             100ms, 500ms);
+    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"})
     {
         ASSERT_TRUE(harness.submit(camera_id, 1U, 0ms, true, 0.9));
         ASSERT_TRUE(harness.submit(camera_id, 2U, 10ms, true, 0.9));
@@ -598,6 +600,10 @@ TEST(EventCandidateState, FourCameraRecoveryAndSuppressionRemainIndependent)
     EXPECT_EQ(find("CAM03").rearm_suppressed_results, 0U);
     EXPECT_TRUE(find("CAM04").rearm_pending);
     EXPECT_EQ(find("CAM04").rearm_suppressed_results, 0U);
+    EXPECT_TRUE(find("CAM05").rearm_pending);
+    EXPECT_EQ(find("CAM05").rearm_suppressed_results, 0U);
+    EXPECT_TRUE(find("CAM06").rearm_pending);
+    EXPECT_EQ(find("CAM06").rearm_suppressed_results, 0U);
 }
 
 TEST(EventCandidateState, ResetsOnlyBeyondTwoPeriodsAndRejectsStaleExternalConfirmation)
@@ -728,11 +734,13 @@ TEST(EventCandidateState, DuplicateResultIsIdempotentAndOrderingErrorsRecover)
     EXPECT_EQ(snapshot.rejected_results, 3U);
 }
 
-TEST(EventCandidateState, ConcurrentFourCameraTriggersRemainIndependentAndUnique)
+TEST(EventCandidateState, ConcurrentSixCameraTriggersRemainIndependentAndUnique)
 {
-    CandidateHarness harness({"CAM01", "CAM02", "CAM03", "CAM04"}, 1U, 5U);
-    const std::array<std::string, 4U> camera_ids{"CAM01", "CAM02", "CAM03", "CAM04"};
-    std::array<std::optional<Result<CandidateProcessOutcome>>, 4U> outcomes;
+    CandidateHarness harness({"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"}, 1U, 5U);
+    const std::array<std::string, paperbreak::camera_slot_count> camera_ids{
+        "CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"};
+    std::array<std::optional<Result<CandidateProcessOutcome>>, paperbreak::camera_slot_count>
+        outcomes;
     std::vector<std::jthread> threads;
     threads.reserve(camera_ids.size());
     for (std::size_t index = 0U; index < camera_ids.size(); ++index)
@@ -752,10 +760,10 @@ TEST(EventCandidateState, ConcurrentFourCameraTriggersRemainIndependentAndUnique
         EXPECT_EQ(outcome->value().camera.observation_state, CandidateEventState::candidate);
         event_ids.insert(outcome->value().camera.event->event_id);
     }
-    EXPECT_EQ(event_ids.size(), 4U);
+    EXPECT_EQ(event_ids.size(), paperbreak::camera_slot_count);
     const auto snapshot = harness.manager().snapshot();
-    EXPECT_EQ(snapshot.events_created, 4U);
-    EXPECT_EQ(snapshot.cameras.size(), 4U);
+    EXPECT_EQ(snapshot.events_created, paperbreak::camera_slot_count);
+    EXPECT_EQ(snapshot.cameras.size(), paperbreak::camera_slot_count);
 }
 
 TEST(EventCandidateState, NotificationExceptionsAreContainedAndCounted)

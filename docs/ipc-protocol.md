@@ -320,7 +320,7 @@ MVS 参数节点；因此状态查询不会与取帧争用设备互斥。配置 
 }
 ```
 
-服务每次绑定都重新枚举设备，仅接受尚未使用的 `CAM01`～`CAM04`、尚未绑定的序列号和批准型号
+服务每次绑定都重新枚举设备，仅接受尚未使用的 `CAM01`～`CAM06`、尚未绑定的序列号和批准型号
 `MV-CS020-60GM`。设备必须可独占访问；服务连接设备、完整回读当前参数并成功断开后，才通过配置
 仓储乐观修订与原子替换保存。占用、型号不符、参数回读失败、修订冲突、断开失败或持久化失败均不
 修改配置。成功响应包含 `saved=true`、新的 `storedConfigRevision` 与
@@ -400,13 +400,13 @@ Hikrobot 适配器根据设备 `GevTimestampTickFrequency` 转换能力范围、
 ### 算法配置、实际状态与当前图像测试
 
 `algorithm.getConfig`、`algorithm.updateConfig` 和 `algorithm.testCurrentFrame` 均只要求已认证
-本机用户。三项命令均只接受 CAM01～CAM04，
+本机用户。三项命令均只接受 CAM01～CAM06，
 未知字段被拒绝；服务停止写入阶段拒绝后两项命令。
 
 - `algorithm.getConfig`：payload 为 `{"cameraId":"CAM01"}`。返回完整保存配置
   `algorithm`、实际有效配置 `effectiveAlgorithm`、两项配置修订和 `runtime`。运行时包含实际
   检测器信息、`active` / `partially-degraded` / `disabled` / `manual-trigger-only` 状态、当前帧可用性及序号；
-  `algorithm` 对象使用 schema v6 的 `downsampleMode`、`processingFps`、
+  `algorithm` 对象使用 schema v7 的 `downsampleMode`、`processingFps`、
   `confirmationDurationMs` 和 `rearmDurationMs`，不再接受 `consecutiveFrames`。`metrics` 包含两个容量 1 槽位的
   汇总深度/容量/高水位、提交/处理/跳过/失败帧、处理调用与
   最近/平均/最大耗时、候选/确认/拒绝计数，并追加 `consecutiveBacklogEvents` 和
@@ -488,11 +488,11 @@ M6-00 仍为阻塞门禁；检测器响应中的 `prototypeOnly=true` 必须在 
 {"cameraIds":["CAM01","CAM02"],"fps":20}
 ```
 
-`cameraIds` 必须包含 1 至 4 个不重复的逻辑相机编号，每项最长 32 字节。订阅绑定当前 IPC
+`cameraIds` 必须包含 1 至 6 个不重复的 `CAM01`～`CAM06` 逻辑相机编号。订阅绑定当前 IPC
 连接；同一连接再次订阅会原子替换其相机集合和帧率。可选 `fps` 必须是 0.1～30 的有限数值，
 省略时使用服务启动配置；控制台实时预览页提供 2、3、5、10、20、30 fps。服务最多接受 4 个
 并发预览订阅。同一相机按相关订阅的最高目标帧率只编码一次，再对各订阅独立限速；无订阅者时
-服务不进行 JPEG 编码。响应包含 `subscribed=true`、实际 `cameraIds` 与接受的 `fps`。预览帧率
+服务不进行 JPEG 编码。最多 4 个并发预览订阅客户端的限制保持不变，不与相机数量混用。响应包含 `subscribed=true`、实际 `cameraIds` 与接受的 `fps`。预览帧率
 只控制预览抽样和投递，不修改相机采集帧率。
 
 ### `preview.unsubscribe`

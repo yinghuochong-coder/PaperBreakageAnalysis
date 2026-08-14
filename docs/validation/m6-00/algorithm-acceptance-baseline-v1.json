@@ -43,10 +43,10 @@
   "performanceGate": {
     "approvalStatus": "pending-target-hardware-baseline",
     "targetCameraModel": "MV-CS020-60GM",
-    "cameraCount": 4,
+    "cameraCount": 6,
     "configuredFramesPerSecondPerCamera": 60,
-    "requiredSustainedInputFramesPerSecond": 240,
-    "singleWorkerTheoreticalMeanServiceTimeMs": 4.1667,
+    "requiredSustainedInputFramesPerSecond": 360,
+    "singleWorkerTheoreticalMeanServiceTimeMs": 2.7778,
     "productionRoi": null,
     "productionPixelFormat": null,
     "algorithmWorkerCount": null,

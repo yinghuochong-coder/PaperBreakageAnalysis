@@ -1,5 +1,7 @@
 #include "paperbreak/storage/nvme_cache.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -65,12 +67,13 @@ std::uint64_t saturating_add(const std::uint64_t left, const std::uint64_t right
 constexpr std::array<std::uint32_t, 256U> make_crc32c_table() noexcept
 {
     std::array<std::uint32_t, 256U> table{};
-    for (std::uint32_t index = 0U; index < table.size(); ++index)
+    std::uint32_t index = 0U;
+    for (auto& entry : table)
     {
-        auto value = index;
+        auto value = index++;
         for (unsigned bit = 0U; bit < 8U; ++bit)
             value = (value >> 1U) ^ (0x82F63B78U & (0U - (value & 1U)));
-        table[index] = value;
+        entry = value;
     }
     return table;
 }
@@ -478,7 +481,7 @@ Result<std::shared_ptr<NvmeRollingCache>> NvmeRollingCache::create(
         options.write_limit_bytes_per_second == 0U ||
         options.io_timeout <= std::chrono::milliseconds::zero() ||
         options.queue_capacity_per_camera != nvme_default_queue_capacity_per_camera ||
-        options.cameras.empty() || options.cameras.size() > 4U)
+        options.cameras.empty() || options.cameras.size() > camera_slot_count)
     {
         return Result<std::shared_ptr<NvmeRollingCache>>::failure(
             nvme_error("SYS_CONFIG_INVALID", Severity::error, "NVMe 滚动缓存配置无效",
@@ -495,7 +498,7 @@ Result<std::shared_ptr<NvmeRollingCache>> NvmeRollingCache::create(
     {
         const auto maximum =
             maximum_nvme_block_bytes(layout.index_capacity, layout.maximum_frame_bytes);
-        if (layout.camera_id.empty() || layout.camera_id.size() > 16U || !maximum ||
+        if (!is_canonical_camera_id(layout.camera_id) || !maximum ||
             maximum.value() > impl->options.maximum_cache_bytes ||
             layout.required_input_bytes_per_second == 0U ||
             !camera_ids.insert(layout.camera_id).second)

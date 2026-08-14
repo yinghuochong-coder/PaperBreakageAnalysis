@@ -142,4 +142,4 @@ cmake --install out\build\local-windows-vs2026-release --config Release --prefix
 
 ## 8. M0 验证边界
 
-M0 自动验证会链接并执行不打开设备的 MVS SDK smoke，但不连接、配置或取流实体相机，也不访问 PLC 或上位机。Qt 6.10.2 `msvc2022_64` 与 v145、OpenCV 4.12.0 与 v145 的最小链接/启动由 smoke test 覆盖；真实取流、拔线、四路带宽及 7×24 小时测试均未执行，也不属于 M0。
+M0 自动验证会链接并执行不打开设备的 MVS SDK smoke，但不连接、配置或取流实体相机，也不访问 PLC 或上位机。Qt 6.10.2 `msvc2022_64` 与 v145、OpenCV 4.12.0 与 v145 的最小链接/启动由 smoke test 覆盖；真实取流、拔线、六路带宽及 7×24 小时测试均未执行，也不属于 M0。

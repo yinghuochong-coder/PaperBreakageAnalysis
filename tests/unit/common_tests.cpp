@@ -1,3 +1,4 @@
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/common/error.hpp"
 #include "paperbreak/common/result.hpp"
 #include "paperbreak/common/version.hpp"
@@ -48,4 +49,24 @@ TEST(Version, ContainsBuildAndDependencyMetadata)
     EXPECT_EQ(version.qt_version, "6.10.2");
     EXPECT_EQ(version.opencv_version, "4.12.0");
     EXPECT_FALSE(paperbreak::format_version_info().empty());
+}
+
+TEST(CameraSlots, DefinesSixCanonicalIdsAndBidirectionalMapping)
+{
+    ASSERT_EQ(paperbreak::camera_slot_count, 6U);
+    ASSERT_EQ(paperbreak::canonical_camera_ids.size(), 6U);
+    for (std::size_t index = 0U; index < paperbreak::camera_slot_count; ++index)
+    {
+        const auto camera_id = paperbreak::camera_id_from_slot(index);
+        ASSERT_TRUE(camera_id.has_value());
+        EXPECT_EQ(camera_id.value(), paperbreak::canonical_camera_ids[index]);
+        EXPECT_EQ(paperbreak::camera_slot_index(camera_id.value()), index);
+        EXPECT_TRUE(paperbreak::is_canonical_camera_id(camera_id.value()));
+    }
+    EXPECT_FALSE(paperbreak::camera_id_from_slot(6U));
+    for (const std::string_view invalid : {"", "CAM00", "CAM07", "CAM1", "cam01", "CAM001"})
+    {
+        EXPECT_FALSE(paperbreak::camera_slot_index(invalid));
+        EXPECT_FALSE(paperbreak::is_canonical_camera_id(invalid));
+    }
 }

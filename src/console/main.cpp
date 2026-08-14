@@ -19,6 +19,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLayout>
@@ -78,11 +79,33 @@ void send_left_double_click(QWidget* widget)
 bool preview_pane_smoke(paperbreak::console::MainWindow& main_window, QApplication& application,
                         paperbreak::console::PreviewClient& preview_client)
 {
+    auto* const overview_grid_widget =
+        main_window.findChild<QWidget*>(QStringLiteral("overview-camera-grid"));
+    auto* const overview_grid =
+        qobject_cast<QGridLayout*>(overview_grid_widget ? overview_grid_widget->layout() : nullptr);
+    if (!overview_grid)
+        return false;
+    for (std::size_t index = 0U; index < paperbreak::camera_slot_count; ++index)
+    {
+        auto* const card = main_window.findChild<QWidget*>(
+            QStringLiteral("overview-camera-CAM0%1").arg(static_cast<int>(index + 1U)));
+        int row{};
+        int column{};
+        int row_span{};
+        int column_span{};
+        if (!card)
+            return false;
+        overview_grid->getItemPosition(overview_grid->indexOf(card), &row, &column, &row_span,
+                                       &column_span);
+        if (row != static_cast<int>(index / 3U) || column != static_cast<int>(index % 3U) ||
+            row_span != 1 || column_span != 1)
+            return false;
+    }
     if (!main_window.select_page(1U))
         return false;
     application.processEvents();
-    std::array<QWidget*, 4U> tiles{};
-    std::array<QSize, 4U> initial_sizes{};
+    std::array<QWidget*, paperbreak::camera_slot_count> tiles{};
+    std::array<QSize, paperbreak::camera_slot_count> initial_sizes{};
     for (std::size_t index = 0; index < tiles.size(); ++index)
     {
         tiles[index] = main_window.findChild<QWidget*>(
@@ -95,7 +118,30 @@ bool preview_pane_smoke(paperbreak::console::MainWindow& main_window, QApplicati
     auto* const grid = main_window.findChild<QWidget*>(QStringLiteral("preview-grid"));
     auto* const rate_choice =
         main_window.findChild<QComboBox*>(QStringLiteral("preview-rate-choice"));
-    if (!first_image || !grid || !rate_choice || rate_choice->count() != 6)
+    auto* const grid_layout = qobject_cast<QGridLayout*>(grid ? grid->layout() : nullptr);
+    auto* const layout_choice =
+        main_window.findChild<QComboBox*>(QStringLiteral("preview-layout-choice"));
+    if (!first_image || !grid || !grid_layout || !rate_choice || rate_choice->count() != 6 ||
+        !layout_choice || layout_choice->count() != 7 ||
+        layout_choice->itemText(5) != QStringLiteral("CAM05") ||
+        layout_choice->itemText(6) != QStringLiteral("CAM06"))
+        return false;
+    const auto canonical_layout = [&] {
+        for (std::size_t index = 0U; index < tiles.size(); ++index)
+        {
+            int row{};
+            int column{};
+            int row_span{};
+            int column_span{};
+            grid_layout->getItemPosition(grid_layout->indexOf(tiles[index]), &row, &column,
+                                         &row_span, &column_span);
+            if (row != static_cast<int>(index / 3U) || column != static_cast<int>(index % 3U) ||
+                row_span != 1 || column_span != 1)
+                return false;
+        }
+        return true;
+    };
+    if (!canonical_layout())
         return false;
     const std::array<int, 6U> expected_rates{2, 3, 5, 10, 20, 30};
     for (int index = 0; index < rate_choice->count(); ++index)
@@ -145,13 +191,11 @@ bool preview_pane_smoke(paperbreak::console::MainWindow& main_window, QApplicati
                              first_image->size() == tiles[0]->size();
     send_left_double_click(tiles[0]);
     application.processEvents();
-    auto* const layout_choice =
-        main_window.findChild<QComboBox*>(QStringLiteral("preview-layout-choice"));
     const bool restored =
         !tiles[0]->isWindow() &&
         std::ranges::all_of(tiles, [](const QWidget* tile) { return tile->isVisible(); }) &&
-        tiles[0]->parentWidget() == grid && tiles[0]->size() == initial_sizes[0] &&
-        !first_image->hasScaledContents() && layout_choice && layout_choice->currentIndex() == 0;
+        tiles[0]->parentWidget() == grid && !first_image->hasScaledContents() &&
+        layout_choice->currentIndex() == 0 && canonical_layout();
     return small_frame_kept_sizes && large_frame_kept_sizes && focused && full_screen && restored;
 }
 
@@ -609,16 +653,19 @@ int main(int argc, char* argv[])
         console_ipc_options);
     tray.apply_snapshot(state_store.snapshot());
     main_window.apply_snapshot(state_store.snapshot());
-    auto client_start = state_store.start();
-    if (!client_start)
+    if (!smoke_test)
     {
-        static_cast<void>(logging->log(paperbreak::logging::Category::ui,
-                                       paperbreak::logging::Level::error,
-                                       "PaperBreakEdgeConsole IPC client failed to start"));
-        main_window.hide();
-        tray.hide();
-        static_cast<void>(logging->shutdown());
-        return 1;
+        auto client_start = state_store.start();
+        if (!client_start)
+        {
+            static_cast<void>(logging->log(paperbreak::logging::Category::ui,
+                                           paperbreak::logging::Level::error,
+                                           "PaperBreakEdgeConsole IPC client failed to start"));
+            main_window.hide();
+            tray.hide();
+            static_cast<void>(logging->shutdown());
+            return 1;
+        }
     }
     if (!smoke_test)
     {
@@ -762,7 +809,7 @@ int main(int argc, char* argv[])
         const bool initial_binding_available =
             camera_binding_panel && camera_bind_slot && camera_bind_location &&
             camera_bind_button && camera_bind_button->parentWidget() == camera_binding_panel &&
-            camera_bind_slot->count() == 2 &&
+            camera_bind_slot->count() == 4 &&
             camera_bind_slot->currentText() == QStringLiteral("CAM03") &&
             camera_bind_button->isEnabled();
         camera_smoke.cameras.push_back({.id = "CAM03",
@@ -779,7 +826,7 @@ int main(int argc, char* argv[])
             selected_discovered && selected_discovered->currentRow() == 1 && camera_bind_slot &&
             selected_discovered->item(0) &&
             selected_discovered->item(0)->text().contains(QStringLiteral("已绑定到 CAM03")) &&
-            camera_bind_slot->count() == 1 &&
+            camera_bind_slot->count() == 3 &&
             camera_bind_slot->currentText() == QStringLiteral("CAM04") && camera_bind_button &&
             camera_bind_button->isEnabled();
         const bool invalid_theme_fell_back =
@@ -953,6 +1000,8 @@ int main(int argc, char* argv[])
             main_window.findChild<QWidget*>(QStringLiteral("algorithm-metric-chart"));
         auto* const algorithm_export =
             main_window.findChild<QPushButton*>(QStringLiteral("algorithm-export-current-csv"));
+        auto* const algorithm_camera_selector =
+            main_window.findChild<QComboBox*>(QStringLiteral("algorithm-camera-selector"));
         const auto runtime_groups =
             algorithm_page ? algorithm_page->findChildren<QGroupBox*>(QRegularExpression{
                                  QStringLiteral("algorithm-runtime-group-[0-3]")})
@@ -984,7 +1033,11 @@ int main(int argc, char* argv[])
             algorithm_decision_grid && algorithm_wide_columns == 4 &&
             algorithm_narrow_columns <= 2 && metric_cards.size() == 34 &&
             runtime_groups.size() == 4 && metric_tooltips_present && algorithm_chart &&
-            algorithm_export && algorithm_forbidden_text_removed;
+            algorithm_export && algorithm_camera_selector &&
+            algorithm_camera_selector->count() == 6 &&
+            algorithm_camera_selector->itemText(4) == QStringLiteral("CAM05") &&
+            algorithm_camera_selector->itemText(5) == QStringLiteral("CAM06") &&
+            algorithm_forbidden_text_removed;
         if (!algorithm_layout_and_cards_ready)
         {
             std::cerr << "algorithm UI smoke failed: selected=" << algorithm_page_selected

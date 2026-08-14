@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/camera/frame.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/common/result.hpp"
 #include "paperbreak/common/threading.hpp"
 
@@ -23,7 +24,7 @@
 namespace paperbreak::pipeline
 {
 
-inline constexpr std::size_t preview_maximum_cameras = 4U;
+inline constexpr std::size_t preview_maximum_cameras = camera_slot_count;
 inline constexpr std::size_t preview_maximum_subscriptions = 4U;
 inline constexpr double preview_minimum_frames_per_second = 0.1;
 inline constexpr double preview_maximum_frames_per_second = 30.0;

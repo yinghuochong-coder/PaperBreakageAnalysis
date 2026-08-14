@@ -1,3 +1,4 @@
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/storage/nvme_index.hpp"
 
 #include <gtest/gtest.h>
@@ -143,6 +144,25 @@ TEST(StorageNvmeIndex, ProtectsFutureOverlappingBlockAndEnforcesLeaseCapacity)
     auto oldest = index->oldest_reclaimable();
     ASSERT_TRUE(oldest);
     EXPECT_FALSE(oldest.value());
+}
+
+TEST(StorageNvmeIndex, AcceptsSixCameraLeaseAndRejectsSeventhCamera)
+{
+    TemporaryIndexDirectory temporary{"six-camera-lease"};
+    auto index = paperbreak::storage::make_sqlite_nvme_block_index();
+    ASSERT_TRUE(index->prepare(temporary.path(), 8U, 2U));
+    auto six = lease_request("EVT-SIX");
+    six.camera_ids.assign(paperbreak::canonical_camera_ids.begin(),
+                          paperbreak::canonical_camera_ids.end());
+    auto protected_window = index->protect_event_window(six);
+    ASSERT_TRUE(protected_window) << protected_window.error().message;
+    EXPECT_EQ(protected_window.value().protected_blocks, 0U);
+
+    auto seven = lease_request("EVT-SEVEN");
+    seven.camera_ids = {"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06", "CAM07"};
+    auto rejected = index->protect_event_window(std::move(seven));
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().business_code, "NVME_INDEX_FAILED");
 }
 
 TEST(StorageNvmeIndex, RebuildsDerivedBlocksAndReattachesPersistedLease)

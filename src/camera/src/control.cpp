@@ -99,8 +99,8 @@ void CameraControlRuntime::dispatch_line_inputs(const std::stop_token stop_token
 {
     while (!stop_token.stop_requested())
     {
-        std::array<std::optional<LineInputEvent>, 4U> pending;
-        std::array<std::string, 4U> pending_camera_ids;
+        std::array<std::optional<LineInputEvent>, camera_slot_count> pending;
+        std::array<std::string, camera_slot_count> pending_camera_ids;
         {
             std::unique_lock lock{line_input_mutex_};
             line_input_condition_.wait(lock, stop_token, [this] {
@@ -440,6 +440,10 @@ Result<CameraControlSnapshot> CameraControlRuntime::connect(std::string_view id,
 {
     if (!provider_)
         return Result<CameraControlSnapshot>::failure(unsupported("camera.connect"));
+    if (!is_canonical_camera_id(id))
+        return Result<CameraControlSnapshot>::failure(
+            make_camera_error(CameraErrorKind::config_failed, "逻辑相机 ID 必须为 CAM01 至 CAM06",
+                              "camera.control.connect", std::string{id}));
     Session* session{};
     {
         std::scoped_lock lock{mutex_};
@@ -448,9 +452,9 @@ Result<CameraControlSnapshot> CameraControlRuntime::connect(std::string_view id,
             session = found.value();
         else
         {
-            if (sessions_.size() >= 4U)
+            if (sessions_.size() >= camera_slot_count)
                 return Result<CameraControlSnapshot>::failure(make_camera_error(
-                    CameraErrorKind::config_failed, "相机数量超过四路", "camera.control.connect"));
+                    CameraErrorKind::config_failed, "相机数量超过六路", "camera.control.connect"));
             auto created = std::make_unique<Session>();
             created->id = id;
             created->serial = serial;

@@ -85,6 +85,9 @@ foreach(field IN ITEMS
         metadataBytesPerSecondAllCameras
         rollingWriteBytesPerSecondAllCameras
         minimumMeasuredSustainedWriteBytesPerSecond
+        defaultRollingCacheWriteLimitMiBps
+        configuredFramePoolCapacityPerCamera
+        framePoolBytesAllCameras
         maximumCacheStorageGiBExample
         physicalSlotCount
         usableCommittedSlotCount
@@ -116,8 +119,13 @@ math(EXPR calculated_rolling_bps
     "${calculated_raw_bps} + ${calculated_metadata_bps}")
 math(EXPR calculated_minimum_disk_bps
     "(${calculated_rolling_bps} * 100 + ${rolling_share} - 1) / ${rolling_share}")
+math(EXPR calculated_default_write_limit_bps
+    "${reference_defaultRollingCacheWriteLimitMiBps} * 1048576")
+math(EXPR calculated_frame_pool_bytes
+    "${reference_maxFrameBytes} * ${reference_configuredFramePoolCapacityPerCamera} * ${reference_cameraCount}")
 
-if(NOT reference_maxFrameBytes EQUAL calculated_frame_bytes OR
+if(NOT reference_cameraCount EQUAL 6 OR
+   NOT reference_maxFrameBytes EQUAL calculated_frame_bytes OR
    NOT reference_indexCapacity EQUAL calculated_index_capacity OR
    NOT reference_indexRegionBytes EQUAL calculated_index_region OR
    NOT reference_dataRegionBytes EQUAL calculated_data_region OR
@@ -125,8 +133,16 @@ if(NOT reference_maxFrameBytes EQUAL calculated_frame_bytes OR
    NOT reference_rawPayloadBytesPerSecondAllCameras EQUAL calculated_raw_bps OR
    NOT reference_metadataBytesPerSecondAllCameras EQUAL calculated_metadata_bps OR
    NOT reference_rollingWriteBytesPerSecondAllCameras EQUAL calculated_rolling_bps OR
-   NOT reference_minimumMeasuredSustainedWriteBytesPerSecond EQUAL calculated_minimum_disk_bps)
+   NOT reference_minimumMeasuredSustainedWriteBytesPerSecond EQUAL calculated_minimum_disk_bps OR
+   NOT reference_framePoolBytesAllCameras EQUAL calculated_frame_pool_bytes OR
+   NOT calculated_default_write_limit_bps LESS calculated_rolling_bps)
     message(FATAL_ERROR "M7-01 reference block or bandwidth arithmetic is inconsistent")
+endif()
+
+string(JSON default_limit_sufficient GET "${design}" referenceWorkload defaultRollingCacheWriteLimitSufficient)
+string(JSON frame_pool_gib GET "${design}" referenceWorkload framePoolGiBAllCamerasApprox)
+if(default_limit_sufficient OR NOT frame_pool_gib STREQUAL "21.82")
+    message(FATAL_ERROR "M7-01 default write-limit or frame-pool memory baseline is inconsistent")
 endif()
 
 math(EXPR maximum_cache_bytes

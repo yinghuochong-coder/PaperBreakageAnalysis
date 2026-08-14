@@ -84,6 +84,34 @@ std::string downgrade_algorithm_config(std::string value, const std::uint32_t sc
     return document.dump(2) + "\n";
 }
 
+nlohmann::json camera_config(const std::string& camera_id, const std::string& serial_number)
+{
+    return {{"id", camera_id},
+            {"enabled", true},
+            {"serialNumber", serial_number},
+            {"location", camera_id},
+            {"exposureUs", 100.0},
+            {"autoExposure", "Off"},
+            {"gainDb", 2.0},
+            {"frameRate", 60.0},
+            {"roi", {{"width", 64U}, {"height", 48U}, {"offsetX", 0U}, {"offsetY", 0U}}},
+            {"reverseX", false},
+            {"reverseY", false},
+            {"pixelFormat", "Mono8"},
+            {"triggerMode", "Continuous"},
+            {"triggerSource", ""},
+            {"triggerDelayUs", 0U},
+            {"packetSizeBytes", 1500U},
+            {"interPacketDelayNs", 0U},
+            {"lineIo",
+             {{"alarmInputEnabled", false},
+              {"alarmActiveLevel", "High"},
+              {"strobeOutputEnabled", false},
+              {"strobeDurationUs", 0U},
+              {"strobePreDelayUs", 0U},
+              {"strobePostDelayUs", 0U}}}};
+}
+
 class RecordingAudit final : public paperbreak::config::IConfigAuditSink
 {
   public:
@@ -186,7 +214,7 @@ TEST(BasicConfig, AcceptsCompleteVersionTwoAtUnicodeAndSpacePath)
     const auto path = directory.write("纸机 配置.json", valid_config());
     const auto result = paperbreak::config::validate_basic_config(path);
     ASSERT_TRUE(result) << result.error().message;
-    EXPECT_EQ(result.value().schema_version, 6U);
+    EXPECT_EQ(result.value().schema_version, 7U);
     EXPECT_EQ(result.value().config_revision, 1U);
 }
 
@@ -293,7 +321,7 @@ TEST(BasicConfig, DefaultsLegacyCameraMirroringOffAndSerializesExplicitValues)
     EXPECT_NE(serialized.find("\"reverseY\": true"), std::string::npos);
 }
 
-TEST(BasicConfig, MigratesVersionTwoCameraDefaultsToVersionSix)
+TEST(BasicConfig, MigratesVersionTwoCameraDefaultsToVersionSeven)
 {
     const TemporaryDirectory directory;
     const auto contents = replace_once(
@@ -303,7 +331,7 @@ TEST(BasicConfig, MigratesVersionTwoCameraDefaultsToVersionSix)
     ASSERT_TRUE(parsed) << parsed.error().message;
     ASSERT_EQ(parsed.value().cameras.size(), 1U);
     const auto& camera = parsed.value().cameras.front();
-    EXPECT_EQ(parsed.value().config_schema_version, 6U);
+    EXPECT_EQ(parsed.value().config_schema_version, 7U);
     EXPECT_EQ(parsed.value().algorithm.downsample_mode,
               paperbreak::config::AlgorithmDownsampleMode::disabled);
     EXPECT_EQ(parsed.value().algorithm.processing_fps,
@@ -320,7 +348,7 @@ TEST(BasicConfig, MigratesVersionTwoCameraDefaultsToVersionSix)
     EXPECT_EQ(camera.line_io.strobe_post_delay_us, 0U);
 
     const auto serialized = paperbreak::config::serialize_config(parsed.value());
-    EXPECT_NE(serialized.find("\"configSchemaVersion\": 6"), std::string::npos);
+    EXPECT_NE(serialized.find("\"configSchemaVersion\": 7"), std::string::npos);
     EXPECT_NE(serialized.find("\"autoExposure\": \"Off\""), std::string::npos);
     EXPECT_NE(serialized.find("\"lineIo\""), std::string::npos);
 }
@@ -374,11 +402,11 @@ TEST(BasicConfig, MigratesVersionFourSevenFramesToOneHundredTwentyMilliseconds)
     EXPECT_EQ(migrated.value().algorithm.rearm_duration_ms, 500U);
     const auto serialized =
         nlohmann::json::parse(paperbreak::config::serialize_config(migrated.value()));
-    EXPECT_EQ(serialized["configSchemaVersion"], 6U);
+    EXPECT_EQ(serialized["configSchemaVersion"], 7U);
     EXPECT_FALSE(serialized["algorithm"].contains("consecutiveFrames"));
 }
 
-TEST(BasicConfig, MigratesVersionFiveRearmDefaultAndStrictlyValidatesVersionSix)
+TEST(BasicConfig, MigratesVersionFiveRearmDefaultAndStrictlyValidatesVersionSeven)
 {
     const TemporaryDirectory directory;
     auto migrated = paperbreak::config::parse_config(valid_config(), directory.path());
@@ -393,7 +421,7 @@ TEST(BasicConfig, MigratesVersionFiveRearmDefaultAndStrictlyValidatesVersionSix)
     EXPECT_EQ(migrated_v5.value().algorithm.rearm_duration_ms, 500U);
     EXPECT_EQ(nlohmann::json::parse(
                   paperbreak::config::serialize_config(migrated_v5.value()))["configSchemaVersion"],
-              6U);
+              7U);
 
     for (const std::string_view mode : {"disabled", "half", "quarter"})
         for (const auto fps : {15U, 30U, 60U})
@@ -472,6 +500,58 @@ TEST(BasicConfig, StrictlyValidatesVersionThreeLineIoAndDependencies)
     EXPECT_FALSE(paperbreak::config::parse_config(zero_duration, directory.path()));
 }
 
+TEST(BasicConfig, AcceptsSixVersionSevenCamerasAndRejectsInvalidSeventhOrDuplicates)
+{
+    const TemporaryDirectory directory;
+    auto baseline = paperbreak::config::parse_config(valid_config(), directory.path());
+    ASSERT_TRUE(baseline) << baseline.error().message;
+    auto document = nlohmann::json::parse(paperbreak::config::serialize_config(baseline.value()));
+    document["cameras"] = nlohmann::json::array();
+    for (std::size_t index = 0U; index < paperbreak::camera_slot_count; ++index)
+    {
+        document["cameras"].push_back(
+            camera_config(std::string{paperbreak::canonical_camera_ids[index]},
+                          "MOCK-" + std::to_string(index + 1U)));
+    }
+
+    const auto parsed = paperbreak::config::parse_config(document.dump(), directory.path());
+    ASSERT_TRUE(parsed) << parsed.error().message;
+    ASSERT_EQ(parsed.value().cameras.size(), paperbreak::camera_slot_count);
+    EXPECT_EQ(parsed.value().cameras.back().id, "CAM06");
+    const auto round_trip = paperbreak::config::parse_config(
+        paperbreak::config::serialize_config(parsed.value()), directory.path());
+    ASSERT_TRUE(round_trip) << round_trip.error().message;
+    EXPECT_EQ(round_trip.value(), parsed.value());
+
+    auto version_six = document;
+    version_six["configSchemaVersion"] = 6U;
+    const auto migrated_v6 = paperbreak::config::parse_config(version_six.dump(), directory.path());
+    ASSERT_TRUE(migrated_v6) << migrated_v6.error().message;
+    EXPECT_EQ(migrated_v6.value().config_schema_version, 7U);
+
+    auto seventh = document;
+    seventh["cameras"].push_back(camera_config("CAM07", "MOCK-7"));
+    EXPECT_FALSE(paperbreak::config::parse_config(seventh.dump(), directory.path()));
+
+    auto invalid_id = document;
+    invalid_id["cameras"][5]["id"] = "CAM07";
+    EXPECT_FALSE(paperbreak::config::parse_config(invalid_id.dump(), directory.path()));
+
+    auto duplicate_id = document;
+    duplicate_id["cameras"][5]["id"] = "CAM01";
+    EXPECT_FALSE(paperbreak::config::parse_config(duplicate_id.dump(), directory.path()));
+
+    auto duplicate_serial = document;
+    duplicate_serial["cameras"][5]["serialNumber"] = "MOCK-1";
+    EXPECT_FALSE(paperbreak::config::parse_config(duplicate_serial.dump(), directory.path()));
+
+    auto future = document;
+    future["configSchemaVersion"] = 8U;
+    const auto future_result = paperbreak::config::parse_config(future.dump(), directory.path());
+    ASSERT_FALSE(future_result);
+    EXPECT_EQ(future_result.error().business_code, "SYS_CONFIG_SCHEMA_UNSUPPORTED");
+}
+
 TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
 {
     const TemporaryDirectory directory;
@@ -484,7 +564,7 @@ TEST(BasicConfig, RejectsUnknownSensitiveMalformedAndUnsupportedSchema)
     const auto malformed = directory.write("truncated.json", R"({"configSchemaVersion":1)");
     const auto future =
         directory.write("future.json", replace_once(valid_config(), "\"configSchemaVersion\": 2",
-                                                    "\"configSchemaVersion\": 7"));
+                                                    "\"configSchemaVersion\": 8"));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(unknown));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(sensitive));
     EXPECT_FALSE(paperbreak::config::validate_basic_config(malformed));

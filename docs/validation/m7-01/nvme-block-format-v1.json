@@ -73,7 +73,7 @@
   },
   "referenceWorkload": {
     "purpose": "formula-check-only-not-hardware-acceptance",
-    "cameraCount": 4,
+    "cameraCount": 6,
     "widthPixels": 1624,
     "heightPixels": 1240,
     "strideBytes": 1624,
@@ -84,21 +84,26 @@
     "indexRegionBytes": 8192,
     "dataRegionBytes": 124854272,
     "maximumBlockBytes": 124870656,
-    "rawPayloadBytesPerSecondAllCameras": 483302400,
-    "metadataBytesPerSecondAllCameras": 55808,
-    "rollingWriteBytesPerSecondAllCameras": 483358208,
-    "minimumMeasuredSustainedWriteBytesPerSecond": 604197760,
+    "rawPayloadBytesPerSecondAllCameras": 724953600,
+    "metadataBytesPerSecondAllCameras": 83712,
+    "rollingWriteBytesPerSecondAllCameras": 725037312,
+    "minimumMeasuredSustainedWriteBytesPerSecond": 906296640,
+    "defaultRollingCacheWriteLimitMiBps": 600,
+    "defaultRollingCacheWriteLimitSufficient": false,
+    "configuredFramePoolCapacityPerCamera": 1939,
+    "framePoolBytesAllCameras": 23428083840,
+    "framePoolGiBAllCamerasApprox": 21.82,
     "maximumCacheStorageGiBExample": 1000,
     "physicalSlotCount": 8598,
     "usableCommittedSlotCount": 8597,
-    "balancedRetentionSeconds": 2149,
-    "rawPayloadBytesPerDayAllCameras": 41757327360000
+    "balancedRetentionSeconds": 1432,
+    "rawPayloadBytesPerDayAllCameras": 62635991040000
   },
   "deploymentEvidenceRequired": [
     "final-camera-count-roi-stride-pixel-format-and-frame-rate",
     "target-nvme-model-firmware-capacity-and-filesystem",
     "sustained-hot-near-full-write-bandwidth",
     "concurrent-event-write-and-flush-budget",
-    "four-camera-acquisition-statistics-through-capacity-wrap"
+    "six-camera-acquisition-statistics-through-capacity-wrap"
   ]
 }

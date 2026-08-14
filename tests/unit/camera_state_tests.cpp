@@ -1,5 +1,6 @@
 #include "paperbreak/camera/camera.hpp"
 #include "paperbreak/camera/state.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 
 #include <gtest/gtest.h>
 
@@ -260,14 +261,14 @@ TEST(CameraReconnect, DoesNotConsumeRetryWhenFailureIsIllegalInCurrentState)
     EXPECT_FALSE(controller.snapshot().next_retry_delay);
 }
 
-TEST(CameraStateMachine, IsolatesFourConcurrentCameraControllers)
+TEST(CameraStateMachine, IsolatesSixConcurrentCameraControllers)
 {
-    std::array<std::unique_ptr<CameraSessionController>, 4U> controllers;
-    std::array<std::vector<CameraTransitionRecord>, 4U> records;
-    std::array<std::mutex, 4U> record_mutexes;
+    std::array<std::unique_ptr<CameraSessionController>, paperbreak::camera_slot_count> controllers;
+    std::array<std::vector<CameraTransitionRecord>, paperbreak::camera_slot_count> records;
+    std::array<std::mutex, paperbreak::camera_slot_count> record_mutexes;
     for (std::size_t index = 0U; index < controllers.size(); ++index)
     {
-        const std::string id = "CAM0" + std::to_string(index + 1U);
+        const std::string id{paperbreak::canonical_camera_ids[index]};
         controllers[index] = std::make_unique<CameraSessionController>(
             id, true, ReconnectPolicy{},
             [&, index](const CameraTransitionRecord& record) {
@@ -277,7 +278,7 @@ TEST(CameraStateMachine, IsolatesFourConcurrentCameraControllers)
             immediate_waiter());
     }
 
-    std::array<std::jthread, 4U> workers;
+    std::array<std::jthread, paperbreak::camera_slot_count> workers;
     for (std::size_t index = 0U; index < workers.size(); ++index)
     {
         workers[index] = std::jthread([&, index](std::stop_token) {
@@ -285,7 +286,8 @@ TEST(CameraStateMachine, IsolatesFourConcurrentCameraControllers)
             for (std::size_t attempt = 0U; attempt <= index; ++attempt)
             {
                 static_cast<void>(controllers[index]->handle_failure(
-                    retryable_failure("CAM0" + std::to_string(index + 1U)), "failure"));
+                    retryable_failure(std::string{paperbreak::canonical_camera_ids[index]}),
+                    "failure"));
                 static_cast<void>(controllers[index]->wait_for_retry());
             }
         });
@@ -303,7 +305,7 @@ TEST(CameraStateMachine, IsolatesFourConcurrentCameraControllers)
         ASSERT_FALSE(records[index].empty());
         for (const auto& record : records[index])
         {
-            EXPECT_EQ(record.camera_id, "CAM0" + std::to_string(index + 1U));
+            EXPECT_EQ(record.camera_id, paperbreak::canonical_camera_ids[index]);
         }
     }
 }

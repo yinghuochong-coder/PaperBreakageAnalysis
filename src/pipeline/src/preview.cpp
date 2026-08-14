@@ -141,7 +141,7 @@ PreviewRuntime::PreviewRuntime(std::vector<std::string> camera_ids,
     }
     for (std::string& camera_id : camera_ids)
     {
-        if (camera_id.empty() ||
+        if (!is_canonical_camera_id(camera_id) ||
             !cameras_.emplace(camera_id, std::make_unique<CameraSlot>()).second)
             throw std::invalid_argument{"PreviewRuntime camera identifiers are invalid"};
         camera_order_.push_back(std::move(camera_id));

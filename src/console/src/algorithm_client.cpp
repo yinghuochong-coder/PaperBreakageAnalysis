@@ -1,5 +1,6 @@
 #include "paperbreak/console/algorithm_client.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/console/algorithm_metrics.hpp"
 
 #include <nlohmann/json.hpp>
@@ -176,11 +177,6 @@ AlgorithmTestResultValue test_result_value(const Json& payload)
     return result;
 }
 
-bool valid_camera_id(const std::string_view value) noexcept
-{
-    return value.size() == 5U && value.starts_with("CAM0") && value[4] >= '1' && value[4] <= '4';
-}
-
 } // namespace
 
 AlgorithmClient::AlgorithmClient(AlgorithmClientObserver observer, ipc::IpcClientOptions options)
@@ -216,9 +212,9 @@ void AlgorithmClient::stop() noexcept
 
 Result<void> AlgorithmClient::select_camera(std::string camera_id)
 {
-    if (!valid_camera_id(camera_id))
+    if (!is_canonical_camera_id(camera_id))
         return Result<void>::failure(client_error("IPC_REQUEST_INVALID",
-                                                  "相机编号必须为 CAM01 至 CAM04",
+                                                  "相机编号必须为 CAM01 至 CAM06",
                                                   "console.algorithm.selectCamera"));
     if (operation_request_)
         return Result<void>::failure(client_error("IPC_BUSY", "已有算法操作正在执行",

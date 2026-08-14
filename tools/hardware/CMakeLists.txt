@@ -46,3 +46,20 @@ add_test(NAME hikrobot_hardware_tool_accepts_line_io_plan
         --plan "${PROJECT_SOURCE_DIR}/tests/data/hardware-plan-line-io.json")
 set_tests_properties(hikrobot_hardware_tool_accepts_line_io_plan PROPERTIES
     LABELS "unit;hikrobot-sdk")
+
+add_test(NAME hikrobot_hardware_tool_accepts_six_camera_plan
+    COMMAND PaperBreakCameraHardwareTest
+        --validate-plan
+        --plan "${PROJECT_SOURCE_DIR}/tests/data/hardware-plan-six-cameras.json")
+set_tests_properties(hikrobot_hardware_tool_accepts_six_camera_plan PROPERTIES
+    LABELS "unit;hikrobot-sdk")
+
+add_test(NAME hikrobot_hardware_tool_rejects_seventh_camera
+    COMMAND "${CMAKE_COMMAND}"
+        "-DPROGRAM=$<TARGET_FILE:PaperBreakCameraHardwareTest>"
+        "-DPROGRAM_ARGUMENTS=--validate-plan|--plan|${PROJECT_SOURCE_DIR}/tests/data/hardware-plan-seven-cameras.json"
+        -DEXPECTED_EXIT=2
+        -DEXPECTED_TEXT=HW_PLAN_INVALID
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunAndCheckExit.cmake")
+set_tests_properties(hikrobot_hardware_tool_rejects_seventh_camera PROPERTIES
+    LABELS "unit;hikrobot-sdk")

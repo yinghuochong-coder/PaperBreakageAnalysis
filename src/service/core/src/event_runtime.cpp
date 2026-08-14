@@ -2,6 +2,7 @@
 
 #include "paperbreak/algorithm/classical_vision_detector.hpp"
 #include "paperbreak/algorithm/mock_trigger_detector.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/event/candidate_event.hpp"
 #include "paperbreak/event/event_window.hpp"
 #include "paperbreak/event/key_frame.hpp"
@@ -332,7 +333,7 @@ Result<std::unique_ptr<EventPipelineState>> build_pipeline(
          .post_event_duration = std::chrono::seconds{configuration.event.post_event_seconds},
          .maximum_event_duration = std::chrono::seconds{configuration.event.max_event_seconds},
          .merge_gap = std::chrono::seconds{configuration.event.merge_gap_seconds},
-         .maximum_active_events = 4U});
+         .maximum_active_events = camera_slot_count});
     if (!windows)
         return Result<std::unique_ptr<EventPipelineState>>::failure(std::move(windows).error());
     state->candidates = std::move(candidates).value();
@@ -1000,7 +1001,7 @@ struct EventRuntimeImpl final
         bool pending_full = false;
         {
             std::scoped_lock lock{mutex};
-            if (pending.size() >= 4U)
+            if (pending.size() >= camera_slot_count)
             {
                 ++event_failures;
                 pending_full = true;

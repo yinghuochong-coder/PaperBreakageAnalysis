@@ -1,3 +1,4 @@
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/service/algorithm_metrics.hpp"
 #include "paperbreak/service/event_runtime.hpp"
 
@@ -309,6 +310,15 @@ config::EdgeConfig four_camera_runtime_config()
     value.algorithm.enabled = true;
     value.algorithm.type = "controlled-runtime-test";
     value.algorithm.confirmation_duration_ms = 10U;
+    return value;
+}
+
+config::EdgeConfig six_camera_runtime_config()
+{
+    auto value = four_camera_runtime_config();
+    value.cameras.push_back({.id = "CAM05", .enabled = true, .frame_rate = 10.0});
+    value.cameras.push_back({.id = "CAM06", .enabled = true, .frame_rate = 10.0});
+    value.acquisition.frame_pool_capacity = 768U;
     return value;
 }
 
@@ -1969,7 +1979,7 @@ TEST(EventRuntimeLanes, HotReconfigurePreservesRearmLatchAndFailedAttemptLeavesI
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }
 
-TEST(EventRuntimeLanes, FourCameraContinuousAnomalyCreatesOneSourcePerCameraAndOneEvent)
+TEST(EventRuntimeLanes, SixCameraContinuousAnomalyCreatesOneSourcePerCameraAndOneEvent)
 {
     TemporaryDirectory temporary;
     const auto event_root = temporary.path() / "events";
@@ -1980,8 +1990,8 @@ TEST(EventRuntimeLanes, FourCameraContinuousAnomalyCreatesOneSourcePerCameraAndO
     ASSERT_TRUE(database);
     std::shared_ptr<EventMetadataDatabase> shared_database{std::move(database).value()};
     auto behavior = std::make_shared<ControlledDetectorBehavior>();
-    behavior->triggered_cameras = {"CAM01", "CAM02", "CAM03", "CAM04"};
-    auto configuration = four_camera_runtime_config();
+    behavior->triggered_cameras = {"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"};
+    auto configuration = six_camera_runtime_config();
     configuration.algorithm.rearm_duration_ms = 500U;
     auto runtime = EventRuntime::create(
         {.configuration = configuration,
@@ -1991,13 +2001,15 @@ TEST(EventRuntimeLanes, FourCameraContinuousAnomalyCreatesOneSourcePerCameraAndO
     ASSERT_TRUE(runtime);
     ASSERT_TRUE(runtime.value()->start());
 
-    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
+    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"})
         ASSERT_TRUE(runtime.value()->submit_frame(frame(1U, 0ms, camera_id)));
-    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().candidates_created == 4U; }));
-    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
+    ASSERT_TRUE(wait_until(
+        [&] { return runtime.value()->snapshot().candidates_created == camera_slot_count; }));
+    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"})
         ASSERT_TRUE(runtime.value()->submit_frame(frame(2U, 100ms, camera_id)));
-    ASSERT_TRUE(wait_until([&] { return runtime.value()->snapshot().confirmed_events == 4U; }));
-    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04"})
+    ASSERT_TRUE(wait_until(
+        [&] { return runtime.value()->snapshot().confirmed_events == camera_slot_count; }));
+    for (const auto camera_id : {"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"})
         ASSERT_TRUE(runtime.value()->submit_frame(frame(3U, 200ms, camera_id)));
     ASSERT_TRUE(wait_until([&] {
         return std::ranges::all_of(runtime.value()->algorithm_snapshots(), [](const auto& lane) {
@@ -2005,14 +2017,14 @@ TEST(EventRuntimeLanes, FourCameraContinuousAnomalyCreatesOneSourcePerCameraAndO
         });
     }));
     const auto aggregate = runtime.value()->snapshot();
-    EXPECT_EQ(aggregate.candidates_created, 4U);
+    EXPECT_EQ(aggregate.candidates_created, camera_slot_count);
     EXPECT_EQ(aggregate.events_started, 1U);
-    EXPECT_EQ(aggregate.rearm_pending_lanes, 4U);
-    EXPECT_EQ(aggregate.rearm_suppressed_results, 4U);
+    EXPECT_EQ(aggregate.rearm_pending_lanes, camera_slot_count);
+    EXPECT_EQ(aggregate.rearm_suppressed_results, camera_slot_count);
     auto page = shared_database->query_events({.limit = 10U});
     ASSERT_TRUE(page);
     ASSERT_EQ(page.value().events.size(), 1U);
-    EXPECT_EQ(page.value().events.front().trigger_count, 4U);
+    EXPECT_EQ(page.value().events.front().trigger_count, camera_slot_count);
     runtime.value()->request_stop();
     EXPECT_TRUE(runtime.value()->join(std::chrono::steady_clock::now() + 5s));
 }

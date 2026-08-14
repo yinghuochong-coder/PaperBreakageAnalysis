@@ -1,5 +1,6 @@
 #include "paperbreak/camera/control.hpp"
 #include "paperbreak/camera/mock_camera.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/logging/logging.hpp"
 #include "paperbreak/monitoring/monitoring.hpp"
 #include "paperbreak/pipeline/preview.hpp"
@@ -258,7 +259,7 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json status_json = Json::parse(status.value().payload_json);
     EXPECT_EQ(status_json.at("serviceState"), "running");
     EXPECT_TRUE(status_json.at("acceptingWrites").get<bool>());
-    EXPECT_EQ(status_json.at("configSchemaVersion"), 6);
+    EXPECT_EQ(status_json.at("configSchemaVersion"), 7);
     EXPECT_EQ(status_json.at("storedConfigRevision"), 1);
     EXPECT_FALSE(status_json.at("machineId").get<std::string>().empty());
     EXPECT_EQ(status_json.at("loggingLevel"), "info");
@@ -392,6 +393,14 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
                         {"strobeDurationUs", 0},
                         {"strobePreDelayUs", 0},
                         {"strobePostDelayUs", 0}}}}});
+    const auto camera_template = document["cameras"].front();
+    for (std::size_t slot = 1U; slot < paperbreak::camera_slot_count; ++slot)
+    {
+        auto camera = camera_template;
+        camera["id"] = std::string{paperbreak::canonical_camera_ids[slot]};
+        camera["serialNumber"] = "SIM-0" + std::to_string(slot + 1U);
+        document["cameras"].push_back(std::move(camera));
+    }
     document["acquisition"]["framePoolCapacity"] = 128U;
     document["preview"]["enabled"] = false;
     document["event"]["preEventSeconds"] = 1U;
@@ -443,6 +452,11 @@ TEST(SystemCommand, ConfiguresObservesAndTestsAlgorithmWithoutCreatingCandidate)
     EXPECT_FALSE(observed_json["runtime"]["metrics"]["rearmPending"].get<bool>());
     EXPECT_EQ(observed_json["runtime"]["metrics"]["rearmSuppressedResults"], 0U);
     EXPECT_EQ(observed_json["algorithm"]["rearmDurationMs"], 500U);
+
+    auto sixth = commands.handle(fixture.request("algorithm.getConfig", R"({"cameraId":"CAM06"})"),
+                                 reader, {});
+    ASSERT_TRUE(sixth) << sixth.error().message;
+    EXPECT_EQ(Json::parse(sixth.value().payload_json)["runtime"]["state"], "disabled");
 
     const Json algorithm{{"enabled", true},
                          {"type", "classical-vision"},
@@ -718,7 +732,8 @@ TEST(SystemCommand, ValidatesPreviewSubscriptionAgainstBoundedRuntime)
 {
     CommandFixture fixture;
     auto preview = std::make_shared<paperbreak::pipeline::PreviewRuntime>(
-        std::vector<std::string>{"CAM01"}, paperbreak::pipeline::make_opencv_preview_encoder(),
+        std::vector<std::string>{"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"},
+        paperbreak::pipeline::make_opencv_preview_encoder(),
         [](paperbreak::pipeline::PreviewDelivery) {});
     paperbreak::service::SystemCommandService commands(
         fixture.repository, fixture.status, {}, {}, {}, fixture.config_path.parent_path(), preview);
@@ -727,13 +742,16 @@ TEST(SystemCommand, ValidatesPreviewSubscriptionAgainstBoundedRuntime)
                                                        .local = true,
                                                        .authenticated = true,
                                                        .administrator = false};
-    auto subscribed =
-        commands.handle(fixture.request("preview.subscribe", R"({"cameraIds":["CAM01"],"fps":30})"),
-                        preview_reader, {});
+    auto subscribed = commands.handle(
+        fixture.request(
+            "preview.subscribe",
+            R"({"cameraIds":["CAM01","CAM02","CAM03","CAM04","CAM05","CAM06"],"fps":30})"),
+        preview_reader, {});
     ASSERT_TRUE(subscribed);
     const auto subscribed_payload = Json::parse(subscribed.value().payload_json);
     EXPECT_TRUE(subscribed_payload.at("subscribed").get<bool>());
     EXPECT_EQ(subscribed_payload.at("fps").get<double>(), 30.0);
+    EXPECT_EQ(subscribed_payload.at("cameraIds").size(), paperbreak::camera_slot_count);
     EXPECT_EQ(preview->snapshot().subscriptions, 1U);
 
     auto invalid_fps = commands.handle(
@@ -753,7 +771,7 @@ TEST(SystemCommand, ValidatesPreviewSubscriptionAgainstBoundedRuntime)
     EXPECT_EQ(Json::parse(legacy.value().payload_json).at("fps").get<double>(), 3.0);
 
     auto invalid = commands.handle(
-        fixture.request("preview.subscribe", R"({"cameraIds":["UNKNOWN"]})"), preview_reader, {});
+        fixture.request("preview.subscribe", R"({"cameraIds":["CAM07"]})"), preview_reader, {});
     ASSERT_FALSE(invalid);
     EXPECT_EQ(invalid.error().business_code, "IPC_REQUEST_INVALID");
 
@@ -1144,6 +1162,14 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToBindApprovedCamera
                          .exclusive_access_available = true},
           .width = 64U,
           .height = 48U,
+          .frame_rate = 30.0},
+         {.descriptor = {.model_name = "MV-CS020-60GM",
+                         .serial_number = "MOCK-BIND-06",
+                         .ip_address = "192.0.2.26",
+                         .network_interface = "192.0.2.1",
+                         .exclusive_access_available = true},
+          .width = 64U,
+          .height = 48U,
           .frame_rate = 30.0}});
     ASSERT_TRUE(provider);
     std::shared_ptr<paperbreak::camera::ICameraProvider> shared_provider{
@@ -1213,13 +1239,20 @@ TEST(SystemCommand, AllowsAuthenticatedLocalNonAdministratorToBindApprovedCamera
     auto invalid_slot = commands.handle(
         fixture.request(
             "camera.bind",
-            R"({"cameraId":"CAM05","serialNumber":"OTHER","location":"出口","expectedConfigRevision":2})"),
+            R"({"cameraId":"CAM07","serialNumber":"OTHER","location":"出口","expectedConfigRevision":2})"),
         reader, {});
     ASSERT_FALSE(invalid_slot);
     EXPECT_EQ(invalid_slot.error().business_code, "IPC_REQUEST_INVALID");
+    auto sixth = commands.handle(
+        fixture.request(
+            "camera.bind",
+            R"({"cameraId":"CAM06","serialNumber":"MOCK-BIND-06","location":"卷取部出口","expectedConfigRevision":2})"),
+        reader, {});
+    ASSERT_TRUE(sixth) << sixth.error().message;
     ASSERT_TRUE(fixture.repository.snapshot());
-    EXPECT_EQ(fixture.repository.snapshot().value().stored_config_revision, 2U);
-    EXPECT_EQ(fixture.repository.snapshot().value().stored->cameras.size(), 1U);
+    EXPECT_EQ(fixture.repository.snapshot().value().stored_config_revision, 3U);
+    EXPECT_EQ(fixture.repository.snapshot().value().stored->cameras.size(), 2U);
+    EXPECT_EQ(fixture.repository.snapshot().value().stored->cameras.back().id, "CAM06");
 }
 
 TEST(SystemCommand, MissingCameraProviderReturnsDeploymentError)

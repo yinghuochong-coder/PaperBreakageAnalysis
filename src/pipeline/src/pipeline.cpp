@@ -1,5 +1,7 @@
 #include "paperbreak/pipeline/pipeline.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -323,7 +325,7 @@ PerCameraProcessor::~PerCameraProcessor()
 Result<void> PerCameraProcessor::start()
 {
     std::lock_guard lock{mutex_};
-    if (options_.camera_id.empty() ||
+    if (!is_canonical_camera_id(options_.camera_id) ||
         options_.input_wait_timeout <= std::chrono::milliseconds::zero())
     {
         return Result<void>::failure(
@@ -578,7 +580,7 @@ void PerCameraProcessor::record_failure(const Error& error) noexcept
 
 Result<void> ProcessingRuntime::add(std::unique_ptr<PerCameraProcessor> processor)
 {
-    if (!processor || started_ || processors_.size() >= 4U)
+    if (!processor || started_ || processors_.size() >= camera_slot_count)
     {
         return Result<void>::failure(pipeline_error(
             "CAMERA_CONFIG_FAILED", Severity::error, "处理运行时路由配置无效",

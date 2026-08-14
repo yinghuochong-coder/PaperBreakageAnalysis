@@ -1,5 +1,6 @@
 #pragma once
 
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/common/result.hpp"
 
 #include <cstddef>
@@ -12,8 +13,8 @@ namespace paperbreak::config
 {
 
 inline constexpr std::size_t config_max_bytes = 1024U * 1024U;
-inline constexpr std::uint32_t config_schema_version = 6U;
-inline constexpr std::size_t maximum_camera_count = 4U;
+inline constexpr std::uint32_t config_schema_version = 7U;
+inline constexpr std::size_t maximum_camera_count = camera_slot_count;
 
 enum class PixelFormat
 {
@@ -258,7 +259,7 @@ struct BasicConfigInfo final
     std::size_t file_size_bytes{};
 };
 
-/// Parses strict schema v6 or migrates schema v2-v5 with compatibility defaults.
+/// Parses strict schema v7 or migrates schema v2-v6 with compatibility defaults.
 [[nodiscard]] Result<EdgeConfig> parse_config(
     std::string_view contents, const std::filesystem::path& config_directory) noexcept;
 [[nodiscard]] std::string serialize_config(const EdgeConfig& config);

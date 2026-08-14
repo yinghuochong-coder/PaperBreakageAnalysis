@@ -1,6 +1,8 @@
 #include "paperbreak/storage/event_store.hpp"
 #include "paperbreak/storage/nvme_cache.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -172,7 +174,7 @@ Result<void> validate_request(const EventPersistenceRequest& request,
         (metadata.confirmed_time.has_value() &&
          (*metadata.confirmed_time < metadata.candidate_time ||
           *metadata.confirmed_time > metadata.end_time)) ||
-        metadata.camera_ids.empty() || metadata.camera_ids.size() > 4U ||
+        metadata.camera_ids.empty() || metadata.camera_ids.size() > camera_slot_count ||
         !valid_text(metadata.trigger_camera_id) || !valid_text(metadata.trigger_reason) ||
         !std::isfinite(metadata.confidence) || metadata.confidence < 0.0 ||
         metadata.confidence > 1.0 || metadata.pre_event_duration.count() < 0 ||
@@ -188,12 +190,12 @@ Result<void> validate_request(const EventPersistenceRequest& request,
     std::set<std::string> camera_ids;
     for (const auto& camera_id : metadata.camera_ids)
     {
-        if (!valid_text(camera_id) || !camera_ids.insert(camera_id).second)
+        if (!is_canonical_camera_id(camera_id) || !camera_ids.insert(camera_id).second)
             return Result<void>::failure(event_error("EVENT_WRITE_FAILED", Severity::critical,
                                                      "事件相机列表无效", "event.persist.validate"));
     }
     if (!camera_ids.contains(metadata.trigger_camera_id) || request.window.camera_windows.empty() ||
-        request.window.camera_windows.size() > 4U ||
+        request.window.camera_windows.size() > camera_slot_count ||
         request.key_frames.size() > options.maximum_key_frames)
         return Result<void>::failure(event_error("EVENT_WRITE_FAILED", Severity::critical,
                                                  "事件窗口或关键帧数量无效",
@@ -309,7 +311,7 @@ Result<void> validate_manifest_shape(const Json& manifest, const EventStoreOptio
         !has_string(manifest, "destinationRelativePath") || !manifest.contains("confirmedTime") ||
         !(manifest["confirmedTime"].is_null() || manifest["confirmedTime"].is_string()) ||
         !manifest.contains("cameraIds") || !manifest["cameraIds"].is_array() ||
-        manifest["cameraIds"].empty() || manifest["cameraIds"].size() > 4U ||
+        manifest["cameraIds"].empty() || manifest["cameraIds"].size() > camera_slot_count ||
         !manifest.contains("triggerCount") || !manifest["triggerCount"].is_number_unsigned() ||
         manifest["triggerCount"].get<std::uint64_t>() == 0U ||
         !manifest.contains("triggerFrameNumber") ||
@@ -338,7 +340,8 @@ Result<void> validate_manifest_shape(const Json& manifest, const EventStoreOptio
     std::set<std::string> camera_ids;
     for (const auto& camera_id : manifest["cameraIds"])
     {
-        if (!camera_id.is_string() || !valid_text(camera_id.get_ref<const std::string&>()) ||
+        if (!camera_id.is_string() ||
+            !is_canonical_camera_id(camera_id.get_ref<const std::string&>()) ||
             !camera_ids.insert(camera_id.get<std::string>()).second)
             return Result<void>::failure(event_error("EVENT_RECOVERY_FAILED", Severity::critical,
                                                      "事件 manifest 相机列表无效",
@@ -511,8 +514,8 @@ Result<EncodedRawBlock> encode_raw_block(const std::string_view event_id,
                                          const std::uint64_t ordinal,
                                          const std::size_t maximum_file_bytes)
 {
-    if (frames.empty() || frames.size() > event_raw_block_maximum_frames || camera_id.empty() ||
-        camera_id.size() > 16U)
+    if (frames.empty() || frames.size() > event_raw_block_maximum_frames ||
+        !is_canonical_camera_id(camera_id))
         return Result<EncodedRawBlock>::failure(
             event_error("EVENT_WRITE_FAILED", Severity::critical, "事件原始块参数无效",
                         "event.persist.rawBlock"));

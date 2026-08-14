@@ -72,12 +72,12 @@ TEST(CameraMockProvider, ValidatesCountUniqueSerialAndConfiguration)
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().details.back().value, "camera-count-out-of-range");
 
-    std::vector<MockCameraConfig> five;
-    for (std::size_t index = 0U; index < 5U; ++index)
+    std::vector<MockCameraConfig> seven;
+    for (std::size_t index = 0U; index < 7U; ++index)
     {
-        five.push_back(camera_config("MOCK-000" + std::to_string(index)));
+        seven.push_back(camera_config("MOCK-000" + std::to_string(index)));
     }
-    result = MockCameraProvider::create(std::move(five));
+    result = MockCameraProvider::create(std::move(seven));
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().details.back().value, "camera-count-out-of-range");
 
@@ -98,10 +98,10 @@ TEST(CameraMockProvider, ValidatesCountUniqueSerialAndConfiguration)
     EXPECT_EQ(result.error().details.back().value, "fault-capacity-out-of-range");
 }
 
-TEST(CameraMockProvider, EnumeratesFourDevicesAndRejectsUnknownOrDuplicateOpen)
+TEST(CameraMockProvider, EnumeratesSixDevicesAndRejectsUnknownOrDuplicateOpen)
 {
     std::vector<MockCameraConfig> configs;
-    for (std::size_t index = 1U; index <= 4U; ++index)
+    for (std::size_t index = 1U; index <= 6U; ++index)
     {
         configs.push_back(camera_config("MOCK-000" + std::to_string(index)));
     }
@@ -110,7 +110,7 @@ TEST(CameraMockProvider, EnumeratesFourDevicesAndRejectsUnknownOrDuplicateOpen)
     auto provider = std::move(result).value();
     auto devices = provider->enumerate_devices();
     ASSERT_TRUE(devices);
-    EXPECT_EQ(devices.value().size(), 4U);
+    EXPECT_EQ(devices.value().size(), 6U);
 
     auto missing = provider->create_device("MISSING");
     ASSERT_FALSE(missing);

@@ -226,7 +226,7 @@ flowchart TD
 | 类 | 文件 | 关键公共函数 | 关键完成/内部函数 | 快照用途 |
 | --- | --- | --- | --- | --- |
 | `ClientStateStore` | [client_state_store.cpp](../../src/console/src/client_state_store.cpp) | `start()`、`stop()`、`refresh_dynamic()` | `connection_changed()`、`push_received()`、`synchronize_*()`、`*_completed()` | 顶栏、总览、托盘、事件目录位置 |
-| `PreviewClient` | [preview_client.cpp](../../src/console/src/preview_client.cpp) | `start()`、`set_camera_ids()`、`set_paused()` | `subscribe()`、`unsubscribe()`、`push_received()` | 最多四路最新预览图和统计 |
+| `PreviewClient` | [preview_client.cpp](../../src/console/src/preview_client.cpp) | `start()`、`set_camera_ids()`、`set_paused()` | `subscribe()`、`unsubscribe()`、`push_received()` | 最多六路最新预览图和统计，按逻辑 ID 写入固定槽位 |
 | `CameraClient` | [camera_client.cpp](../../src/console/src/camera_client.cpp) | `refresh()`、`discover()`、`bind()`、`control()`、`update_config()` | `send_operation()`、`list_completed()`、`operation_completed()` | 相机列表、发现结果、保存/实际参数和操作状态 |
 | `OperationsClient` | [operations_client.cpp](../../src/console/src/operations_client.cpp) | `refresh()`、`query_alarms()`、`query_logs()`、`acknowledge()`、两个导出函数 | `refresh_*()`、`*_completed()`、私有 `FileExporter` | 指标、报警、日志和导出状态 |
 | `AlgorithmClient` | [algorithm_client.cpp](../../src/console/src/algorithm_client.cpp) | `select_camera()`、`refresh()`、`update_configuration()`、`test_current_frame()` | `config_completed()`、`operation_completed()` | 保存/生效配置、运行状态、性能和测试图 |
@@ -235,6 +235,8 @@ flowchart TD
 | `UplinkClient` | [uplink_client.cpp](../../src/console/src/uplink_client.cpp) | `refresh()`、`update_configuration()` | `config_completed()`、`update_completed()` | 保存/生效上位机配置、重启路径 |
 
 `CameraClient` 的 observer 还有一条额外连接：每当相机列表更新，`main()` 会提取相机 ID 并调用 `PreviewClient::set_camera_ids()`，使预览订阅跟随当前相机拓扑。
+
+总览与实时预览都固定按第一行 CAM01～CAM03、第二行 CAM04～CAM06 的 2×3 布局显示。稀疏配置不会压缩槽位，例如只配置 CAM05 时仍显示在第二行中间。布局选择器提供六宫格和六个单路入口；聚焦窗格跨越两行三列，全屏退出后恢复原固定位置。相机绑定槽和算法相机选择器同样覆盖 CAM01～CAM06。
 
 算法页的运行指标由 [algorithm_metrics.cpp](../../src/console/src/algorithm_metrics.cpp) 中的固定登记表驱动。登记表完整覆盖 34 项运行指标（含重新布防锁存和抑制计数），并统一提供中文名称、分组、单位、口径说明和数值提取；卡片、共享曲线和 CSV 导出共用同一份定义。`AlgorithmClientSnapshot` 的本地采样序号与时间只在成功解析新的 `algorithm.getConfig` 响应后更新。页面每次收到快照时，以该序号去重，并按相机和指标分别保留最近 100 个点；这些曲线数据仅存在 Console 内存中，不写配置、不发回服务端。
 

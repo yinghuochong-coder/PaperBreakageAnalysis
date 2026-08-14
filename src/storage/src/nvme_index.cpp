@@ -1,5 +1,7 @@
 #include "paperbreak/storage/nvme_index.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
+
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -307,9 +309,9 @@ bool valid_block(const NvmeIndexedBlock& block) noexcept
     const auto sequence_span = block.end_sequence_number - block.start_sequence_number;
     const bool id_present = std::ranges::any_of(
         block.block_id, [](const std::byte value) { return value != std::byte{0U}; });
-    return id_present && block.generation > 0U && !block.camera_id.empty() &&
-           block.camera_id.size() <= 16U && !block.path.empty() && block.physical_bytes > 0U &&
-           block.frame_count > 0U && block.start_wall_clock_time <= block.end_wall_clock_time &&
+    return id_present && block.generation > 0U && is_canonical_camera_id(block.camera_id) &&
+           !block.path.empty() && block.physical_bytes > 0U && block.frame_count > 0U &&
+           block.start_wall_clock_time <= block.end_wall_clock_time &&
            block.start_sequence_number <= block.end_sequence_number &&
            sequence_span < (std::numeric_limits<std::uint64_t>::max)() &&
            block.frame_count <= sequence_span + 1U &&
@@ -447,11 +449,11 @@ class SqliteNvmeBlockIndex final : public INvmeBlockIndex
     {
         std::set<std::string> camera_ids{request.camera_ids.begin(), request.camera_ids.end()};
         if (request.event_id.empty() || request.event_id.size() > 128U || camera_ids.empty() ||
-            camera_ids.size() > 4U || camera_ids.size() != request.camera_ids.size() ||
-            std::ranges::any_of(camera_ids,
-                                [](const auto& camera_id) {
-                                    return camera_id.empty() || camera_id.size() > 16U;
-                                }) ||
+            camera_ids.size() > camera_slot_count ||
+            camera_ids.size() != request.camera_ids.size() ||
+            std::ranges::any_of(
+                camera_ids,
+                [](const auto& camera_id) { return !is_canonical_camera_id(camera_id); }) ||
             request.start_monotonic_time > request.end_monotonic_time ||
             request.start_wall_clock_time > request.end_wall_clock_time)
         {
@@ -619,7 +621,7 @@ class SqliteNvmeBlockIndex final : public INvmeBlockIndex
 
     Result<NvmeFrameSequenceTrace> trace_window(const NvmeBlockWindowQuery& query) const override
     {
-        if (query.camera_id.empty() || query.camera_id.size() > 16U ||
+        if (!is_canonical_camera_id(query.camera_id) ||
             query.start_wall_clock_time > query.end_wall_clock_time || query.maximum_blocks == 0U ||
             query.maximum_blocks > nvme_default_maximum_query_blocks)
             return Result<NvmeFrameSequenceTrace>::failure(

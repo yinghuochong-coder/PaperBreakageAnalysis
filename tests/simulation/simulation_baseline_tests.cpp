@@ -1,5 +1,6 @@
 #include "paperbreak/camera/acquisition.hpp"
 #include "paperbreak/camera/mock_camera.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/pipeline/pipeline.hpp"
 
 #include <gtest/gtest.h>
@@ -34,10 +35,10 @@ bool wait_until(const auto& predicate)
 }
 } // namespace
 
-TEST(SimulationMockCamera, FourRoutesAcquireAndIsolateInjectedFailuresWithoutHardware)
+TEST(SimulationMockCamera, SixRoutesAcquireAndIsolateInjectedFailuresWithoutHardware)
 {
     std::vector<MockCameraConfig> configurations;
-    for (std::size_t index = 0U; index < 4U; ++index)
+    for (std::size_t index = 0U; index < paperbreak::camera_slot_count; ++index)
     {
         configurations.push_back(
             {.descriptor = {"PaperBreak Mock", "MOCK-000" + std::to_string(index + 1U),
@@ -54,10 +55,10 @@ TEST(SimulationMockCamera, FourRoutesAcquireAndIsolateInjectedFailuresWithoutHar
     ASSERT_TRUE(provider_result);
     auto provider = std::move(provider_result).value();
 
-    std::array<std::unique_ptr<ICameraDevice>, 4U> devices;
-    std::array<std::unique_ptr<FrameBufferPool>, 4U> pools;
-    std::array<std::unique_ptr<AcquisitionQueue>, 4U> queues;
-    std::array<std::unique_ptr<AcquisitionWorker>, 4U> workers;
+    std::array<std::unique_ptr<ICameraDevice>, paperbreak::camera_slot_count> devices;
+    std::array<std::unique_ptr<FrameBufferPool>, paperbreak::camera_slot_count> pools;
+    std::array<std::unique_ptr<AcquisitionQueue>, paperbreak::camera_slot_count> queues;
+    std::array<std::unique_ptr<AcquisitionWorker>, paperbreak::camera_slot_count> workers;
     for (std::size_t index = 0U; index < devices.size(); ++index)
     {
         const auto serial = "MOCK-000" + std::to_string(index + 1U);
@@ -70,7 +71,8 @@ TEST(SimulationMockCamera, FourRoutesAcquireAndIsolateInjectedFailuresWithoutHar
         queues[index] = std::make_unique<AcquisitionQueue>(4U);
         workers[index] = std::make_unique<AcquisitionWorker>(
             *devices[index], *pools[index], *queues[index],
-            AcquisitionWorkerOptions{.camera_id = "CAM0" + std::to_string(index + 1U),
+            AcquisitionWorkerOptions{.camera_id =
+                                         std::string{paperbreak::canonical_camera_ids[index]},
                                      .receive_timeout = 20ms});
     }
 
@@ -115,10 +117,10 @@ TEST(SimulationMockCamera, FourRoutesAcquireAndIsolateInjectedFailuresWithoutHar
     EXPECT_TRUE(devices[0]->capture_into(recovered, 50ms));
 }
 
-TEST(SimulationProcessingPipeline, FourRoutesRemainBoundedAndIsolateInjectedFailures)
+TEST(SimulationProcessingPipeline, SixRoutesRemainBoundedAndIsolateInjectedFailures)
 {
     std::vector<MockCameraConfig> configurations;
-    for (std::size_t index = 0U; index < 4U; ++index)
+    for (std::size_t index = 0U; index < paperbreak::camera_slot_count; ++index)
     {
         configurations.push_back(
             {.descriptor = {"PaperBreak Mock", "PIPE-000" + std::to_string(index + 1U),
@@ -135,18 +137,18 @@ TEST(SimulationProcessingPipeline, FourRoutesRemainBoundedAndIsolateInjectedFail
     ASSERT_TRUE(provider_result);
     auto provider = std::move(provider_result).value();
 
-    std::array<std::unique_ptr<ICameraDevice>, 4U> devices;
-    std::array<std::unique_ptr<FrameBufferPool>, 4U> pools;
-    std::array<std::unique_ptr<AcquisitionQueue>, 4U> inputs;
-    std::array<std::unique_ptr<AlgorithmQueue>, 4U> outputs;
-    std::array<std::unique_ptr<AcquisitionWorker>, 4U> workers;
-    std::array<PerCameraProcessor*, 4U> processor_views{};
+    std::array<std::unique_ptr<ICameraDevice>, paperbreak::camera_slot_count> devices;
+    std::array<std::unique_ptr<FrameBufferPool>, paperbreak::camera_slot_count> pools;
+    std::array<std::unique_ptr<AcquisitionQueue>, paperbreak::camera_slot_count> inputs;
+    std::array<std::unique_ptr<AlgorithmQueue>, paperbreak::camera_slot_count> outputs;
+    std::array<std::unique_ptr<AcquisitionWorker>, paperbreak::camera_slot_count> workers;
+    std::array<PerCameraProcessor*, paperbreak::camera_slot_count> processor_views{};
     ProcessingRuntime runtime;
 
     for (std::size_t index = 0U; index < devices.size(); ++index)
     {
         const auto serial = "PIPE-000" + std::to_string(index + 1U);
-        const auto camera_id = "CAM0" + std::to_string(index + 1U);
+        const auto camera_id = std::string{paperbreak::canonical_camera_ids[index]};
         auto created = provider->create_device(serial);
         ASSERT_TRUE(created);
         devices[index] = std::move(created).value();
@@ -189,10 +191,9 @@ TEST(SimulationProcessingPipeline, FourRoutesRemainBoundedAndIsolateInjectedFail
                     .value()
                     .inject_fault({.kind = MockFaultKind::incomplete_frame}));
     ASSERT_TRUE(wait_until([&] {
-        return outputs[0]->snapshot().algorithm_skipped > 0U &&
-               outputs[1]->snapshot().algorithm_skipped > 0U &&
-               outputs[2]->snapshot().algorithm_skipped > 0U &&
-               outputs[3]->snapshot().algorithm_skipped > 0U &&
+        return std::ranges::all_of(
+                   outputs,
+                   [](const auto& output) { return output->snapshot().algorithm_skipped > 0U; }) &&
                workers[1]->snapshot().capture_timeouts > 0U &&
                workers[2]->snapshot().camera_frame_gaps >= 2U &&
                workers[3]->snapshot().incomplete_frames > 0U &&

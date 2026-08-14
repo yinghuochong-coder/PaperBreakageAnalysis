@@ -1,5 +1,6 @@
 #include "paperbreak/service/system_commands.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/common/version.hpp"
 #include "paperbreak/service/camera_startup.hpp"
 
@@ -985,9 +986,9 @@ Result<std::string> camera_id(const Json& payload, const std::string_view operat
                                                           "cameraId 必须是字符串",
                                                           std::string{operation}));
     const auto value = payload["cameraId"].get<std::string>();
-    if (value.size() != 5U || !value.starts_with("CAM0") || value[4] < '1' || value[4] > '4')
+    if (!is_canonical_camera_id(value))
         return Result<std::string>::failure(command_error("IPC_REQUEST_INVALID", Severity::error,
-                                                          "cameraId 必须为 CAM01 至 CAM04",
+                                                          "cameraId 必须为 CAM01 至 CAM06",
                                                           std::string{operation}));
     return Result<std::string>::success(value);
 }
@@ -2455,9 +2456,8 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
             }
             const std::string serial = payload.value()["serialNumber"].get<std::string>();
             const std::string location = payload.value()["location"].get<std::string>();
-            constexpr std::array valid_slots{"CAM01", "CAM02", "CAM03", "CAM04"};
-            if (std::ranges::find(valid_slots, id.value()) == valid_slots.end() || serial.empty() ||
-                serial.size() > 128U || location.empty() || location.size() > 128U ||
+            if (!is_canonical_camera_id(id.value()) || serial.empty() || serial.size() > 128U ||
+                location.empty() || location.size() > 128U ||
                 location.find_first_not_of(" \t\r\n") == std::string::npos)
             {
                 return Result<ipc::CommandResponse>::failure(
@@ -2477,13 +2477,13 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                                          std::to_string(config.value().stored_config_revision)});
                 return Result<ipc::CommandResponse>::failure(std::move(error));
             }
-            if (config.value().stored->cameras.size() >= 4U ||
+            if (config.value().stored->cameras.size() >= camera_slot_count ||
                 std::ranges::any_of(config.value().stored->cameras,
                                     [&](const auto& item) { return item.id == id.value(); }))
             {
                 return Result<ipc::CommandResponse>::failure(
                     command_error("CAMERA_CONFIG_FAILED", Severity::error,
-                                  "逻辑相机槽位已被占用或已达到四路上限", "ipc.camera.bind"));
+                                  "逻辑相机槽位已被占用或已达到六路上限", "ipc.camera.bind"));
             }
             if (std::ranges::any_of(config.value().stored->cameras,
                                     [&](const auto& item) { return item.serial_number == serial; }))
@@ -2806,16 +2806,16 @@ Result<ipc::CommandResponse> SystemCommandService::handle_with_source(
                               "ipc.preview.subscribe"));
         if (!has_only_fields(payload.value(), {"cameraIds", "fps"}) ||
             !payload.value().contains("cameraIds") || !payload.value()["cameraIds"].is_array() ||
-            payload.value()["cameraIds"].empty() || payload.value()["cameraIds"].size() > 4U)
+            payload.value()["cameraIds"].empty() ||
+            payload.value()["cameraIds"].size() > camera_slot_count)
             return Result<ipc::CommandResponse>::failure(command_error(
                 "IPC_REQUEST_INVALID", Severity::error,
-                "preview.subscribe 需要 1 至 4 个 cameraIds", "ipc.preview.subscribe"));
+                "preview.subscribe 需要 1 至 6 个 cameraIds", "ipc.preview.subscribe"));
         std::vector<std::string> camera_ids;
         camera_ids.reserve(payload.value()["cameraIds"].size());
         for (const auto& value : payload.value()["cameraIds"])
         {
-            if (!value.is_string() || value.get_ref<const std::string&>().empty() ||
-                value.get_ref<const std::string&>().size() > 32U)
+            if (!value.is_string() || !is_canonical_camera_id(value.get_ref<const std::string&>()))
                 return Result<ipc::CommandResponse>::failure(
                     command_error("IPC_REQUEST_INVALID", Severity::error,
                                   "cameraIds 包含无效相机编号", "ipc.preview.subscribe"));

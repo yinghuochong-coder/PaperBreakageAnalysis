@@ -23,14 +23,6 @@ Error protocol_error(std::string message)
             .operation = "console.preview.frame"};
 }
 
-std::optional<std::size_t> camera_index(const std::vector<std::string>& camera_ids,
-                                        const std::string& camera_id)
-{
-    const auto found = std::find(camera_ids.begin(), camera_ids.end(), camera_id);
-    if (found == camera_ids.end())
-        return std::nullopt;
-    return static_cast<std::size_t>(std::distance(camera_ids.begin(), found));
-}
 } // namespace
 
 PreviewClient::PreviewClient(PreviewObserver observer, ipc::IpcClientOptions options)
@@ -70,11 +62,11 @@ void PreviewClient::stop() noexcept
 
 void PreviewClient::set_camera_ids(std::vector<std::string> camera_ids)
 {
-    if (camera_ids.empty() || camera_ids.size() > 4U ||
+    if (camera_ids.empty() || camera_ids.size() > camera_slot_count ||
         std::any_of(camera_ids.begin(), camera_ids.end(),
-                    [](const std::string& id) { return id.empty() || id.size() > 32U; }))
+                    [](const std::string& id) { return !is_canonical_camera_id(id); }))
     {
-        snapshot_.last_error = protocol_error("预览相机编号必须为 1 至 4 个非空值");
+        snapshot_.last_error = protocol_error("预览相机编号必须为 1 至 6 个 CAM01 至 CAM06 值");
         notify();
         return;
     }
@@ -173,9 +165,11 @@ void PreviewClient::push_received(const std::uint64_t generation, const ipc::Pus
             !payload["sequenceNumber"].is_number_unsigned())
             throw std::invalid_argument{"required fields"};
         const std::string camera_id = payload["cameraId"].get<std::string>();
-        const auto index = camera_index(camera_ids_, camera_id);
-        if (!index)
+        if (std::ranges::find(camera_ids_, camera_id) == camera_ids_.end())
             throw std::invalid_argument{"unknown camera"};
+        const auto index = camera_slot_index(camera_id);
+        if (!index)
+            throw std::invalid_argument{"invalid camera"};
         QImage image;
         if (!image.loadFromData(reinterpret_cast<const uchar*>(push.binary.data()),
                                 static_cast<int>(push.binary.size()), "JPEG"))

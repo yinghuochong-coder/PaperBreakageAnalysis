@@ -1,3 +1,4 @@
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/storage/event_store.hpp"
 #include "paperbreak/storage/metadata_database.hpp"
 
@@ -222,6 +223,29 @@ EventPersistenceRequest event_request(const std::string& event_id, const std::st
     return request;
 }
 
+EventPersistenceRequest six_camera_event_request(const std::string& event_id)
+{
+    auto request = event_request(event_id, "CAM01", "Confirmed", 100ms);
+    request.metadata.camera_ids.assign(paperbreak::canonical_camera_ids.begin(),
+                                       paperbreak::canonical_camera_ids.end());
+    for (std::size_t slot = 1U; slot < paperbreak::camera_slot_count; ++slot)
+    {
+        const auto camera_id = std::string{paperbreak::canonical_camera_ids[slot]};
+        auto captured = frame(camera_id, slot + 10U, 100ms);
+        request.window.camera_windows.push_back(
+            {.camera_id = camera_id,
+             .requested_start = MonotonicTime{100ms},
+             .requested_end = MonotonicTime{300ms},
+             .available_start = MonotonicTime{100ms},
+             .available_end = MonotonicTime{100ms},
+             .first_sequence_number = captured.sequence_number(),
+             .last_sequence_number = captured.sequence_number(),
+             .frames = {std::move(captured)},
+             .complete = true});
+    }
+    return request;
+}
+
 EventPersistenceOutcome persist_event(const MetadataDatabaseOptions& options,
                                       EventPersistenceRequest request)
 {
@@ -264,6 +288,24 @@ TEST(StorageMetadataDatabase, CreatesAllMetadataTablesAndRepeatedOpenIsIdempoten
     EXPECT_FALSE(reopened.value()->open_report().created);
     EXPECT_FALSE(reopened.value()->open_report().migrated);
     EXPECT_FALSE(reopened.value()->open_report().migration_backup.has_value());
+}
+
+TEST(StorageMetadataDatabase, IndexesSixCameraManifestWithoutSchemaChange)
+{
+    TemporaryDirectory temporary{"six-camera-manifest"};
+    const auto options = database_options(temporary);
+    auto database = EventMetadataDatabase::open(options);
+    ASSERT_TRUE(database);
+    const auto persisted =
+        persist_event(options, six_camera_event_request("019fcb3d-9000-7000-8000-000000000006"));
+
+    ASSERT_TRUE(database.value()->index_committed_manifest(persisted.committed_directory,
+                                                           persisted.manifest_json));
+    auto record = database.value()->get_event("019fcb3d-9000-7000-8000-000000000006");
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record.value().camera_ids.size(), paperbreak::camera_slot_count);
+    EXPECT_EQ(record.value().camera_ids.back(), "CAM06");
+    EXPECT_EQ(database.value()->open_report().schema_version, database_schema_version);
 }
 
 TEST(StorageMetadataDatabase, MigratesVersionZeroWithBackupAndRollsBackFailedMigration)

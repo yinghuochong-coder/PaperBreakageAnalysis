@@ -1,3 +1,4 @@
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/storage/event_inspector.hpp"
 #include "paperbreak/storage/event_store.hpp"
 #include "paperbreak/storage/metadata_database.hpp"
@@ -169,6 +170,27 @@ EventPersistenceRequest request(const std::string& event_id)
     value.key_frames.push_back({.descriptor = std::move(descriptor),
                                 .jpeg = {std::byte{0xff}, std::byte{0xd8}, std::byte{0x01},
                                          std::byte{0xff}, std::byte{0xd9}}});
+    return value;
+}
+
+EventPersistenceRequest six_camera_request(const std::string& event_id)
+{
+    auto value = request(event_id);
+    value.metadata.camera_ids.assign(canonical_camera_ids.begin(), canonical_camera_ids.end());
+    for (std::size_t slot = 1U; slot < camera_slot_count; ++slot)
+    {
+        const auto camera_id = std::string{canonical_camera_ids[slot]};
+        auto captured = frame(camera_id, slot + 10U, 100ms);
+        value.window.camera_windows.push_back({.camera_id = camera_id,
+                                               .requested_start = MonotonicTime{100ms},
+                                               .requested_end = MonotonicTime{300ms},
+                                               .available_start = MonotonicTime{100ms},
+                                               .available_end = MonotonicTime{100ms},
+                                               .first_sequence_number = captured.sequence_number(),
+                                               .last_sequence_number = captured.sequence_number(),
+                                               .frames = {std::move(captured)},
+                                               .complete = true});
+    }
     return value;
 }
 
@@ -455,6 +477,24 @@ TEST(StorageEventStore, PersistsReplayableManifestWithChecksumsUnderChinesePath)
     block.read(magic.data(), static_cast<std::streamsize>(magic.size()));
     EXPECT_EQ(std::string(magic.data(), 7U), "PBNVME2");
     EXPECT_FALSE(std::filesystem::exists(persisted.value().transaction_directory));
+}
+
+TEST(StorageEventStore, PersistsSixCameraWindowsWithoutChangingManifestVersion)
+{
+    TemporaryDirectory temporary{"six-cameras"};
+    auto writer = writer_for(temporary.path(), make_windows_event_file_system());
+
+    auto persisted = writer->persist(six_camera_request("019f-m900-six-camera-0001"));
+
+    ASSERT_TRUE(persisted) << persisted.error().message;
+    EXPECT_EQ(persisted.value().raw_file_count, camera_slot_count);
+    auto verified = writer->verify_committed_manifest(persisted.value().committed_directory);
+    ASSERT_TRUE(verified) << verified.error().message;
+    const auto manifest = nlohmann::json::parse(verified.value());
+    EXPECT_EQ(manifest["schemaVersion"], 3U);
+    EXPECT_EQ(manifest["cameraIds"].size(), camera_slot_count);
+    EXPECT_EQ(manifest["rawBlocks"].size(), camera_slot_count);
+    EXPECT_EQ(manifest["cameraIds"].back(), "CAM06");
 }
 
 TEST(StorageEventStore, WindowsBufferedWriterUsesCngSha256VectorsAndRejectsOverwrite)

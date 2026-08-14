@@ -1,8 +1,10 @@
 #include "paperbreak/camera/frame.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/storage/nvme_cache.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <filesystem>
@@ -271,6 +273,45 @@ TEST(StorageNvmeCache, QueueIsBoundedPerCameraAndNeverWaitsForBlockedWriter)
     store->release();
     cache.value()->request_stop();
     EXPECT_TRUE(cache.value()->join(std::chrono::steady_clock::now() + 2s));
+}
+
+TEST(StorageNvmeCache, AcceptsSixCanonicalLanesAndRejectsSeventhOrInsufficientBandwidth)
+{
+    TemporaryDirectory temporary{"six-lanes"};
+    auto configured = options(temporary.path());
+    configured.cameras.clear();
+    for (const auto camera_id : paperbreak::canonical_camera_ids)
+    {
+        configured.cameras.push_back({.camera_id = std::string{camera_id},
+                                      .maximum_frame_bytes = 4U,
+                                      .index_capacity = 3U,
+                                      .required_input_bytes_per_second = 12U});
+    }
+    configured.write_limit_bytes_per_second = 72U;
+    auto six = paperbreak::storage::NvmeRollingCache::create(configured);
+    ASSERT_TRUE(six) << six.error().message;
+    EXPECT_EQ(six.value()->snapshot().camera_count, paperbreak::camera_slot_count);
+
+    auto seven = configured;
+    seven.cameras.push_back({.camera_id = "CAM07",
+                             .maximum_frame_bytes = 4U,
+                             .index_capacity = 3U,
+                             .required_input_bytes_per_second = 12U});
+    seven.write_limit_bytes_per_second = 84U;
+    auto rejected_seventh = paperbreak::storage::NvmeRollingCache::create(std::move(seven));
+    ASSERT_FALSE(rejected_seventh);
+    EXPECT_EQ(rejected_seventh.error().business_code, "SYS_CONFIG_INVALID");
+
+    configured.write_limit_bytes_per_second = 71U;
+    auto rejected_bandwidth = paperbreak::storage::NvmeRollingCache::create(configured);
+    ASSERT_FALSE(rejected_bandwidth);
+    EXPECT_EQ(rejected_bandwidth.error().business_code, "SYS_CONFIG_INVALID");
+    const auto required =
+        std::ranges::find_if(rejected_bandwidth.error().details, [](const auto& detail) {
+            return detail.key == "requiredBytesPerSecond";
+        });
+    ASSERT_NE(required, rejected_bandwidth.error().details.end());
+    EXPECT_EQ(required->value, "72");
 }
 
 TEST(StorageNvmeCache, EachStartUsesANewEmptySessionAndLeavesOldCacheUntouched)

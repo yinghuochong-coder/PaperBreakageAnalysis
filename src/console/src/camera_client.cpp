@@ -1,5 +1,7 @@
 #include "paperbreak/console/camera_client.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <QTimer>
@@ -445,7 +447,8 @@ void CameraClient::list_completed(ipc::ClientRequestHandle handle,
     }
     const Json payload = Json::parse(result.value().payload_json, nullptr, false);
     if (payload.is_discarded() || !payload.contains("cameras") || !payload["cameras"].is_array() ||
-        payload["cameras"].size() > 4U || !payload.contains("storedConfigRevision") ||
+        payload["cameras"].size() > camera_slot_count ||
+        !payload.contains("storedConfigRevision") ||
         !payload["storedConfigRevision"].is_number_unsigned() ||
         !payload.contains("topologyRestartRequired") ||
         !payload["topologyRestartRequired"].is_boolean())

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "targetModel": "MV-CS020-60GM",
+  "bindings": [
+    { "cameraId": "CAM01", "serialNumber": "MOCK-01" },
+    { "cameraId": "CAM02", "serialNumber": "MOCK-02" },
+    { "cameraId": "CAM03", "serialNumber": "MOCK-03" },
+    { "cameraId": "CAM04", "serialNumber": "MOCK-04" },
+    { "cameraId": "CAM05", "serialNumber": "MOCK-05" },
+    { "cameraId": "CAM06", "serialNumber": "MOCK-06" }
+  ],
+  "parameters": {
+    "frameRate": 60.0,
+    "triggerMode": "continuous"
+  },
+  "capture": {
+    "durationSeconds": 60,
+    "sampleIntervalMs": 1000,
+    "receiveTimeoutMs": 1000,
+    "queueCapacity": 16,
+    "framePoolCapacity": 24,
+    "frameBufferBytes": 2097152,
+    "consumerDelayMs": 0,
+    "minimumFpsRatio": 0.95
+  }
+}

@@ -202,7 +202,7 @@ PreviewRuntime::submit(frame, ...);      // 仅启用预览时
 | --- | --- | --- |
 | `ICameraProvider` / `ICameraDevice` | `src/camera/include/paperbreak/camera/camera.hpp` | 厂商无关的枚举、连接、参数和取帧接口 |
 | `create_hikrobot_camera_provider()` | `src/camera/hikrobot/...` | 创建生产 MVS 实现；所有 MVS 调用留在适配器目标内部 |
-| `CameraControlRuntime` | `src/camera/src/control.cpp` | 最多四路控制会话；实现 discover/connect/start/stop/update/snapshot/trigger |
+| `CameraControlRuntime` | `src/camera/src/control.cpp` | 最多六路控制会话；实现 discover/connect/start/stop/update/snapshot/trigger |
 | `CameraControlRuntime::start_frame_delivery()` | 同上 | 为单路创建固定帧池、有界 `AcquisitionQueue`、`AcquisitionWorker` 和转发线程 |
 | `AcquisitionWorker::run()` | `src/camera/src/acquisition.cpp` | 从已启动的 `ICameraDevice` 拉帧，写入有界采集队列 |
 | `CameraControlRuntime::forward_frames()` | `src/camera/src/control.cpp` | 从采集队列取帧并调用组合根注入的 frame observer |

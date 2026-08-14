@@ -1,5 +1,6 @@
 #include "paperbreak/camera/acquisition.hpp"
 #include "paperbreak/camera/hikrobot_camera.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 
 #include <Windows.h>
 
@@ -44,7 +45,6 @@ using paperbreak::camera::ICameraProvider;
 using paperbreak::camera::LineIoParameters;
 using paperbreak::camera::TriggerMode;
 
-constexpr std::size_t maximum_cameras = 4U;
 constexpr std::size_t maximum_capacity = 256U;
 constexpr std::uint32_t maximum_duration_seconds = 3600U;
 constexpr std::size_t maximum_samples = 3601U;
@@ -201,7 +201,7 @@ paperbreak::Result<Plan> load_plan(const std::filesystem::path& path)
         }
 
         if (plan.target_model.empty() || plan.bindings.empty() ||
-            plan.bindings.size() > maximum_cameras || plan.duration_seconds == 0U ||
+            plan.bindings.size() > paperbreak::camera_slot_count || plan.duration_seconds == 0U ||
             plan.duration_seconds > maximum_duration_seconds || plan.sample_interval_ms < 100U ||
             plan.sample_interval_ms > 2000U || plan.receive_timeout_ms == 0U ||
             plan.receive_timeout_ms > 10000U || plan.consumer_delay_ms > 1000U ||
@@ -220,8 +220,8 @@ paperbreak::Result<Plan> load_plan(const std::filesystem::path& path)
         std::unordered_set<std::string> serials;
         for (std::size_t index = 0; index < plan.bindings.size(); ++index)
         {
-            const std::string expected = "CAM0" + std::to_string(index + 1U);
-            if (plan.bindings[index].camera_id != expected ||
+            const auto expected = paperbreak::camera_id_from_slot(index);
+            if (!expected || plan.bindings[index].camera_id != expected.value() ||
                 plan.bindings[index].serial_number.empty() ||
                 !ids.insert(plan.bindings[index].camera_id).second ||
                 !serials.insert(plan.bindings[index].serial_number).second)

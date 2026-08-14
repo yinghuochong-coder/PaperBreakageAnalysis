@@ -1,5 +1,6 @@
 #pragma once
 
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/console/algorithm_client.hpp"
 #include "paperbreak/console/algorithm_metrics.hpp"
 #include "paperbreak/console/camera_client.hpp"
@@ -179,17 +180,17 @@ class MainWindow final : public QMainWindow
     QLabel* overview_disk_value_{};
     QLabel* recent_alarms_value_{};
     QLabel* overview_sync_value_{};
-    std::array<QLabel*, 4U> overview_camera_states_{};
-    std::array<QLabel*, 4U> overview_camera_fps_{};
-    std::array<QLabel*, 4U> overview_camera_brightness_{};
-    std::array<QLabel*, 4U> overview_camera_last_frames_{};
+    std::array<QLabel*, camera_slot_count> overview_camera_states_{};
+    std::array<QLabel*, camera_slot_count> overview_camera_fps_{};
+    std::array<QLabel*, camera_slot_count> overview_camera_brightness_{};
+    std::array<QLabel*, camera_slot_count> overview_camera_last_frames_{};
     QLabel* overview_detector_value_{};
     QLabel* overview_candidate_value_{};
     QLabel* overview_uplink_value_{};
     QLabel* overview_upload_value_{};
-    std::array<QLabel*, 4U> preview_images_{};
-    std::array<QLabel*, 4U> preview_overlays_{};
-    std::array<QWidget*, 4U> preview_tiles_{};
+    std::array<QLabel*, camera_slot_count> preview_images_{};
+    std::array<QLabel*, camera_slot_count> preview_overlays_{};
+    std::array<QWidget*, camera_slot_count> preview_tiles_{};
     QWidget* preview_grid_{};
     QGridLayout* preview_grid_layout_{};
     QComboBox* preview_layout_choice_{};

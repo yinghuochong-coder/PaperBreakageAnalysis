@@ -362,7 +362,7 @@ TEST(PipelineProcessor, ReportsJoinDeadlineAndThenCompletes)
     EXPECT_TRUE(processor.join(std::chrono::steady_clock::now() + 1s));
 }
 
-TEST(PipelineRuntime, EnforcesFourUniqueRoutesAndRollsBackPartialStart)
+TEST(PipelineRuntime, EnforcesSixUniqueRoutesAndRollsBackPartialStart)
 {
     std::vector<std::unique_ptr<AcquisitionQueue>> inputs;
     std::vector<std::unique_ptr<AlgorithmQueue>> outputs;
@@ -391,7 +391,7 @@ TEST(PipelineRuntime, EnforcesFourUniqueRoutesAndRollsBackPartialStart)
     EXPECT_TRUE(first->snapshot().completed);
 
     ProcessingRuntime capacity_runtime;
-    for (std::size_t index = 0U; index < 5U; ++index)
+    for (std::size_t index = 0U; index < 7U; ++index)
     {
         inputs.push_back(std::make_unique<AcquisitionQueue>(1U));
         outputs.push_back(std::make_unique<AlgorithmQueue>(1U));
@@ -402,9 +402,9 @@ TEST(PipelineRuntime, EnforcesFourUniqueRoutesAndRollsBackPartialStart)
             PerCameraProcessorOptions{.camera_id = "CAP0" + std::to_string(index + 1U),
                                       .input_wait_timeout = 10ms});
         const auto added = capacity_runtime.add(std::move(processor));
-        EXPECT_EQ(static_cast<bool>(added), index < 4U);
+        EXPECT_EQ(static_cast<bool>(added), index < paperbreak::camera_slot_count);
     }
-    EXPECT_EQ(capacity_runtime.size(), 4U);
+    EXPECT_EQ(capacity_runtime.size(), paperbreak::camera_slot_count);
 }
 
 TEST(PipelinePreviewRuntime, DoesNotEncodeWithoutSubscribersAndSamplesAtConfiguredRate)
@@ -482,12 +482,12 @@ TEST(PipelinePreviewRuntime, SupportsThirtyFpsAndThrottlesEachSubscriberIndepend
     EXPECT_TRUE(runtime.join(std::chrono::steady_clock::now() + 1s));
 }
 
-TEST(PipelinePreviewRuntime, ReplacesPendingFramesDeliversToFourSubscribersAndSurvivesFailures)
+TEST(PipelinePreviewRuntime, SupportsSixCamerasAndFourSubscribersAndSurvivesFailures)
 {
     std::mutex deliveries_mutex;
     std::vector<PreviewDelivery> deliveries;
     auto slow_encoder = std::make_unique<CountingPreviewEncoder>(false, 40ms);
-    PreviewRuntime runtime{{"CAM01", "CAM02", "CAM03", "CAM04"},
+    PreviewRuntime runtime{{"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"},
                            std::move(slow_encoder),
                            [&](PreviewDelivery delivery) {
                                std::scoped_lock lock{deliveries_mutex};
@@ -496,7 +496,8 @@ TEST(PipelinePreviewRuntime, ReplacesPendingFramesDeliversToFourSubscribersAndSu
                            {.frames_per_second = 5.0}};
     ASSERT_TRUE(runtime.start());
     for (std::uint64_t subscriber = 1U; subscriber <= 4U; ++subscriber)
-        ASSERT_TRUE(runtime.subscribe(subscriber, {"CAM01", "CAM02", "CAM03", "CAM04"}));
+        ASSERT_TRUE(
+            runtime.subscribe(subscriber, {"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"}));
     for (std::uint64_t sequence = 1U; sequence <= 12U; ++sequence)
         runtime.submit(preview_frame(sequence * 1000U));
     ASSERT_TRUE(wait_preview([&] {
@@ -516,6 +517,11 @@ TEST(PipelinePreviewRuntime, ReplacesPendingFramesDeliversToFourSubscribersAndSu
     runtime.unsubscribe(1U);
     runtime.request_stop();
     EXPECT_TRUE(runtime.join(std::chrono::steady_clock::now() + 1s));
+
+    EXPECT_THROW((PreviewRuntime{{"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06", "CAM07"},
+                                 std::make_unique<CountingPreviewEncoder>(),
+                                 [](PreviewDelivery) {}}),
+                 std::invalid_argument);
 
     auto failing_encoder = std::make_unique<CountingPreviewEncoder>(true);
     PreviewRuntime failing{

@@ -1,5 +1,6 @@
 #include "paperbreak/storage/metadata_database.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/storage/event_store.hpp"
 
 #include <nlohmann/json.hpp>
@@ -1980,7 +1981,7 @@ Result<EventMetadataRecord> EventMetadataDatabase::create_collecting_event(
     if (!valid_text(event.event_id) || !valid_text(event.decision_state) ||
         event.candidate_time_utc_ms < 0 || event.start_time_utc_ms < 0 ||
         event.end_time_utc_ms < event.start_time_utc_ms || event.camera_ids.empty() ||
-        event.camera_ids.size() > 4U || !valid_text(event.trigger_camera_id) ||
+        event.camera_ids.size() > camera_slot_count || !valid_text(event.trigger_camera_id) ||
         !valid_text(event.trigger_reason) || !std::isfinite(event.confidence) ||
         event.confidence < 0.0 || event.confidence > 1.0 || event.trigger_count == 0U ||
         event.trigger_count >
@@ -1988,7 +1989,9 @@ Result<EventMetadataRecord> EventMetadataDatabase::create_collecting_event(
         return Result<EventMetadataRecord>::failure(
             config_error("候选事件参数无效", "database.event.collecting.validate"));
     const std::set<std::string> cameras{event.camera_ids.begin(), event.camera_ids.end()};
-    if (cameras.size() != event.camera_ids.size() || !cameras.contains(event.trigger_camera_id))
+    if (cameras.size() != event.camera_ids.size() || !cameras.contains(event.trigger_camera_id) ||
+        std::ranges::any_of(
+            cameras, [](const auto& camera_id) { return !is_canonical_camera_id(camera_id); }))
         return Result<EventMetadataRecord>::failure(
             config_error("候选事件相机集合无效", "database.event.collecting.validate"));
 

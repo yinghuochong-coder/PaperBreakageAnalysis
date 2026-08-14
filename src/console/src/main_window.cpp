@@ -294,6 +294,7 @@ QGroupBox* make_camera_card(QWidget* parent, const QString& camera_id, QLabel*& 
                             QLabel*& brightness, QLabel*& last_frame)
 {
     QGroupBox* card = make_child<QGroupBox>(parent, camera_id);
+    card->setObjectName(QStringLiteral("overview-camera-%1").arg(camera_id));
     card->setProperty("role", "cameraCard");
     auto* layout = make_layout<QGridLayout>(card);
     layout->setContentsMargins(14, 18, 14, 14);
@@ -661,18 +662,21 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
     overview_layout->addWidget(overview_sync_value_);
 
     QWidget* cameras = make_child<QWidget>(overview);
+    cameras->setObjectName(QStringLiteral("overview-camera-grid"));
     auto* camera_grid = make_layout<QGridLayout>(cameras);
     camera_grid->setContentsMargins(0, 0, 0, 0);
     camera_grid->setSpacing(12);
-    for (int index = 0; index < 4; ++index)
+    for (std::size_t index = 0U; index < camera_slot_count; ++index)
     {
-        camera_grid->addWidget(
-            make_camera_card(cameras, QStringLiteral("CAM%1").arg(index + 1, 2, 10, QChar{'0'}),
-                             overview_camera_states_[static_cast<std::size_t>(index)],
-                             overview_camera_fps_[static_cast<std::size_t>(index)],
-                             overview_camera_brightness_[static_cast<std::size_t>(index)],
-                             overview_camera_last_frames_[static_cast<std::size_t>(index)]),
-            index / 2, index % 2);
+        const auto camera_id =
+            QString::fromUtf8(canonical_camera_ids[index].data(),
+                              static_cast<qsizetype>(canonical_camera_ids[index].size()));
+        auto* const card = make_camera_card(
+            cameras, camera_id, overview_camera_states_[index], overview_camera_fps_[index],
+            overview_camera_brightness_[index], overview_camera_last_frames_[index]);
+        overview_camera_states_[index]->setObjectName(
+            QStringLiteral("overview-camera-state-%1").arg(camera_id));
+        camera_grid->addWidget(card, static_cast<int>(index / 3U), static_cast<int>(index % 3U));
     }
     overview_layout->addWidget(cameras);
 
@@ -1130,9 +1134,9 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
             selection_layout->setContentsMargins(0, 0, 0, 0);
             algorithm_camera_selector_ = make_child<QComboBox>(selection);
             algorithm_camera_selector_->setObjectName(QStringLiteral("algorithm-camera-selector"));
-            algorithm_camera_selector_->addItems({QStringLiteral("CAM01"), QStringLiteral("CAM02"),
-                                                  QStringLiteral("CAM03"),
-                                                  QStringLiteral("CAM04")});
+            algorithm_camera_selector_->addItems(
+                {QStringLiteral("CAM01"), QStringLiteral("CAM02"), QStringLiteral("CAM03"),
+                 QStringLiteral("CAM04"), QStringLiteral("CAM05"), QStringLiteral("CAM06")});
             auto* refresh = make_child<QPushButton>(selection, QStringLiteral("刷新实际状态"));
             refresh->setObjectName(QStringLiteral("algorithm-refresh"));
             selection_layout->addWidget(make_child<QLabel>(selection, QStringLiteral("相机")));
@@ -2141,9 +2145,10 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
         auto* controls_layout = make_layout<QHBoxLayout>(controls);
         preview_layout_choice_ = make_child<QComboBox>(controls);
         preview_layout_choice_->setObjectName(QStringLiteral("preview-layout-choice"));
-        preview_layout_choice_->addItems({QStringLiteral("四宫格"), QStringLiteral("CAM01"),
+        preview_layout_choice_->addItems({QStringLiteral("六宫格"), QStringLiteral("CAM01"),
                                           QStringLiteral("CAM02"), QStringLiteral("CAM03"),
-                                          QStringLiteral("CAM04")});
+                                          QStringLiteral("CAM04"), QStringLiteral("CAM05"),
+                                          QStringLiteral("CAM06")});
         preview_rate_choice_ = make_child<QComboBox>(controls);
         preview_rate_choice_->setObjectName(QStringLiteral("preview-rate-choice"));
         for (const int fps : {2, 3, 5, 10, 20, 30})
@@ -2179,15 +2184,17 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
         preview_grid_layout_->setRowStretch(1, 1);
         preview_grid_layout_->setColumnStretch(0, 1);
         preview_grid_layout_->setColumnStretch(1, 1);
-        for (int camera = 0; camera < 4; ++camera)
+        preview_grid_layout_->setColumnStretch(2, 1);
+        for (std::size_t camera = 0U; camera < camera_slot_count; ++camera)
         {
-            preview_tiles_[camera] = make_preview_tile(
-                preview_grid_, camera, preview_images_[camera], preview_overlays_[camera]);
+            preview_tiles_[camera] =
+                make_preview_tile(preview_grid_, static_cast<int>(camera), preview_images_[camera],
+                                  preview_overlays_[camera]);
             static_cast<PreviewTile*>(preview_tiles_[camera])
-                ->set_double_click_handler([this, camera] {
-                    handle_preview_tile_double_click(static_cast<std::size_t>(camera));
-                });
-            preview_grid_layout_->addWidget(preview_tiles_[camera], camera / 2, camera % 2);
+                ->set_double_click_handler(
+                    [this, camera] { handle_preview_tile_double_click(camera); });
+            preview_grid_layout_->addWidget(preview_tiles_[camera], static_cast<int>(camera / 3U),
+                                            static_cast<int>(camera % 3U));
         }
         preview_layout->addWidget(preview_grid_, 1);
         QObject::connect(preview_pause_button_, &QPushButton::clicked, this, [this] {
@@ -2201,7 +2208,8 @@ MainWindow::MainWindow(std::function<void(bool)> preview_pause_changed,
                          [this](const int selection) {
                              if (selection == 0)
                                  restore_preview_tiles();
-                             else if (selection > 0 && selection <= 4)
+                             else if (selection > 0 &&
+                                      selection <= static_cast<int>(camera_slot_count))
                                  set_preview_focus(static_cast<std::size_t>(selection - 1));
                          });
         QObject::connect(preview_rate_choice_, &QComboBox::currentIndexChanged, this,
@@ -2320,7 +2328,7 @@ void MainWindow::set_preview_focus(const std::size_t index)
     preview_selected_index_ = index;
     preview_presentation_ = PreviewPresentation::focused;
     preview_grid_layout_->removeWidget(preview_tiles_[index]);
-    preview_grid_layout_->addWidget(preview_tiles_[index], 0, 0, 2, 2);
+    preview_grid_layout_->addWidget(preview_tiles_[index], 0, 0, 2, 3);
     if (preview_layout_choice_)
     {
         const QSignalBlocker blocker{preview_layout_choice_};
@@ -2383,8 +2391,8 @@ void MainWindow::restore_preview_grid_layout()
         preview_grid_layout_->removeWidget(tile);
     for (std::size_t index = 0; index < preview_tiles_.size(); ++index)
     {
-        preview_grid_layout_->addWidget(preview_tiles_[index], static_cast<int>(index / 2U),
-                                        static_cast<int>(index % 2U));
+        preview_grid_layout_->addWidget(preview_tiles_[index], static_cast<int>(index / 3U),
+                                        static_cast<int>(index % 3U));
     }
 }
 
@@ -2412,7 +2420,7 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
     update_line_input_indicators();
     for (std::size_t index = 0; index < overview_camera_states_.size(); ++index)
     {
-        const std::string id = "CAM0" + std::to_string(index + 1U);
+        const std::string id{canonical_camera_ids[index]};
         const auto found = std::ranges::find_if(
             snapshot.cameras, [&id](const auto& camera) { return camera.id == id; });
         const QString state = found == snapshot.cameras.end()
@@ -2470,9 +2478,11 @@ void MainWindow::apply_camera_snapshot(const CameraClientSnapshot& snapshot)
     camera_bind_slot_->blockSignals(true);
     const QString previous_slot = camera_bind_slot_->currentText();
     camera_bind_slot_->clear();
-    for (int index = 1; index <= 4; ++index)
+    for (std::size_t index = 0U; index < camera_slot_count; ++index)
     {
-        const QString id = QStringLiteral("CAM%1").arg(index, 2, 10, QChar{'0'});
+        const QString id =
+            QString::fromUtf8(canonical_camera_ids[index].data(),
+                              static_cast<qsizetype>(canonical_camera_ids[index].size()));
         const bool used = std::ranges::any_of(snapshot.cameras, [&](const auto& camera) {
             return QString::fromStdString(camera.id) == id;
         });
@@ -3042,7 +3052,7 @@ void MainWindow::apply_operations_snapshot(const OperationsSnapshot& snapshot)
     }
     for (std::size_t camera = 0; camera < overview_camera_fps_.size(); ++camera)
     {
-        const std::string prefix = "camera.CAM0" + std::to_string(camera + 1U) + '.';
+        const std::string prefix = "camera." + std::string{canonical_camera_ids[camera]} + '.';
         const auto find_metric = [&](const std::string_view suffix) {
             return std::ranges::find_if(snapshot.metrics, [&](const auto& metric) {
                 return metric.name == prefix + std::string{suffix};

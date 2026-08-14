@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -444,12 +445,11 @@ TEST(CameraInventory, FindsUniqueDeviceAndRejectsMissingOrDuplicateSerial)
     EXPECT_EQ(result.error().details.front().value, "duplicate-serial-number");
 }
 
-TEST(CameraInventory, ReconcilesFourLogicalSlotsBySerialAndReportsProblems)
+TEST(CameraInventory, ReconcilesSixLogicalSlotsBySerialAndReportsProblems)
 {
-    const std::vector<CameraSlotBinding> bindings = {{"CAM01", "SERIAL-0001"},
-                                                     {"CAM02", "SERIAL-0002"},
-                                                     {"CAM03", "SERIAL-0003"},
-                                                     {"CAM04", "SERIAL-0004"}};
+    const std::vector<CameraSlotBinding> bindings = {
+        {"CAM01", "SERIAL-0001"}, {"CAM02", "SERIAL-0002"}, {"CAM03", "SERIAL-0003"},
+        {"CAM04", "SERIAL-0004"}, {"CAM05", "SERIAL-0005"}, {"CAM06", "SERIAL-0006"}};
     const std::vector<CameraDeviceDescriptor> devices = {
         {"ModelA", "SERIAL-0001", "192.0.2.99", "192.0.2.10", true},
         {"ModelB", "SERIAL-0002", "192.0.2.2", "192.0.2.10", false},
@@ -458,7 +458,7 @@ TEST(CameraInventory, ReconcilesFourLogicalSlotsBySerialAndReportsProblems)
     const auto result = reconcile_camera_slots(bindings, devices);
 
     ASSERT_TRUE(result);
-    ASSERT_EQ(result.value().slots.size(), 4U);
+    ASSERT_EQ(result.value().slots.size(), 6U);
     EXPECT_EQ(result.value().slots[0].camera_id, "CAM01");
     EXPECT_EQ(result.value().slots[0].status, CameraSlotStatus::ready);
     ASSERT_TRUE(result.value().slots[0].device);
@@ -466,13 +466,15 @@ TEST(CameraInventory, ReconcilesFourLogicalSlotsBySerialAndReportsProblems)
     EXPECT_EQ(result.value().slots[1].status, CameraSlotStatus::occupied);
     EXPECT_EQ(result.value().slots[2].status, CameraSlotStatus::missing);
     EXPECT_EQ(result.value().slots[3].status, CameraSlotStatus::missing);
+    EXPECT_EQ(result.value().slots[4].status, CameraSlotStatus::missing);
+    EXPECT_EQ(result.value().slots[5].status, CameraSlotStatus::missing);
     ASSERT_EQ(result.value().unexpected_devices.size(), 1U);
     EXPECT_EQ(result.value().unexpected_devices.front().serial_number, "SERIAL-9999");
 }
 
 TEST(CameraInventory, RejectsInvalidSlotsAndDuplicateConfiguredSerials)
 {
-    std::vector<CameraSlotBinding> bindings = {{"CAM05", "SERIAL-0001"}};
+    std::vector<CameraSlotBinding> bindings = {{"CAM07", "SERIAL-0001"}};
     auto result = reconcile_camera_slots(bindings, {});
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().business_code, "CAMERA_CONFIG_FAILED");
@@ -483,11 +485,9 @@ TEST(CameraInventory, RejectsInvalidSlotsAndDuplicateConfiguredSerials)
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().details.front().value, "invalid-or-duplicate-configured-serial");
 
-    bindings = {{"CAM01", "SERIAL-0001"},
-                {"CAM02", "SERIAL-0002"},
-                {"CAM03", "SERIAL-0003"},
-                {"CAM04", "SERIAL-0004"},
-                {"CAM01", "SERIAL-0005"}};
+    bindings = {{"CAM01", "SERIAL-0001"}, {"CAM02", "SERIAL-0002"}, {"CAM03", "SERIAL-0003"},
+                {"CAM04", "SERIAL-0004"}, {"CAM05", "SERIAL-0005"}, {"CAM06", "SERIAL-0006"},
+                {"CAM01", "SERIAL-0007"}};
     result = reconcile_camera_slots(bindings, {});
     ASSERT_FALSE(result);
     EXPECT_EQ(result.error().details.front().value, "too-many-camera-slots");
@@ -613,6 +613,67 @@ TEST(CameraControlRuntime, ControlsMockDeviceAndReadsBackActualValues)
     ASSERT_TRUE(runtime.start("CAM01"));
     ASSERT_TRUE(runtime.stop("CAM01"));
     ASSERT_TRUE(runtime.disconnect("CAM01"));
+}
+
+TEST(CameraControlRuntime, AcceptsSixCanonicalSessionsAndRejectsSeventh)
+{
+    std::vector<paperbreak::camera::mock::MockCameraConfig> configurations;
+    for (std::size_t index = 0U; index < paperbreak::camera_slot_count; ++index)
+    {
+        configurations.push_back(
+            {.descriptor = {.model_name = "Mock",
+                            .serial_number = "MOCK-" + std::to_string(index + 1U),
+                            .ip_address = "127.0.0.1",
+                            .network_interface = "loopback"},
+             .width = 64U,
+             .height = 48U,
+             .frame_rate = 30.0});
+    }
+    auto provider = paperbreak::camera::mock::MockCameraProvider::create(configurations);
+    ASSERT_TRUE(provider) << provider.error().message;
+    auto owned_provider = std::move(provider).value();
+    std::vector<paperbreak::camera::mock::MockCameraControl> controls;
+    for (const auto& configuration : configurations)
+    {
+        auto control = owned_provider->control(configuration.descriptor.serial_number);
+        ASSERT_TRUE(control);
+        controls.push_back(std::move(control).value());
+    }
+    std::mutex line_mutex;
+    std::condition_variable line_condition;
+    std::array<std::uint64_t, paperbreak::camera_slot_count> revisions{};
+    std::shared_ptr<ICameraProvider> shared{std::move(owned_provider)};
+    CameraControlRuntime runtime{
+        shared, {}, {}, [&](const std::string_view camera_id, const LineInputEvent& event) {
+            const auto slot = paperbreak::camera_slot_index(camera_id);
+            ASSERT_TRUE(slot);
+            {
+                std::scoped_lock lock{line_mutex};
+                revisions[*slot] = event.revision;
+            }
+            line_condition.notify_all();
+        }};
+    for (std::size_t index = 0U; index < paperbreak::camera_slot_count; ++index)
+    {
+        const auto connected = runtime.connect(paperbreak::canonical_camera_ids[index],
+                                               configurations[index].descriptor.serial_number);
+        ASSERT_TRUE(connected) << connected.error().message;
+        ASSERT_TRUE(runtime.update(paperbreak::canonical_camera_ids[index],
+                                   {.line_io = LineIoParameters{.alarm_input_enabled = true}}));
+        ASSERT_TRUE(controls[index].set_line_input(true));
+        ASSERT_TRUE(controls[index].set_line_input(false));
+        ASSERT_TRUE(controls[index].set_line_input(true));
+    }
+    {
+        std::unique_lock lock{line_mutex};
+        ASSERT_TRUE(line_condition.wait_for(lock, std::chrono::seconds{1}, [&] {
+            return std::ranges::all_of(revisions,
+                                       [](const auto revision) { return revision == 3U; });
+        }));
+    }
+    const auto seventh = runtime.connect("CAM07", "MOCK-7");
+    ASSERT_FALSE(seventh);
+    EXPECT_EQ(seventh.error().business_code, "CAMERA_CONFIG_FAILED");
 }
 
 TEST(CameraControlRuntime, CoalescesLineInputPerCameraAndKeepsFinalRevisionAccurate)

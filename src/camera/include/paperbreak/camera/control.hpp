@@ -2,6 +2,7 @@
 
 #include "paperbreak/camera/acquisition.hpp"
 #include "paperbreak/camera/camera.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 
 #include <array>
 #include <chrono>
@@ -86,9 +87,9 @@ class CameraControlRuntime final
     CameraLineInputObserver line_input_observer_;
     std::mutex line_input_mutex_;
     std::condition_variable_any line_input_condition_;
-    std::array<std::optional<LineInputEvent>, 4U> line_input_slots_{};
-    std::array<std::uint64_t, 4U> line_input_revisions_{};
-    std::array<std::string, 4U> line_input_camera_ids_{};
+    std::array<std::optional<LineInputEvent>, camera_slot_count> line_input_slots_{};
+    std::array<std::uint64_t, camera_slot_count> line_input_revisions_{};
+    std::array<std::string, camera_slot_count> line_input_camera_ids_{};
     std::jthread line_input_dispatcher_;
     std::mutex mutex_;
     std::vector<std::unique_ptr<Session>> sessions_;

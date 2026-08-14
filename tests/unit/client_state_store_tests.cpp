@@ -10,6 +10,7 @@
 #include "paperbreak/console/uplink_client.hpp"
 #include "paperbreak/ipc/server.hpp"
 
+#include <QBuffer>
 #include <QCoreApplication>
 #include <QEventLoop>
 
@@ -1696,7 +1697,7 @@ TEST(PreviewClient, PausesWithoutStartingAnyServiceControlOperation)
     paperbreak::console::PreviewClient client(
         [&](const paperbreak::console::PreviewSnapshot& snapshot) { latest = snapshot; });
 
-    client.set_camera_ids({"CAM01", "CAM02", "CAM03", "CAM04"});
+    client.set_camera_ids({"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"});
     client.set_paused(true);
     EXPECT_TRUE(latest.paused);
     EXPECT_FALSE(latest.subscribed);
@@ -1706,6 +1707,10 @@ TEST(PreviewClient, PausesWithoutStartingAnyServiceControlOperation)
     ASSERT_TRUE(latest.last_error.has_value());
     EXPECT_EQ(latest.last_error->business_code, "IPC_PROTOCOL_ERROR");
     EXPECT_TRUE(latest.paused);
+
+    client.set_camera_ids({"CAM07"});
+    ASSERT_TRUE(latest.last_error.has_value());
+    EXPECT_EQ(latest.last_error->business_code, "IPC_PROTOCOL_ERROR");
 
     client.set_paused(false);
     EXPECT_FALSE(latest.paused);
@@ -1768,6 +1773,52 @@ TEST(PreviewClient, ReplacesAnInFlightDefaultSubscriptionWithConfiguredCameraSlo
     ASSERT_TRUE(wait_until(
         [&] { return handler->received_single_camera() && client.snapshot().subscribed; }));
     EXPECT_EQ(client.camera_ids(), std::vector<std::string>{"CAM01"});
+    client.stop();
+    server.request_stop();
+    ASSERT_TRUE(server.join(std::chrono::steady_clock::now() + std::chrono::seconds{2}));
+}
+
+TEST(PreviewClient, MapsSparseCameraIdToItsFixedLogicalSlot)
+{
+    const auto name = state_name();
+    auto handler = std::make_shared<PreviewSubscriptionHandler>();
+    paperbreak::ipc::IpcServer server{handler, std::make_unique<StateAuthorizer>(),
+                                      server_options(name)};
+    ASSERT_TRUE(server.start());
+    paperbreak::console::PreviewSnapshot latest;
+    paperbreak::console::PreviewClient client(
+        [&](const paperbreak::console::PreviewSnapshot& snapshot) { latest = snapshot; },
+        client_options(name));
+    client.set_camera_ids({"CAM05"});
+    ASSERT_TRUE(client.start());
+    ASSERT_TRUE(wait_until([&] { return handler->first_request_entered(); }));
+    handler->release_first_request();
+    ASSERT_TRUE(wait_until([&] { return latest.subscribed; }));
+
+    QImage image{2, 2, QImage::Format_RGB32};
+    image.fill(Qt::red);
+    QByteArray jpeg;
+    QBuffer buffer{&jpeg};
+    ASSERT_TRUE(buffer.open(QIODevice::WriteOnly));
+    ASSERT_TRUE(image.save(&buffer, "JPEG"));
+    std::vector<std::byte> binary;
+    binary.reserve(static_cast<std::size_t>(jpeg.size()));
+    for (const auto byte : jpeg)
+        binary.push_back(static_cast<std::byte>(static_cast<unsigned char>(byte)));
+
+    ASSERT_TRUE(server.try_publish(
+        {.event_name = "preview.frame",
+         .timestamp = "2026-08-14T00:00:00.000Z",
+         .payload_json = R"({"cameraId":"CAM05","cameraFrameNumber":5,"sequenceNumber":50})",
+         .binary = std::move(binary),
+         .coalescing_key = "preview.frame:CAM05"},
+        paperbreak::ipc::PushPolicy::coalesce_latest));
+    ASSERT_TRUE(wait_until([&] { return latest.accepted_frames == 1U; }));
+    EXPECT_FALSE(latest.images[0].has_value());
+    ASSERT_TRUE(latest.images[4].has_value());
+    EXPECT_EQ(latest.images[4]->camera_id, "CAM05");
+    EXPECT_FALSE(latest.images[5].has_value());
+
     client.stop();
     server.request_stop();
     ASSERT_TRUE(server.join(std::chrono::steady_clock::now() + std::chrono::seconds{2}));

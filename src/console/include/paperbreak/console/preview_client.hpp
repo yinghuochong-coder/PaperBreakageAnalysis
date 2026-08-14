@@ -1,5 +1,6 @@
 #pragma once
 
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/common/result.hpp"
 #include "paperbreak/ipc/client.hpp"
 
@@ -31,7 +32,7 @@ struct PreviewImage final
 struct PreviewSnapshot final
 {
     ipc::ClientConnectionSnapshot connection;
-    std::array<std::optional<PreviewImage>, 4U> images;
+    std::array<std::optional<PreviewImage>, camera_slot_count> images;
     bool paused{};
     bool subscribed{};
     double target_fps{2.0};
@@ -70,7 +71,7 @@ class PreviewClient final
     PreviewObserver observer_;
     PreviewSnapshot snapshot_;
     std::unique_ptr<ipc::IpcClient> client_;
-    std::vector<std::string> camera_ids_{"CAM01", "CAM02", "CAM03", "CAM04"};
+    std::vector<std::string> camera_ids_{"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"};
     std::optional<ipc::ClientRequestHandle> subscription_request_;
 };
 

@@ -1,5 +1,6 @@
 #include "paperbreak/event/candidate_event.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/event/memory_ring.hpp"
 
 #include <algorithm>
@@ -19,7 +20,6 @@ namespace paperbreak::event
 namespace
 {
 
-constexpr std::size_t maximum_camera_count = 4U;
 constexpr std::uint16_t random_high_mask = 0x0fffU;
 constexpr std::uint64_t random_low_mask = 0x3fff'ffff'ffff'ffffULL;
 constexpr std::uint64_t uuid_timestamp_mask = 0x0000'ffff'ffff'ffffULL;
@@ -47,12 +47,6 @@ Error id_generation_error(std::string message, std::string reason)
                                  "event.candidate.generateId", {}, std::move(reason));
     error.retryable = true;
     return error;
-}
-
-bool valid_camera_id(const std::string_view camera_id) noexcept
-{
-    return camera_id.size() == 5U && camera_id.starts_with("CAM0") && camera_id[4] >= '1' &&
-           camera_id[4] <= '4';
 }
 
 bool same_result(const algorithm::TriggerResult& left,
@@ -625,7 +619,7 @@ struct CandidateEventManager::Impl final
 Result<std::unique_ptr<CandidateEventManager>> CandidateEventManager::create(
     CandidateEventManagerConfig config)
 {
-    if (config.cameras.empty() || config.cameras.size() > maximum_camera_count)
+    if (config.cameras.empty() || config.cameras.size() > camera_slot_count)
     {
         return Result<std::unique_ptr<CandidateEventManager>>::failure(
             config_error({}, "camera-count-out-of-range"));
@@ -676,7 +670,7 @@ Result<std::unique_ptr<CandidateEventManager>> CandidateEventManager::create(
     for (std::size_t index = 0U; index < config.cameras.size(); ++index)
     {
         const auto& binding = config.cameras[index];
-        if (!valid_camera_id(binding.camera_id) || binding.memory_ring == nullptr)
+        if (!is_canonical_camera_id(binding.camera_id) || binding.memory_ring == nullptr)
         {
             return Result<std::unique_ptr<CandidateEventManager>>::failure(
                 config_error(binding.camera_id, "invalid-camera-binding"));

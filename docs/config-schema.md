@@ -1,8 +1,8 @@
 # 配置格式
 
-当前配置格式为 `configSchemaVersion = 6`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v6.schema.json`，可部署起点见 `config/default-config.json`。v1～v5 合同继续归档；程序读取 v2 时为每路相机补入安全的 Line I/O 默认值，读取 v2/v3 时把缺少的自动曝光模式补为 `Off`，读取 v2～v4 时迁移算法抽样字段，读取 v2～v5 时补入 `rearmDurationMs=500` 并归一化为内存 v6；下一次保存统一输出完整 v6，v1 不静默迁移。
+当前配置格式为 `configSchemaVersion = 7`。服务是 `configRevision` 的唯一分配者；`modifiedAt` 使用 UTC RFC 3339 三位毫秒。配置对象严格拒绝未知字段，完整机器可读约束见 `config/schemas/edge-config-v7.schema.json`，可部署起点见 `config/default-config.json`。v1～v6 合同继续归档；程序读取 v2 时为每路相机补入安全的 Line I/O 默认值，读取 v2/v3 时把缺少的自动曝光模式补为 `Off`，读取 v2～v4 时迁移算法抽样字段，读取 v2～v5 时补入 `rearmDurationMs=500`，并把 v2～v6 归一化为内存 v7；下一次保存统一输出完整 v7。v1 和 v8 及未来版本均拒绝。
 
-配置根对象包含 system、cameras、acquisition、preview、algorithm、event、storage、uplink、plantIo、logging 和 health。最多配置四路相机，逻辑编号限定为 CAM01～CAM04；启用相机必须具有唯一序列号。相机数值在 M1 只应用安全结构上限，M3 还必须按真实设备能力回读校验。每路相机的 `reverseX`、`reverseY` 分别控制水平、垂直镜像；旧 v2 配置省略时均按 `false` 处理，序列化保存后会显式写出。
+配置根对象包含 system、cameras、acquisition、preview、algorithm、event、storage、uplink、plantIo、logging 和 health。最多配置六路相机，逻辑编号限定为 CAM01～CAM06，允许稀疏槽位；启用相机必须具有唯一序列号。默认配置仅把版本提升到 v7，仍保留现有四台现场相机，不虚构 CAM05/CAM06 的序列号或安装位置；新增相机继续通过绑定流程加入。相机数值在 M1 只应用安全结构上限，M3 还必须按真实设备能力回读校验。每路相机的 `reverseX`、`reverseY` 分别控制水平、垂直镜像；旧 v2 配置省略时均按 `false` 处理，序列化保存后会显式写出。
 
 ## 自动曝光（schema v4）
 
@@ -44,8 +44,9 @@ IPC 诊断和手动重试。这三个字段均属于 `/acquisition` 待重启配
   事件队列、预览槽和事件租约计算下限；不足时以稳定配置错误拒绝启动，不在运行中扩容。
   当前可部署配置为单路 60 fps、前后各 10 秒且普通 NVMe 滚动缓存关闭；其启动下限为
   1933 槽（环缓存 601、采集/算法/预览管线 131、单事件租约 1201），默认留有 6 槽余量。
-  最终四路生产
-  容量仍须按实际 ROI 和工控机内存实测校准。
+  六路 1624×1240 Mono8 参考下，每路 1939 个槽合计约 21.82 GiB，尚未计对象和运行时开销；
+  最终生产容量仍须按实际 ROI 和工控机内存实测校准。
+- 默认 `rollingCacheWriteLimitMiBps=600` 低于六路参考滚动写需求 725,037,312 B/s；因为默认缓存关闭且默认仍为四路，不静默提高默认值。六路部署必须依据目标盘实测持续写能力显式配置。
 - `event` 完整对象包含 `preEventSeconds`、`postEventSeconds`、`maxEventSeconds`、
   `mergeGapSeconds`、`keyFrameCount`、`saveRaw`、`generatePreviewVideo`、`uploadPolicy` 和
   `retentionDays`。事件页更新必须提交完整对象并携带 `expectedConfigRevision`。
@@ -130,4 +131,4 @@ ADR-017 取消滚动缓存启动恢复配置与固定扫描上限。每次启动
 
 服务在目标目录创建唯一临时文件，完整写入并刷新后使用 Windows 原子替换。最近 5 份有效配置保存在 `<配置文件名>.history/`，文件名为 20 位修订号。主配置损坏时只从可完整验证的最新历史恢复；残留临时文件不会被采用。选择历史回滚时会创建新的修订，不会复用历史修订号。
 
-schema v6 不向旧程序提供降写兼容。若必须回滚到只支持 v5 的程序，须先停止服务，再从配置历史恢复最后一份 v5 文件；不得只修改版本号或把 v6 文件交给旧程序读取。
+schema v7 不向旧程序提供降写兼容。若必须回滚到只支持 v6 的程序，须先停止服务，从自动配置历史恢复最后一份 v6 文件，并移除 CAM05/CAM06；不得只修改版本号或把 v7 文件交给旧程序读取。事件、数据库和 NVMe 数据的持久格式未改变，不应在回滚时删除。

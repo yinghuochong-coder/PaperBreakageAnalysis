@@ -2,6 +2,7 @@
 
 #include "paperbreak/algorithm/trigger.hpp"
 #include "paperbreak/camera/frame.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/common/result.hpp"
 
 #include <chrono>
@@ -31,7 +32,7 @@ struct EventWindowManagerConfig final
     std::chrono::milliseconds post_event_duration{1000};
     std::chrono::milliseconds maximum_event_duration{60000};
     std::chrono::milliseconds merge_gap{3000};
-    std::size_t maximum_active_events{4U};
+    std::size_t maximum_active_events{camera_slot_count};
 };
 
 struct EventWindowTrigger final

@@ -1,5 +1,7 @@
 #include "paperbreak/event/key_frame.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -16,7 +18,6 @@ namespace paperbreak::event
 namespace
 {
 
-constexpr std::size_t maximum_camera_count = 4U;
 constexpr std::size_t maximum_job_capacity = 256U;
 constexpr std::size_t absolute_maximum_window_frames = 262144U;
 constexpr std::uint32_t absolute_maximum_dimension = 32768U;
@@ -132,7 +133,7 @@ Result<KeyFrameSelectionResult> KeyFrameSelector::select(
     const FrozenEventWindow& event, const KeyFrameSelectionContext& context) const
 {
     if (event.event_id.empty() || event.camera_windows.empty() ||
-        event.camera_windows.size() > maximum_camera_count ||
+        event.camera_windows.size() > camera_slot_count ||
         context.analyses.size() > config_.maximum_analysis_records)
     {
         return Result<KeyFrameSelectionResult>::failure(
@@ -150,7 +151,7 @@ Result<KeyFrameSelectionResult> KeyFrameSelector::select(
     std::size_t frame_count = 0U;
     for (const auto& camera_window : event.camera_windows)
     {
-        if (camera_window.camera_id.empty())
+        if (!is_canonical_camera_id(camera_window.camera_id))
             return Result<KeyFrameSelectionResult>::failure(
                 key_frame_error("EVENT_KEYFRAME_SELECTION_FAILED", Severity::error,
                                 "关键帧窗口包含无效相机", "keyframe.select"));
@@ -172,7 +173,7 @@ Result<KeyFrameSelectionResult> KeyFrameSelector::select(
     for (const auto& analysis : context.analyses)
     {
         const auto key = frame_key(analysis.frame);
-        if (analysis.frame.camera_id.empty() || !frames.contains(key) ||
+        if (!is_canonical_camera_id(analysis.frame.camera_id) || !frames.contains(key) ||
             !std::isfinite(analysis.change_score) || analysis.change_score < 0.0 ||
             !std::isfinite(analysis.confidence) || analysis.confidence < 0.0 ||
             analysis.confidence > 1.0 || !analyses.emplace(key, &analysis).second)
@@ -245,7 +246,8 @@ Result<KeyFrameSelectionResult> KeyFrameSelector::select(
     const EventWindowTrigger* last_trigger = first_trigger;
     for (const auto& trigger : event.triggers)
     {
-        if (trigger.trigger.camera_id.empty() || trigger.trigger.sequence_number == 0U)
+        if (!is_canonical_camera_id(trigger.trigger.camera_id) ||
+            trigger.trigger.sequence_number == 0U)
             return Result<KeyFrameSelectionResult>::failure(
                 key_frame_error("EVENT_KEYFRAME_SELECTION_FAILED", Severity::error,
                                 "关键帧触发记录无效", "keyframe.select"));

@@ -74,7 +74,7 @@ class WindowHarness final
                            const std::chrono::milliseconds maximum = 1000ms,
                            const std::chrono::milliseconds gap = 0ms,
                            const std::size_t ring_capacity = 32U,
-                           const std::size_t maximum_active_events = 4U,
+                           const std::size_t maximum_active_events = paperbreak::camera_slot_count,
                            const std::size_t maximum_active_leases = 32U,
                            const std::size_t maximum_leased_references = 128U)
     {
@@ -328,14 +328,17 @@ TEST(EventWindowBounds, DuplicateIsIdempotentCapacityIsFixedAndStopIsDeterminist
     EXPECT_EQ(after_stop.error().business_code, "EVENT_INVALID_TRANSITION");
 }
 
-TEST(EventWindowBounds, TriggerCapacityIsFixedAndFourCameraCallsAreThreadSafe)
+TEST(EventWindowBounds, TriggerCapacityIsFixedAndSixCameraCallsAreThreadSafe)
 {
-    WindowHarness harness({"CAM01", "CAM02", "CAM03", "CAM04"}, 0ms, 0ms, 5000ms, 100ms);
-    const std::array<std::string, 4U> camera_ids{"CAM01", "CAM02", "CAM03", "CAM04"};
+    WindowHarness harness({"CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"}, 0ms, 0ms, 5000ms,
+                          100ms);
+    const std::array<std::string, paperbreak::camera_slot_count> camera_ids{
+        "CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"};
     for (const auto& camera_id : camera_ids)
         harness.push(camera_id, 1U, 100ms);
 
-    std::array<std::optional<Result<EventWindowStartOutcome>>, 4U> outcomes;
+    std::array<std::optional<Result<EventWindowStartOutcome>>, paperbreak::camera_slot_count>
+        outcomes;
     std::vector<std::jthread> threads;
     for (std::size_t index = 0U; index < camera_ids.size(); ++index)
     {
@@ -352,10 +355,10 @@ TEST(EventWindowBounds, TriggerCapacityIsFixedAndFourCameraCallsAreThreadSafe)
     }
     auto snapshot = harness.manager().snapshot();
     ASSERT_EQ(snapshot.active_events.size(), 1U);
-    EXPECT_EQ(snapshot.active_events.front().triggers.size(), 4U);
-    EXPECT_EQ(snapshot.events_merged, 3U);
+    EXPECT_EQ(snapshot.active_events.front().triggers.size(), paperbreak::camera_slot_count);
+    EXPECT_EQ(snapshot.events_merged, paperbreak::camera_slot_count - 1U);
 
-    for (std::uint64_t sequence = 2U; sequence <= 13U; ++sequence)
+    for (std::uint64_t sequence = 2U; sequence <= 11U; ++sequence)
     {
         const auto time = std::chrono::milliseconds{100U + sequence};
         harness.push("CAM01", sequence, time);
@@ -363,11 +366,37 @@ TEST(EventWindowBounds, TriggerCapacityIsFixedAndFourCameraCallsAreThreadSafe)
                                                        trigger("CAM01", sequence, time));
         ASSERT_TRUE(merged);
     }
-    harness.push("CAM01", 14U, 115ms);
-    auto full = harness.manager().start_or_merge("EVT-extra-14", trigger("CAM01", 14U, 115ms));
+    harness.push("CAM01", 12U, 115ms);
+    auto full = harness.manager().start_or_merge("EVT-extra-12", trigger("CAM01", 12U, 115ms));
     ASSERT_FALSE(full);
     EXPECT_EQ(full.error().business_code, "EVENT_INVALID_TRANSITION");
     EXPECT_EQ(harness.manager().snapshot().active_events.front().triggers.size(), 16U);
+}
+
+TEST(EventWindowBounds, HoldsSixIndependentWindowsAndRejectsSeventh)
+{
+    const std::array<std::string, paperbreak::camera_slot_count> camera_ids{
+        "CAM01", "CAM02", "CAM03", "CAM04", "CAM05", "CAM06"};
+    WindowHarness harness({camera_ids.begin(), camera_ids.end()}, 0ms, 0ms, 5000ms, 0ms, 32U,
+                          paperbreak::camera_slot_count);
+    for (std::size_t index = 0U; index < camera_ids.size(); ++index)
+    {
+        const auto time = std::chrono::milliseconds{100U + index * 100U};
+        harness.push(camera_ids[index], 1U, time);
+        const auto started = harness.manager().start_or_merge("EVT-" + camera_ids[index],
+                                                              trigger(camera_ids[index], 1U, time));
+        ASSERT_TRUE(started) << started.error().message;
+        EXPECT_FALSE(started.value().merged);
+    }
+    EXPECT_EQ(harness.manager().snapshot().active_events.size(), paperbreak::camera_slot_count);
+
+    harness.push("CAM01", 2U, 700ms);
+    const auto seventh =
+        harness.manager().start_or_merge("EVT-SEVENTH", trigger("CAM01", 2U, 700ms));
+    ASSERT_FALSE(seventh);
+    EXPECT_EQ(seventh.error().business_code, "EVENT_INVALID_TRANSITION");
+    ASSERT_FALSE(seventh.error().details.empty());
+    EXPECT_EQ(seventh.error().details.back().value, "active-event-capacity");
 }
 
 TEST(EventWindowConfiguration, RejectsUnsafeDurationsAndBindings)

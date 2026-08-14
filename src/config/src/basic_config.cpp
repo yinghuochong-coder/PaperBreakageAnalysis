@@ -406,7 +406,7 @@ Result<EdgeConfig> parse_metadata(const Json& root)
                                                 (std::numeric_limits<std::uint32_t>::max)());
     if (!schema)
         return Result<EdgeConfig>::failure(schema.error());
-    constexpr std::array migratable_schema_versions{2U, 3U, 4U, 5U};
+    constexpr std::array migratable_schema_versions{2U, 3U, 4U, 5U, 6U};
     if (schema.value() != config_schema_version &&
         std::find(migratable_schema_versions.begin(), migratable_schema_versions.end(),
                   schema.value()) == migratable_schema_versions.end())
@@ -415,7 +415,7 @@ Result<EdgeConfig> parse_metadata(const Json& root)
             make_error("SYS_CONFIG_SCHEMA_UNSUPPORTED", Severity::error, "不支持该配置 schema 版本",
                        "config", "config.validateSchemaVersion");
         error.details.push_back({"received", std::to_string(schema.value())});
-        error.details.push_back({"supported", "2,3,4,5,6"});
+        error.details.push_back({"supported", "2,3,4,5,6,7"});
         return Result<EdgeConfig>::failure(std::move(error));
     }
     auto revision = unsigned_field<std::uint64_t>(root, "configRevision", "", 1U,
@@ -479,7 +479,7 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
     if (!cameras.is_array() || cameras.size() > maximum_camera_count)
     {
         return Result<EdgeConfig>::failure(invalid_config(
-            "cameras 必须是最多四项的数组", "config.validateSchema", "/cameras", "camera-count"));
+            "cameras 必须是最多六项的数组", "config.validateSchema", "/cameras", "camera-count"));
     }
     std::set<std::string> camera_ids;
     std::set<std::string> enabled_serials;
@@ -591,11 +591,10 @@ Result<EdgeConfig> parse_cameras(const Json& root, EdgeConfig result)
             return Result<EdgeConfig>::failure(strobe_pre_delay.error());
         if (!strobe_post_delay)
             return Result<EdgeConfig>::failure(strobe_post_delay.error());
-        if (!std::regex_match(id.value(), std::regex{R"(CAM0[1-4])"}) ||
-            !camera_ids.emplace(id.value()).second)
+        if (!is_canonical_camera_id(id.value()) || !camera_ids.emplace(id.value()).second)
         {
             return Result<EdgeConfig>::failure(
-                invalid_config("相机 ID 必须是唯一的 CAM01 至 CAM04", "config.validateDependency",
+                invalid_config("相机 ID 必须是唯一的 CAM01 至 CAM06", "config.validateDependency",
                                pointer + "/id", "invalid-or-duplicate-camera-id"));
         }
         if (enabled.value() &&

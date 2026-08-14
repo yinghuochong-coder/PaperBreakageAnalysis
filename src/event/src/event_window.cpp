@@ -1,5 +1,6 @@
 #include "paperbreak/event/event_window.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
 #include "paperbreak/event/memory_ring.hpp"
 
 #include <algorithm>
@@ -16,8 +17,6 @@ namespace paperbreak::event
 namespace
 {
 
-constexpr std::size_t maximum_camera_count = 4U;
-constexpr std::size_t maximum_active_event_count = 4U;
 constexpr std::size_t maximum_triggers_per_event = 16U;
 
 Error window_error(std::string business_code, const Severity severity, std::string message,
@@ -34,12 +33,6 @@ Error config_error(std::string source_id, std::string reason)
 {
     return window_error("SYS_CONFIG_INVALID", Severity::error, "事件窗口聚合器配置无效",
                         "event.window.create", std::move(source_id), std::move(reason));
-}
-
-bool valid_camera_id(const std::string_view camera_id) noexcept
-{
-    return camera_id.size() == 5U && camera_id.starts_with("CAM0") && camera_id[4] >= '1' &&
-           camera_id[4] <= '4';
 }
 
 bool valid_event_id(const std::string_view event_id) noexcept
@@ -383,9 +376,8 @@ struct EventWindowManager::Impl final
 Result<std::unique_ptr<EventWindowManager>> EventWindowManager::create(
     EventWindowManagerConfig config)
 {
-    if (config.cameras.empty() || config.cameras.size() > maximum_camera_count ||
-        config.maximum_active_events == 0U ||
-        config.maximum_active_events > maximum_active_event_count ||
+    if (config.cameras.empty() || config.cameras.size() > camera_slot_count ||
+        config.maximum_active_events == 0U || config.maximum_active_events > camera_slot_count ||
         config.pre_event_duration < std::chrono::milliseconds::zero() ||
         config.post_event_duration < std::chrono::milliseconds::zero() ||
         config.merge_gap < std::chrono::milliseconds::zero() ||
@@ -409,7 +401,7 @@ Result<std::unique_ptr<EventWindowManager>> EventWindowManager::create(
     for (std::size_t index = 0U; index < config.cameras.size(); ++index)
     {
         const auto& binding = config.cameras[index];
-        if (!valid_camera_id(binding.camera_id) || binding.memory_ring == nullptr)
+        if (!is_canonical_camera_id(binding.camera_id) || binding.memory_ring == nullptr)
         {
             return Result<std::unique_ptr<EventWindowManager>>::failure(
                 config_error(binding.camera_id, "invalid-camera-binding"));

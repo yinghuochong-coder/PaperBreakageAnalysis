@@ -1,6 +1,7 @@
 #pragma once
 
 #include "paperbreak/camera/camera.hpp"
+#include "paperbreak/common/camera_slots.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -17,7 +18,7 @@ namespace detail
 struct MockSharedState;
 }
 
-inline constexpr std::size_t maximum_mock_camera_count = 4U;
+inline constexpr std::size_t maximum_mock_camera_count = camera_slot_count;
 inline constexpr std::size_t maximum_mock_control_capacity = 1024U;
 
 /// Deterministic image generator selected independently for each mock camera.

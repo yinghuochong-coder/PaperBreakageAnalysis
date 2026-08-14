@@ -64,7 +64,7 @@
 └──────────────┘                                  │ PaperBreakEdge     │
                                                   │ Service            │
 ┌──────────────┐  GigE / MVS Adapter              │ Windows 后台服务    │
-│ 1～4 路相机   │ ===============================> │                    │
+│ 1～6 路相机   │ ===============================> │                    │
 └──────────────┘                                  │ 检测、缓存、事件、  │
                                                   │ 存储、监测、上传    │
 ┌──────────────┐  SCM 控制                        │                    │
@@ -183,7 +183,7 @@ Qt 桌面客户端只承担：
 | `paperbreak_platform_windows` | Windows 平台端口及系统健康指标源实现 | platform、common、monitoring 接口、Windows API | 业务状态、Widgets、MVS |
 | `paperbreak_config` | 强类型配置、schema 校验、版本、原子存储 | common、JSON、受控平台文件适配 | 相机实现、UI、上传实现 |
 | `paperbreak_logging` | 日志门面、分类、脱敏、滚动和刷新 | common、spdlog | 业务模块反向依赖 |
-| `paperbreak_camera` | 相机接口、能力、状态机、FramePacket、最多四路的运维控制会话 | common、monitoring 接口 | MVS 头文件、Widgets |
+| `paperbreak_camera` | 相机接口、能力、状态机、FramePacket、最多六路的运维控制会话 | common、monitoring 接口 | MVS 头文件、Widgets |
 | `paperbreak_camera_mock` | 仅在 `BUILD_TESTING=ON` 时提供模拟设备、模拟帧和故障注入；不安装 | camera、common | MVS、生产应用 |
 | `paperbreak_camera_hikrobot` | MVS 枚举、句柄、参数、取流和错误翻译 | camera、common、MVS SDK | UI、事件、上传 |
 | `paperbreak_pipeline` | 预处理节点、帧路由、顺序和背压策略 | common、camera、algorithm 接口、event 接口 | MVS、SQLite、网络实现 |
@@ -357,10 +357,10 @@ ProcessMain
 | IPC 事件线程 | 1 | 本机连接、解帧、请求关联和推送调度 |
 | IPC 控制工作线程 | 1 | 按接收顺序串行执行有副作用或未知命令；慢控制不占用查询执行器 |
 | IPC 查询工作线程 | 固定 2 | 执行状态、指标、报警和缓存相机快照等只读查询 |
-| 相机采集线程 | 每启用相机 1 个，最多 4 | 获取帧、复制/接管到池、填元数据、入队 |
-| 相机线路 I/O 分发线程 | 固定 1 | 消费四个每相机容量 1 的 latest-wins 槽，在 MVS 回调栈外更新快照和通知服务观察者 |
-| 每相机预处理执行器 | 每启用相机 1 个，最多 4 | 保序预处理、内存缓存登记和分支路由 |
-| 算法工作线程 | 每启用相机 1 个，最多 4 | 独占该相机的 `DetectorHost`，按配置节拍串行处理自动 latest-wins 槽并优先处理人工保留槽；单 Lane 阻塞或降级不影响其他相机 |
+| 相机采集线程 | 每启用相机 1 个，最多 6 | 获取帧、复制/接管到池、填元数据、入队 |
+| 相机线路 I/O 分发线程 | 固定 1 | 消费六个每相机容量 1 的 latest-wins 槽，在 MVS 回调栈外更新快照和通知服务观察者 |
+| 每相机预处理执行器 | 每启用相机 1 个，最多 6 | 保序预处理、内存缓存登记和分支路由 |
+| 算法工作线程 | 每启用相机 1 个，最多 6 | 独占该相机的 `DetectorHost`，按配置节拍串行处理自动 latest-wins 槽并优先处理人工保留槽；单 Lane 阻塞或降级不影响其他相机 |
 | 预览编码线程 | 固定 1～2 | 抽样、缩放、覆盖层和 JPEG |
 | 事件管理线程 | 1 | 候选状态、窗口租约、合并和事件状态串行化 |
 | 关键帧/事件写线程 | 固定有界，首期各 1 | 关键帧编码和事件事务写入 |
@@ -411,7 +411,7 @@ ProcessMain
 | --- | --- | --- | --- | --- | --- |
 | `service.control` | SCM/Console/IPC → 主控制线程 | 128 条；停止信号独立 | 普通命令返回 `SYS_BUSY`；停止不丢弃 | 停止接收新普通命令，处理已接受控制事务 | Warning |
 | `camera.command[i]` | 主控制 → 相机会话 | 32 条/相机 | 拒绝新普通命令；stop/close 走优先控制 | 取消未开始操作，当前 SDK 调用必须有超时 | Warning |
-| `camera.lineInput[i]` | MVS C 边沿回调 → 相机线路 I/O 分发线程 | 1 项/相机，固定 4 槽 | `latest-wins`；回调侧仍递增该槽修订 | 先关闭事件通知/设备回调来源，再请求停止、唤醒并确定性 join | Info |
+| `camera.lineInput[i]` | MVS C 边沿回调 → 相机线路 I/O 分发线程 | 1 项/相机，固定 6 槽 | `latest-wins`；回调侧仍递增该槽修订 | 先关闭事件通知/设备回调来源，再请求停止、唤醒并确定性 join | Info |
 | `acquisition.frames[i]` | 采集 → 每相机预处理 | 16 帧/相机 | 丢弃最旧未处理帧，记录序号缺口；绝不阻塞采集 | 停采后关闭生产端，消费者排空至截止时间 | Warning，持续超限升级 Error |
 | `algorithm.frames[i].automatic` | 预处理 → 算法执行器 | 1 帧/相机 | `latest-wins`；按 15/30/60 FPS 正常抽样，覆盖只计 `sampledSkippedFrames`，不报警 | 停止新提交后最多排空最新 1 帧 | Info |
 | `algorithm.frames[i].manual` | 人工触发 → 算法执行器 | 1 帧/相机 | 保留请求后的第一帧；已有待处理人工帧时合并请求 | 停止新提交后优先且最多排空 1 帧 | Warning |
@@ -444,6 +444,8 @@ requiredBytes = bytesPerFrame × 所有池化缓冲数 + 元数据与编码工�
 ```
 
 同一原始帧被多个事件引用时共享缓冲，不重复原始图像内存。若计算超过配置的进程/相机内存预算，服务拒绝启动该配置并返回稳定错误，而不是运行中尝试无界扩张。
+
+M9-00 六路参考基线采用 1624×1240 Mono8、60 FPS：六路原始负载为 724,953,600 B/s，算法入口为 360 frame/s，单工作线程理论均值为 2.7778 ms/frame。每路 1939 个原始帧槽合计约 21.82 GiB，未计对象与运行时开销，必须在目标机复核。NVMe 含元数据滚动写需求为 725,037,312 B/s，按 80% 门槛要求目标盘实测至少 906,296,640 B/s；1000 GiB 参考均衡保留约 1432 秒。默认 600 MiB/s 写入限制不足以承载该六路参考负载；默认缓存关闭且默认配置仍为四路，因此不静默提高，六路部署必须按实测盘能力显式配置。
 
 ### 8.4 优先级
 
@@ -693,11 +695,10 @@ IPC 层不直接操作相机、数据库或配置文件。业务用例返回稳�
 ```
 
 应用失败时保留旧文件和旧生效快照。启动时若主配置损坏，可从最近有效历史恢复，但必须报警和记录恢复来源。
-当前公开配置为 schema v6；v2～v4 读取时迁移为 `downsampleMode=disabled`、
+当前公开配置为 schema v7；v2～v4 读取时迁移为 `downsampleMode=disabled`、
 `processingFps=60`，并把旧连续帧数按 60 FPS 换算后向上取整到 10 ms；v2～v5 均补入
-`rearmDurationMs=500`，保存时输出完整 v6。新安装默认 `half + 15 FPS + 120 ms` 和 500 ms
-重新布防稳定时间。v1～v5 schema 文件继续归档用于迁移测试；回滚旧程序前必须从配置历史
-恢复最后一份 v5 文件，不能直接降写 v6。
+`rearmDurationMs=500`，v2～v6 保存时输出完整 v7。新安装默认 `half + 15 FPS + 120 ms` 和 500 ms
+重新布防稳定时间。v1～v6 schema 文件继续归档用于迁移测试；v1 和未来版本拒绝。回滚旧程序前必须从自动配置历史恢复最后一份 v6 文件并移除 CAM05/CAM06，不能直接降写 v7；事件、数据库和 NVMe 数据的持久格式未改变，不随配置回滚删除。
 
 ### 12.2 事件目录
 
@@ -1060,9 +1061,9 @@ SCM 启停阶段的 `service-scm-status` 在线程日志运行时创建之前工
 | --- | --- | --- |
 | 单元测试 | 状态机、队列、配置、时间、错误、选择器、迁移函数 | 无 |
 | 组件测试 | Camera Mock、Pipeline、Event、Storage、IPC 编解码 | 临时目录/内存数据库 |
-| 模拟集成 | 四路模拟相机、故障注入、事件全链、离线上传 | Mock Camera/Uplink/Plant IO |
+| 模拟集成 | 六路模拟相机、故障注入、事件全链、离线上传 | Mock Camera/Uplink/Plant IO |
 | 平台集成 | SCM、ACL、安装、路径和 Windows 关闭 | 隔离 Windows 测试机 |
-| 硬件集成 | MVS 枚举、参数回读、取流、拔线恢复、四路带宽 | 目标工控机和相机 |
+| 硬件集成 | MVS 枚举、参数回读、取流、拔线恢复、六路带宽 | 目标工控机和相机 |
 | 系统验收 | 性能、磁盘/网络故障、事件正确性、168 小时 | 生产等价环境 |
 
 默认 CTest 不依赖真实相机；硬件测试有明确标签和环境检查，缺少硬件时报告 skipped，不伪装 passed。

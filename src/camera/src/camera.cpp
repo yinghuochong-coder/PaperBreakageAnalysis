@@ -1,5 +1,7 @@
 #include "paperbreak/camera/camera.hpp"
 
+#include "paperbreak/common/camera_slots.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -56,12 +58,6 @@ std::string serial_suffix(const std::string_view serial_number)
     constexpr std::size_t suffix_length = 4U;
     return std::string{serial_number.substr(
         serial_number.size() > suffix_length ? serial_number.size() - suffix_length : 0U)};
-}
-
-bool valid_camera_id(const std::string_view camera_id) noexcept
-{
-    return camera_id.size() == 5U && camera_id.starts_with("CAM0") && camera_id[4] >= '1' &&
-           camera_id[4] <= '4';
 }
 
 bool valid_external_text(const std::string_view value, const std::size_t maximum_size) noexcept
@@ -331,11 +327,10 @@ Result<CameraDiscoveryReport> reconcile_camera_slots(
     const std::span<const CameraSlotBinding> bindings,
     const std::span<const CameraDeviceDescriptor> devices)
 {
-    constexpr std::size_t maximum_slots = 4U;
-    if (bindings.size() > maximum_slots)
+    if (bindings.size() > camera_slot_count)
     {
         return Result<CameraDiscoveryReport>::failure(make_camera_error(
-            CameraErrorKind::config_failed, "逻辑相机槽位不能超过四个", "camera.reconcileSlots",
+            CameraErrorKind::config_failed, "逻辑相机槽位不能超过六个", "camera.reconcileSlots",
             std::nullopt, {{"reason", "too-many-camera-slots"}}));
     }
     if (const auto inventory = validate_device_inventory(devices); !inventory)
@@ -347,10 +342,11 @@ Result<CameraDiscoveryReport> reconcile_camera_slots(
     std::set<std::string> configured_serials;
     for (const auto& binding : bindings)
     {
-        if (!valid_camera_id(binding.camera_id) || !camera_ids.insert(binding.camera_id).second)
+        if (!is_canonical_camera_id(binding.camera_id) ||
+            !camera_ids.insert(binding.camera_id).second)
         {
             return Result<CameraDiscoveryReport>::failure(make_camera_error(
-                CameraErrorKind::config_failed, "逻辑相机 ID 必须是唯一的 CAM01 至 CAM04",
+                CameraErrorKind::config_failed, "逻辑相机 ID 必须是唯一的 CAM01 至 CAM06",
                 "camera.reconcileSlots", std::nullopt,
                 {{"reason", "invalid-or-duplicate-camera-id"}}));
         }
