@@ -107,6 +107,8 @@ class ConfigRepository final
     [[nodiscard]] Result<void> prune_history_locked();
     [[nodiscard]] std::filesystem::path history_directory() const;
     [[nodiscard]] std::filesystem::path history_path(std::uint64_t revision) const;
+    [[nodiscard]] std::filesystem::path legacy_history_path(std::uint64_t revision,
+                                                            std::uint32_t schema) const;
     [[nodiscard]] ConfigSnapshot make_snapshot_locked(bool recovered = false) const;
 
     std::filesystem::path config_path_;

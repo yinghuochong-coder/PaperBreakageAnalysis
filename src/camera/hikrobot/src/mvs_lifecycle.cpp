@@ -339,6 +339,20 @@ class HikrobotCameraDevice final : public ICameraDevice
         }
         return stopped;
     }
+    [[nodiscard]] Result<CameraClockSample> sample_clock(
+        const std::stop_token stop_token,
+        const std::chrono::steady_clock::time_point deadline) override
+    {
+        if (!handle_)
+        {
+            auto error = make_error("TIME_PROBE_UNAVAILABLE", Severity::warning,
+                                    "相机尚未连接，无法采样时间能力", "camera.hikrobot",
+                                    "camera.hikrobot.sampleClock", true);
+            error.source_id = descriptor_.serial_number;
+            return Result<CameraClockSample>::failure(std::move(error));
+        }
+        return handle_->sample_clock(stop_token, deadline);
+    }
     [[nodiscard]] Result<void> save_user_set(std::string_view) override
     {
         return Result<void>::failure(milestone_not_implemented("camera.hikrobot.saveUserSet"));
@@ -1872,6 +1886,142 @@ Result<void> DeviceHandle::software_trigger()
     }
     std::scoped_lock lock{state_->mutex};
     return state_->software_trigger_locked();
+}
+
+Result<CameraClockSample> DeviceHandle::sample_clock(
+    const std::stop_token stop_token, const std::chrono::steady_clock::time_point deadline)
+{
+    const auto cancelled = [&] {
+        return stop_token.stop_requested() || std::chrono::steady_clock::now() >= deadline;
+    };
+    const auto unavailable = [](std::string message, const std::string_view reason,
+                                const std::optional<int> native = std::nullopt) {
+        auto error = make_error("TIME_PROBE_UNAVAILABLE", Severity::warning, std::move(message),
+                                "camera.hikrobot", "camera.hikrobot.sampleClock", true);
+        error.details.push_back({"reason", std::string{reason}});
+        if (native)
+        {
+            error.native_domain = "hikrobot-mvs";
+            error.native_code = native_code_text(*native);
+        }
+        return error;
+    };
+    if (!state_)
+        return Result<CameraClockSample>::failure(
+            unavailable("MVS 设备句柄无效", "invalid-handle"));
+    if (cancelled())
+        return Result<CameraClockSample>::failure(
+            unavailable("相机时间采样已取消或超过截止时间", "cancelled-or-deadline"));
+
+    std::scoped_lock lock{state_->mutex};
+    if (cancelled())
+        return Result<CameraClockSample>::failure(
+            unavailable("相机时间采样已取消或超过截止时间", "cancelled-or-deadline"));
+
+    const int latch_code =
+        state_->api.set_command_value(state_->handle, "GevTimestampControlLatch");
+    if (latch_code != MV_OK)
+    {
+        if (latch_code == static_cast<int>(MV_E_SUPPORT))
+        {
+            auto error = make_error("TIME_PROBE_NOT_SUPPORTED", Severity::warning,
+                                    "MVS 相机不支持时间戳锁存", "camera.hikrobot",
+                                    "camera.hikrobot.sampleClock");
+            error.native_domain = "hikrobot-mvs";
+            error.native_code = native_code_text(latch_code);
+            error.details.push_back({"reason", "timestamp-latch-not-supported"});
+            return Result<CameraClockSample>::failure(std::move(error));
+        }
+        return Result<CameraClockSample>::failure(
+            unavailable("MVS 无法锁存相机时间戳", "timestamp-latch-failed", latch_code));
+    }
+    if (cancelled())
+        return Result<CameraClockSample>::failure(
+            unavailable("相机时间采样已取消或超过截止时间", "cancelled-or-deadline"));
+
+    MVCC_INTVALUE_EX ticks_value{};
+    MVCC_INTVALUE_EX frequency_value{};
+    const int ticks_code =
+        state_->api.get_int_value(state_->handle, "GevTimestampValue", &ticks_value);
+    const int frequency_code =
+        state_->api.get_int_value(state_->handle, "GevTimestampTickFrequency", &frequency_value);
+    if (ticks_code != MV_OK || frequency_code != MV_OK || ticks_value.nCurValue == 0U ||
+        frequency_value.nCurValue == 0U)
+        return Result<CameraClockSample>::failure(
+            unavailable("MVS 相机时间戳或频率不可用", "timestamp-value-unavailable",
+                        ticks_code != MV_OK ? ticks_code : frequency_code));
+
+    bool ptp_enabled{};
+    const int ptp_code = state_->api.get_bool_value(state_->handle, "GevIEEE1588", &ptp_enabled);
+    const bool ptp_supported = ptp_code == MV_OK;
+    bool ptp_synchronized{};
+    std::optional<std::int64_t> offset_ns;
+    std::optional<std::string> last_error;
+    if (!ptp_supported)
+    {
+        ptp_enabled = false;
+        last_error = "TIME_PROBE_NOT_SUPPORTED";
+    }
+    else if (!ptp_enabled)
+    {
+        last_error = "TIME_SYNC_DEGRADED";
+    }
+    else if (cancelled())
+    {
+        return Result<CameraClockSample>::failure(
+            unavailable("相机时间采样已取消或超过截止时间", "cancelled-or-deadline"));
+    }
+    else
+    {
+        MVCC_ENUMVALUE status{};
+        const int status_code =
+            state_->api.get_enum_value(state_->handle, "GevIEEE1588Status", &status);
+        // GigE Vision IEEE 1588 status value 8 is Slave. Master/PreMaster is never accepted.
+        ptp_synchronized = status_code == MV_OK && status.nCurValue == 8U;
+        if (status_code != MV_OK)
+            last_error = "TIME_PROBE_UNAVAILABLE";
+        else if (!ptp_synchronized)
+            last_error = "TIME_SYNC_DEGRADED";
+
+        MVCC_INTVALUE_EX offset{};
+        if (state_->api.get_int_value(state_->handle, "GevIEEE1588OffsetFromMaster", &offset) ==
+            MV_OK)
+            offset_ns = static_cast<std::int64_t>(offset.nCurValue);
+    }
+
+    const auto sample_monotonic_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count();
+    const auto sample_utc_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
+    const auto frequency = static_cast<std::uint64_t>(frequency_value.nCurValue);
+    const auto tick_resolution_ns =
+        static_cast<std::int64_t>((1'000'000'000ULL + frequency - 1U) / frequency);
+    std::int64_t uncertainty_ns = 50'000'000;
+    if (ptp_synchronized && offset_ns)
+    {
+        const auto magnitude = *offset_ns == (std::numeric_limits<std::int64_t>::min)()
+                                   ? (std::numeric_limits<std::int64_t>::max)()
+                                   : std::abs(*offset_ns);
+        uncertainty_ns = std::max(magnitude, tick_resolution_ns);
+    }
+    return Result<CameraClockSample>::success(
+        {.camera_timestamp_ticks = static_cast<std::uint64_t>(ticks_value.nCurValue),
+         .camera_timestamp_frequency_hz = frequency,
+         .sample_monotonic_ns = sample_monotonic_ns,
+         .sample_utc_ns = sample_utc_ns,
+         .hardware_ptp_supported = ptp_supported,
+         .hardware_ptp_enabled = ptp_enabled,
+         .hardware_ptp_synchronized = ptp_synchronized,
+         .offset_ns = offset_ns,
+         .uncertainty_ns = uncertainty_ns,
+         .maximum_observed_offset_ns =
+             offset_ns ? std::optional<std::int64_t>{uncertainty_ns} : std::nullopt,
+         .last_synchronized_utc_ns =
+             ptp_synchronized ? std::optional<std::int64_t>{sample_utc_ns} : std::nullopt,
+         .grandmaster_identity = std::nullopt,
+         .last_error_code = std::move(last_error)});
 }
 
 namespace

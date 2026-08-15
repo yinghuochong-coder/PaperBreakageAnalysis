@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
@@ -71,6 +72,25 @@ std::optional<std::uint64_t> revision_from_history_path(const std::filesystem::p
         return std::nullopt;
     }
     return revision;
+}
+
+std::optional<std::uint32_t> source_schema_version(const std::string_view text) noexcept
+{
+    try
+    {
+        const auto document = nlohmann::json::parse(text);
+        if (!document.is_object() || !document.contains("configSchemaVersion") ||
+            !document.at("configSchemaVersion").is_number_unsigned())
+            return std::nullopt;
+        const auto value = document.at("configSchemaVersion").get<std::uint64_t>();
+        if (value > (std::numeric_limits<std::uint32_t>::max)())
+            return std::nullopt;
+        return static_cast<std::uint32_t>(value);
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
 }
 
 void redact_references(nlohmann::json& value)
@@ -174,6 +194,14 @@ std::filesystem::path ConfigRepository::history_path(const std::uint64_t revisio
     return history_directory() / name.str();
 }
 
+std::filesystem::path ConfigRepository::legacy_history_path(const std::uint64_t revision,
+                                                            const std::uint32_t schema) const
+{
+    std::ostringstream name;
+    name << std::setw(20) << std::setfill('0') << revision << ".v" << schema << ".json";
+    return history_directory() / name.str();
+}
+
 ConfigSnapshot ConfigRepository::make_snapshot_locked(const bool recovered) const
 {
     return {.stored = stored_,
@@ -197,6 +225,35 @@ Result<ConfigSnapshot> ConfigRepository::load()
         auto parsed = parse_text(current_text.value());
         if (parsed)
         {
+            const auto source_schema = source_schema_version(current_text.value());
+            if (source_schema == 7U)
+            {
+                ConfigAuditRecord migration{
+                    .source = ConfigChangeSource::startup_recovery,
+                    .actor = "service",
+                    .correlation_id = "schema-v7-to-v8",
+                    .previous_revision = parsed.value().config_revision,
+                    .candidate_revision = parsed.value().config_revision,
+                    .timestamp = current_utc_timestamp(),
+                    .changed_paths = {"/configSchemaVersion", "/timeSync"},
+                    .redacted_changes = {{"/configSchemaVersion", "7", "8"},
+                                         {"/timeSync", "<missing>", "<migration-defaults>"}}};
+                auto audited = audit_sink_.record(migration);
+                if (!audited)
+                    return Result<ConfigSnapshot>::failure(audited.error());
+                auto directories = file_system_.create_directories(history_directory());
+                if (!directories)
+                    return Result<ConfigSnapshot>::failure(directories.error());
+                auto legacy = file_system_.replace_atomically(
+                    legacy_history_path(parsed.value().config_revision, source_schema.value()),
+                    current_text.value());
+                if (!legacy)
+                    return Result<ConfigSnapshot>::failure(legacy.error());
+                auto migrated =
+                    file_system_.replace_atomically(config_path_, serialize_config(parsed.value()));
+                if (!migrated)
+                    return Result<ConfigSnapshot>::failure(migrated.error());
+            }
             stored_ = std::make_shared<const EdgeConfig>(parsed.value());
             effective_ = stored_;
             effective_revision_ = stored_->config_revision;

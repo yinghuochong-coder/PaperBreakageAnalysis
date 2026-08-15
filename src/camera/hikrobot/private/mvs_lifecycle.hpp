@@ -102,6 +102,8 @@ class DeviceHandle final
     [[nodiscard]] Result<CameraParameterSnapshot> read_parameters();
     [[nodiscard]] Result<CameraParameterSnapshot> apply_parameters(
         const CameraParameterSnapshot& parameters);
+    [[nodiscard]] Result<CameraClockSample> sample_clock(
+        std::stop_token stop_token, std::chrono::steady_clock::time_point deadline);
     void set_line_input_observer(LineInputObserver observer);
     [[nodiscard]] Result<void> software_trigger();
     [[nodiscard]] Result<CapturedFrameMetadata> capture_into(FrameBuffer& destination,

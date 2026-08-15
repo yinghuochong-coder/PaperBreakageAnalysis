@@ -259,7 +259,7 @@ TEST(SystemCommand, ReturnsBoundedStatusAndStructuredVersion)
     const Json status_json = Json::parse(status.value().payload_json);
     EXPECT_EQ(status_json.at("serviceState"), "running");
     EXPECT_TRUE(status_json.at("acceptingWrites").get<bool>());
-    EXPECT_EQ(status_json.at("configSchemaVersion"), 7);
+    EXPECT_EQ(status_json.at("configSchemaVersion"), 8);
     EXPECT_EQ(status_json.at("storedConfigRevision"), 1);
     EXPECT_FALSE(status_json.at("machineId").get<std::string>().empty());
     EXPECT_EQ(status_json.at("loggingLevel"), "info");
@@ -1342,7 +1342,7 @@ TEST(SystemCommand, ReloadIsIdempotentAndInvalidConfigPreservesActiveSnapshot)
     auto rejected = fixture.commands.handle(
         fixture.request("system.reloadConfig", R"({"expectedConfigRevision":1})"), reader, {});
     ASSERT_FALSE(rejected);
-    EXPECT_EQ(rejected.error().business_code, "SYS_CONFIG_INVALID");
+    EXPECT_EQ(rejected.error().business_code, "SYS_CONFIG_SCHEMA_UNSUPPORTED");
 
     auto snapshot = fixture.repository.snapshot();
     ASSERT_TRUE(snapshot);

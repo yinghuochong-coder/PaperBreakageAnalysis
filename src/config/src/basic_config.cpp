@@ -406,7 +406,7 @@ Result<EdgeConfig> parse_metadata(const Json& root)
                                                 (std::numeric_limits<std::uint32_t>::max)());
     if (!schema)
         return Result<EdgeConfig>::failure(schema.error());
-    constexpr std::array migratable_schema_versions{2U, 3U, 4U, 5U, 6U};
+    constexpr std::array migratable_schema_versions{2U, 3U, 4U, 5U, 6U, 7U};
     if (schema.value() != config_schema_version &&
         std::find(migratable_schema_versions.begin(), migratable_schema_versions.end(),
                   schema.value()) == migratable_schema_versions.end())
@@ -415,7 +415,7 @@ Result<EdgeConfig> parse_metadata(const Json& root)
             make_error("SYS_CONFIG_SCHEMA_UNSUPPORTED", Severity::error, "不支持该配置 schema 版本",
                        "config", "config.validateSchemaVersion");
         error.details.push_back({"received", std::to_string(schema.value())});
-        error.details.push_back({"supported", "2,3,4,5,6,7"});
+        error.details.push_back({"supported", "2,3,4,5,6,7,8"});
         return Result<EdgeConfig>::failure(std::move(error));
     }
     auto revision = unsigned_field<std::uint64_t>(root, "configRevision", "", 1U,
@@ -1254,6 +1254,74 @@ Result<EdgeConfig> parse_health(const Json& root, EdgeConfig result)
     return Result<EdgeConfig>::success(std::move(result));
 }
 
+Json default_time_sync_json()
+{
+    return {{"samplePeriodMs", 1000U},
+            {"probeTimeoutMs", 250U},
+            {"receiveClockUncertaintyNs", 50'000'000U},
+            {"warningThresholdNs", 1'000'000U},
+            {"alarmThresholdNs", 5'000'000U},
+            {"warningDurationMs", 3000U},
+            {"alarmDurationMs", 3000U}};
+}
+
+Result<EdgeConfig> parse_time_sync(const Json& root, EdgeConfig result)
+{
+    const Json& time_sync = root.at("timeSync");
+    if (auto fields = exact_fields(time_sync, "/timeSync",
+                                   {"samplePeriodMs", "probeTimeoutMs", "receiveClockUncertaintyNs",
+                                    "warningThresholdNs", "alarmThresholdNs", "warningDurationMs",
+                                    "alarmDurationMs"});
+        !fields)
+        return Result<EdgeConfig>::failure(fields.error());
+
+    auto sample_period =
+        unsigned_field<std::uint32_t>(time_sync, "samplePeriodMs", "/timeSync", 100U, 60'000U);
+    auto probe_timeout =
+        unsigned_field<std::uint32_t>(time_sync, "probeTimeoutMs", "/timeSync", 1U, 10'000U);
+    auto receive_uncertainty = unsigned_field<std::int64_t>(
+        time_sync, "receiveClockUncertaintyNs", "/timeSync", 1'000'000U, 60'000'000'000ULL);
+    auto warning_threshold = unsigned_field<std::int64_t>(time_sync, "warningThresholdNs",
+                                                          "/timeSync", 1U, 60'000'000'000ULL);
+    auto alarm_threshold = unsigned_field<std::int64_t>(time_sync, "alarmThresholdNs", "/timeSync",
+                                                        1U, 60'000'000'000ULL);
+    auto warning_duration =
+        unsigned_field<std::uint32_t>(time_sync, "warningDurationMs", "/timeSync", 0U, 3'600'000U);
+    auto alarm_duration =
+        unsigned_field<std::uint32_t>(time_sync, "alarmDurationMs", "/timeSync", 0U, 3'600'000U);
+    if (!sample_period)
+        return Result<EdgeConfig>::failure(sample_period.error());
+    if (!probe_timeout)
+        return Result<EdgeConfig>::failure(probe_timeout.error());
+    if (!receive_uncertainty)
+        return Result<EdgeConfig>::failure(receive_uncertainty.error());
+    if (!warning_threshold)
+        return Result<EdgeConfig>::failure(warning_threshold.error());
+    if (!alarm_threshold)
+        return Result<EdgeConfig>::failure(alarm_threshold.error());
+    if (!warning_duration)
+        return Result<EdgeConfig>::failure(warning_duration.error());
+    if (!alarm_duration)
+        return Result<EdgeConfig>::failure(alarm_duration.error());
+    if (probe_timeout.value() >= sample_period.value())
+        return Result<EdgeConfig>::failure(
+            invalid_config("时间探针超时必须小于采样周期", "config.validateDependency", "/timeSync",
+                           "probe-timeout-not-less-than-sample-period"));
+    if (warning_threshold.value() >= alarm_threshold.value())
+        return Result<EdgeConfig>::failure(
+            invalid_config("时间同步 Warning 阈值必须小于 Alarm 阈值", "config.validateDependency",
+                           "/timeSync", "warning-threshold-not-less-than-alarm"));
+
+    result.time_sync = {.sample_period_ms = sample_period.value(),
+                        .probe_timeout_ms = probe_timeout.value(),
+                        .receive_clock_uncertainty_ns = receive_uncertainty.value(),
+                        .warning_threshold_ns = warning_threshold.value(),
+                        .alarm_threshold_ns = alarm_threshold.value(),
+                        .warning_duration_ms = warning_duration.value(),
+                        .alarm_duration_ms = alarm_duration.value()};
+    return Result<EdgeConfig>::success(std::move(result));
+}
+
 } // namespace
 
 Result<EdgeConfig> parse_config(const std::string_view contents,
@@ -1261,7 +1329,7 @@ Result<EdgeConfig> parse_config(const std::string_view contents,
 {
     try
     {
-        const Json root = Json::parse(contents.begin(), contents.end(), nullptr, false, true);
+        Json root = Json::parse(contents.begin(), contents.end(), nullptr, false, true);
         if (root.is_discarded())
         {
             return Result<EdgeConfig>::failure(
@@ -1273,11 +1341,30 @@ Result<EdgeConfig> parse_config(const std::string_view contents,
                 invalid_config("普通配置不得包含密码、Token、Secret 或私钥字段",
                                "config.validateSecrets", "", "plaintext-secret-field"));
         }
+        if (root.is_object() && root.contains("configSchemaVersion") &&
+            root.at("configSchemaVersion").is_number_unsigned())
+        {
+            const auto source_schema = root.at("configSchemaVersion").get<std::uint64_t>();
+            if (source_schema < 2U || source_schema > config_schema_version)
+            {
+                auto metadata = parse_metadata(root);
+                if (!metadata)
+                    return metadata;
+            }
+        }
+        if (root.is_object() && root.contains("configSchemaVersion") &&
+            root.at("configSchemaVersion").is_number_unsigned())
+        {
+            const auto source_schema = root.at("configSchemaVersion").get<std::uint32_t>();
+            if (source_schema >= 2U && source_schema < config_schema_version &&
+                !root.contains("timeSync"))
+                root["timeSync"] = default_time_sync_json();
+        }
         if (auto fields =
                 exact_fields(root, "",
                              {"configSchemaVersion", "configRevision", "modifiedAt", "system",
                               "cameras", "acquisition", "preview", "algorithm", "event", "storage",
-                              "uplink", "plantIo", "logging", "health"});
+                              "uplink", "plantIo", "logging", "health", "timeSync"});
             !fields)
         {
             return Result<EdgeConfig>::failure(fields.error());
@@ -1316,7 +1403,10 @@ Result<EdgeConfig> parse_config(const std::string_view contents,
         result = parse_logging(root, config_directory, std::move(result).value());
         if (!result)
             return result;
-        return parse_health(root, std::move(result).value());
+        result = parse_health(root, std::move(result).value());
+        if (!result)
+            return result;
+        return parse_time_sync(root, std::move(result).value());
     }
     catch (const std::exception&)
     {
@@ -1446,7 +1536,15 @@ std::string serialize_config(const EdgeConfig& config)
                    {"cpuWarningPercent", config.health.cpu_warning_percent},
                    {"memoryWarningPercent", config.health.memory_warning_percent},
                    {"droppedFrameWarningRatio", config.health.dropped_frame_warning_ratio},
-                   {"heartbeatStaleSeconds", config.health.heartbeat_stale_seconds}}}};
+                   {"heartbeatStaleSeconds", config.health.heartbeat_stale_seconds}}},
+                 {"timeSync",
+                  {{"samplePeriodMs", config.time_sync.sample_period_ms},
+                   {"probeTimeoutMs", config.time_sync.probe_timeout_ms},
+                   {"receiveClockUncertaintyNs", config.time_sync.receive_clock_uncertainty_ns},
+                   {"warningThresholdNs", config.time_sync.warning_threshold_ns},
+                   {"alarmThresholdNs", config.time_sync.alarm_threshold_ns},
+                   {"warningDurationMs", config.time_sync.warning_duration_ms},
+                   {"alarmDurationMs", config.time_sync.alarm_duration_ms}}}};
     return root.dump(2) + "\n";
 }
 
@@ -1543,6 +1641,8 @@ std::vector<std::string> changed_config_paths(const EdgeConfig& current,
         paths.emplace_back("/logging/live");
     if (current.health != candidate.health)
         paths.emplace_back("/health");
+    if (current.time_sync != candidate.time_sync)
+        paths.emplace_back("/timeSync");
     std::ranges::sort(paths);
     paths.erase(std::ranges::unique(paths).begin(), paths.end());
     return paths;
@@ -1553,7 +1653,8 @@ bool is_restart_required_path(const std::string_view json_pointer) noexcept
     return json_pointer == "/system" || json_pointer == "/cameras" ||
            json_pointer == "/acquisition" || json_pointer == "/storage/roots" ||
            json_pointer == "/storage/nvme" || json_pointer == "/uplink/transport" ||
-           json_pointer == "/plantIo" || json_pointer == "/logging/runtime";
+           json_pointer == "/plantIo" || json_pointer == "/logging/runtime" ||
+           json_pointer == "/timeSync";
 }
 
 } // namespace paperbreak::config

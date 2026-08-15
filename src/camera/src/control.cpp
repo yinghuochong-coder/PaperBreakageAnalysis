@@ -184,13 +184,18 @@ Result<void> CameraControlRuntime::prepare_frame_delivery(Session& session)
             std::make_unique<AcquisitionQueue>(delivery_options_.queue_capacity);
         auto acquisition = std::make_shared<AcquisitionWorker>(
             *session.device, *session.frame_pool, *session.acquisition_queue,
-            AcquisitionWorkerOptions{.camera_id = session.id,
-                                     .receive_timeout = delivery_options_.receive_timeout,
-                                     .statistics_window = std::chrono::seconds{1},
-                                     .consecutive_timeout_limit =
-                                         std::numeric_limits<std::size_t>::max(),
-                                     .register_thread = delivery_options_.register_thread,
-                                     .diagnostics = delivery_options_.diagnostics});
+            AcquisitionWorkerOptions{
+                .camera_id = session.id,
+                .receive_timeout = delivery_options_.receive_timeout,
+                .statistics_window = std::chrono::seconds{1},
+                .consecutive_timeout_limit = std::numeric_limits<std::size_t>::max(),
+                .clock_model_provider =
+                    delivery_options_.clock_model_provider
+                        ? [provider = delivery_options_.clock_model_provider,
+                           camera_id = session.id] { return provider(camera_id); }
+                        : std::function<std::shared_ptr<const time::ClockModelSnapshot>()>{},
+                .register_thread = delivery_options_.register_thread,
+                .diagnostics = delivery_options_.diagnostics});
         {
             std::scoped_lock lock{session.cache_mutex};
             session.acquisition = std::move(acquisition);
@@ -602,6 +607,38 @@ Result<CameraControlSnapshot> CameraControlRuntime::stop(std::string_view id)
         return Result<CameraControlSnapshot>::failure(r.error());
     session->state.store(CameraControlState::connected, std::memory_order_release);
     return read(*session);
+}
+
+Result<CameraClockSample> CameraControlRuntime::sample_clock(
+    const std::string_view id, const std::stop_token stop_token,
+    const std::chrono::steady_clock::time_point deadline)
+{
+    Session* session{};
+    {
+        std::scoped_lock lock{mutex_};
+        auto found = find(id);
+        if (!found)
+            return Result<CameraClockSample>::failure(found.error());
+        session = found.value();
+    }
+    if (stop_token.stop_requested() || std::chrono::steady_clock::now() >= deadline)
+    {
+        auto error = make_error("TIME_PROBE_UNAVAILABLE", Severity::warning,
+                                "相机时间采样已取消或超过截止时间", "camera",
+                                "camera.control.sampleClock", true);
+        error.source_id = std::string{id};
+        return Result<CameraClockSample>::failure(std::move(error));
+    }
+    std::scoped_lock operation_lock{session->operation_mutex};
+    if (!session->device)
+    {
+        auto error = make_error("TIME_PROBE_UNAVAILABLE", Severity::warning,
+                                "相机尚未连接，无法采样时间能力", "camera",
+                                "camera.control.sampleClock", true);
+        error.source_id = std::string{id};
+        return Result<CameraClockSample>::failure(std::move(error));
+    }
+    return session->device->sample_clock(stop_token, deadline);
 }
 Result<CameraControlSnapshot> CameraControlRuntime::update(std::string_view id,
                                                            const CameraParameterSnapshot& p)

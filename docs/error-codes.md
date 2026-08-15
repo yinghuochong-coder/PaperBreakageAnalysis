@@ -108,10 +108,15 @@ IPC 失败响应必须携带同一个 `businessCode`，但可以只暴露允许�
 | `SYS_NOT_SUPPORTED` | Error | 否 | 已知操作或能力没有由当前组件/会话声明；拒绝且不进入业务 dispatcher，不用厂商“不支持”码替代 |
 | `SYS_SHUTDOWN_TIMEOUT` | Critical | 否 | 组件未在共享关闭截止时间内停止；记录未完成阶段 |
 | `SYS_TIME_JUMP_DETECTED` | Warning | 否 | 墙上时间与单调时间增量显著不一致；继续单调计时并降低时间质量 |
-| `TIME_PROBE_UNAVAILABLE` | Warning | 是 | 当前系统或相机时间探针不支持、超时或暂不可用；按固定优先级降级并保留适配器原始诊断 |
+| `TIME_PROBE_NOT_SUPPORTED` | Warning | 否 | 当前系统或相机节点不提供所需时间能力；显式降级且不得伪报硬件同步 |
+| `TIME_PROBE_UNAVAILABLE` | Warning | 是 | 当前系统或相机时间探针超时、服务停止或暂不可用；按固定优先级降级并保留适配器原始诊断 |
 | `TIME_MODEL_INVALID` | Error | 否 | 探针样本、频率、锚点、修订或 checked arithmetic 不能形成有效模型；不发布半成品模型 |
 | `TIME_MAPPING_UNAVAILABLE` | Error | 是 | 没有覆盖目标 T0/ticks 的已发布模型或映射溢出；保留原始/接收时间并明确标为未同步 |
 | `TIME_SYNC_DEGRADED` | Warning | 是 | 当前来源或不确定度只能满足降级语义；不得报告硬件同步或未经实测的精度 |
+| `TIME_SYNC_SOURCE_CHANGED` | Warning | 否 | 已发布时钟模型的来源发生变化；登记一次历史报警并保留新旧来源，不自动触发 P1 恢复动作 |
+| `TIME_SYNC_WARNING_THRESHOLD_EXCEEDED` | Warning | 是 | 偏移绝对值或不确定度连续达到配置的 Warning 阈值；恢复或升级到 Alarm 后清除活动项 |
+| `TIME_SYNC_ALARM_THRESHOLD_EXCEEDED` | Error | 是 | 偏移绝对值或不确定度连续达到配置的 Alarm 阈值；恢复后清除活动项 |
+| `TIME_SYNC_CAMERA_CAPACITY_EXCEEDED` | Warning | 否 | 启用相机数超过时间模型固定四槽容量；超出相机不创建时间探针，采集能力不因此伪装为已同步 |
 | `SYS_ID_COLLISION` | Critical | 是 | 新生成 ID 命中本地唯一约束；重新生成并记录生成器健康状态 |
 | `SYS_ID_GENERATION_FAILED` | Critical | 是 | 本地 UUIDv7 时间范围或系统熵源不可用；拒绝创建无可靠身份的事件并报警 |
 | `SYS_CONFIG_INVALID` | Error | 否 | 配置 JSON、schema、类型、范围或依赖校验失败；保持最后有效配置 |

@@ -13,7 +13,7 @@ namespace paperbreak::config
 {
 
 inline constexpr std::size_t config_max_bytes = 1024U * 1024U;
-inline constexpr std::uint32_t config_schema_version = 7U;
+inline constexpr std::uint32_t config_schema_version = 8U;
 inline constexpr std::size_t maximum_camera_count = camera_slot_count;
 
 enum class PixelFormat
@@ -233,6 +233,18 @@ struct HealthConfig final
     bool operator==(const HealthConfig&) const = default;
 };
 
+struct TimeSyncConfig final
+{
+    std::uint32_t sample_period_ms{1000U};
+    std::uint32_t probe_timeout_ms{250U};
+    std::int64_t receive_clock_uncertainty_ns{50'000'000};
+    std::int64_t warning_threshold_ns{1'000'000};
+    std::int64_t alarm_threshold_ns{5'000'000};
+    std::uint32_t warning_duration_ms{3000U};
+    std::uint32_t alarm_duration_ms{3000U};
+    bool operator==(const TimeSyncConfig&) const = default;
+};
+
 struct EdgeConfig final
 {
     std::uint32_t config_schema_version{config_schema_version};
@@ -249,6 +261,7 @@ struct EdgeConfig final
     PlantIoConfig plant_io;
     LoggingConfig logging;
     HealthConfig health;
+    TimeSyncConfig time_sync;
     bool operator==(const EdgeConfig&) const = default;
 };
 
@@ -259,7 +272,7 @@ struct BasicConfigInfo final
     std::size_t file_size_bytes{};
 };
 
-/// Parses strict schema v7 or migrates schema v2-v6 with compatibility defaults.
+/// Parses strict schema v8 or migrates schema v2-v7 with compatibility defaults.
 [[nodiscard]] Result<EdgeConfig> parse_config(
     std::string_view contents, const std::filesystem::path& config_directory) noexcept;
 [[nodiscard]] std::string serialize_config(const EdgeConfig& config);

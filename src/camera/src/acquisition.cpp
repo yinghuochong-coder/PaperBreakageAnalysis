@@ -529,8 +529,9 @@ void AcquisitionWorker::run(const std::stop_token stop_token) noexcept
                        sequence_number - 1U);
                 return;
             }
-            const auto model =
-                options_.clock_model_store ? options_.clock_model_store->load() : nullptr;
+            const auto model = options_.clock_model_provider ? options_.clock_model_provider()
+                               : options_.clock_model_store  ? options_.clock_model_store->load()
+                                                             : nullptr;
             const auto frame_time = time::build_frame_time_metadata(
                 metadata.camera_timestamp
                     ? std::optional<std::uint64_t>{metadata.camera_timestamp->ticks}

@@ -1376,6 +1376,68 @@ TEST_F(MvsLifecycleTest, CapturesIntoPreallocatedBufferAndMapsFrameMetadata)
               context_.calls.end());
 }
 
+TEST_F(MvsLifecycleTest, SamplesHardwarePtpOnlyWhenIeee1588StatusIsSlave)
+{
+    context_.integers["GevTimestampValue"] = {123456789, 1, 1000000000, 1};
+    context_.integers["GevTimestampTickFrequency"] = {1000000000, 1, 1000000000, 1};
+    context_.integers["GevIEEE1588OffsetFromMaster"] = {-500, -1000000, 1000000, 1};
+    context_.booleans["GevIEEE1588"] = true;
+    context_.enumerations["GevIEEE1588Status"] = {8U, {0U, 8U}};
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+
+    const auto sampled =
+        handle.sample_clock({}, std::chrono::steady_clock::now() + std::chrono::seconds{1});
+
+    ASSERT_TRUE(sampled) << sampled.error().message;
+    EXPECT_EQ(sampled.value().camera_timestamp_ticks, 123456789U);
+    EXPECT_EQ(sampled.value().camera_timestamp_frequency_hz, 1000000000U);
+    EXPECT_TRUE(sampled.value().hardware_ptp_supported);
+    EXPECT_TRUE(sampled.value().hardware_ptp_enabled);
+    EXPECT_TRUE(sampled.value().hardware_ptp_synchronized);
+    EXPECT_EQ(sampled.value().offset_ns, -500);
+    EXPECT_EQ(sampled.value().uncertainty_ns, 500);
+    EXPECT_FALSE(sampled.value().last_error_code);
+}
+
+TEST_F(MvsLifecycleTest, UnsupportedIeee1588DegradesWithoutClaimingHardwareSync)
+{
+    context_.integers["GevTimestampValue"] = {77, 1, 1000, 1};
+    context_.integers["GevTimestampTickFrequency"] = {1000, 1, 1000, 1};
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+
+    const auto sampled =
+        handle.sample_clock({}, std::chrono::steady_clock::now() + std::chrono::seconds{1});
+
+    ASSERT_TRUE(sampled) << sampled.error().message;
+    EXPECT_FALSE(sampled.value().hardware_ptp_supported);
+    EXPECT_FALSE(sampled.value().hardware_ptp_enabled);
+    EXPECT_FALSE(sampled.value().hardware_ptp_synchronized);
+    EXPECT_GE(sampled.value().uncertainty_ns, 50'000'000);
+    EXPECT_EQ(sampled.value().last_error_code, "TIME_PROBE_NOT_SUPPORTED");
+}
+
+TEST_F(MvsLifecycleTest, ClockSamplingFailureAndDeadlineUseStableErrors)
+{
+    auto opened = DeviceHandle::open(fake_api, context_.device_info);
+    ASSERT_TRUE(opened);
+    auto handle = std::move(opened).value();
+    context_.command_code = MV_E_SUPPORT;
+    const auto unsupported =
+        handle.sample_clock({}, std::chrono::steady_clock::now() + std::chrono::seconds{1});
+    ASSERT_FALSE(unsupported);
+    EXPECT_EQ(unsupported.error().business_code, "TIME_PROBE_NOT_SUPPORTED");
+    EXPECT_EQ(unsupported.error().native_domain, "hikrobot-mvs");
+
+    context_.command_code = MV_OK;
+    const auto expired = handle.sample_clock({}, std::chrono::steady_clock::now());
+    ASSERT_FALSE(expired);
+    EXPECT_EQ(expired.error().business_code, "TIME_PROBE_UNAVAILABLE");
+}
+
 TEST_F(MvsLifecycleTest, MissingDeviceTicksRemainUnavailableAtAdapterBoundary)
 {
     context_.integers["GevTimestampTickFrequency"] = {1000000000, 1, 1000000000, 1};

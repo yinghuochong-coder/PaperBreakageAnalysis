@@ -31,6 +31,8 @@ add_executable(PaperBreakTests
     unit/service_runtime_tests.cpp
     unit/system_command_tests.cpp
     unit/time_model_tests.cpp
+    unit/time_sync_runtime_tests.cpp
+    unit/time_sync_monitor_tests.cpp
     unit/uplink_protocol_tests.cpp
     unit/uplink_mock_transport_tests.cpp
     unit/uplink_runtime_tests.cpp
@@ -38,6 +40,7 @@ add_executable(PaperBreakTests
     unit/uplink_transport_tests.cpp
     unit/uplink_simulator_tests.cpp
     unit/windows_control_tests.cpp
+    unit/windows_clock_probe_tests.cpp
     unit/windows_scm_tests.cpp
     simulation/simulation_baseline_tests.cpp
     hardware/hardware_baseline_tests.cpp)
@@ -109,7 +112,7 @@ target_link_libraries(PaperBreakOpenCvSmoke
 set_target_properties(PaperBreakOpenCvSmoke PROPERTIES FOLDER "PaperBreak/Tests")
 
 add_test(NAME unit
-    COMMAND PaperBreakTests --gtest_filter=Algorithm*:Camera*:Pipeline*:Event*:Storage*:Common*:Result*:Version*:TimeModel*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:Uplink*:WindowsControl*:WindowsScm*)
+    COMMAND PaperBreakTests --gtest_filter=Algorithm*:Camera*:Pipeline*:Event*:Storage*:Common*:Result*:Version*:TimeModel*:TimeSyncRuntime*:TimeSyncAlarmMonitor*:Logging*:Monitoring*:HealthMonitor*:BasicConfig*:ConfigRepository*:IpcProtocol*:IpcServer*:IpcClient*:ClientStateStore*:OperationsClient*:PreviewClient*:ConsoleNavigationModel*:ConsoleTrayStatusModel*:SystemCommand*:ServiceRuntime*:Uplink*:WindowsClockProbe*:WindowsControl*:WindowsScm*)
 set_tests_properties(unit PROPERTIES
     LABELS "unit"
     ENVIRONMENT "PATH=$<TARGET_FILE_DIR:Qt6::Core>\\;$<TARGET_FILE_DIR:opencv_core>\\;$ENV{PATH}")

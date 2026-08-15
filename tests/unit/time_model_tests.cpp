@@ -213,3 +213,76 @@ TEST(TimeModelClockConversion, ConvertsRepresentableClockPointsToSignedNanosecon
                   std::chrono::system_clock::time_point{std::chrono::milliseconds{-456}}),
               -456'000'000);
 }
+
+TEST(TimeModelReceiveClock, UsesReceiveUtcAsExplicitDegradedCorrection)
+{
+    auto snapshot = model(9U);
+    snapshot.clock_source = ClockSource::receive_clock;
+    snapshot.sync_state = SyncState::degraded;
+    snapshot.anchor_camera_ticks.reset();
+    snapshot.camera_timestamp_frequency_hz.reset();
+    snapshot.offset_ns.reset();
+    snapshot.uncertainty_ns = 50'000'000;
+    auto published = std::make_shared<const ClockModelSnapshot>(snapshot);
+
+    const auto result = build_frame_time_metadata({}, {}, 12'000, 5'000'000'000, published);
+    EXPECT_EQ(result.status, FrameTimeBuildStatus::corrected);
+    EXPECT_EQ(result.metadata.corrected_capture_utc_ns, 5'000'000'000);
+    EXPECT_EQ(result.metadata.clock_source, ClockSource::receive_clock);
+    EXPECT_EQ(result.metadata.sync_state, SyncState::degraded);
+    EXPECT_EQ(result.metadata.clock_model_revision, 9U);
+    EXPECT_TRUE(validate_frame_time_metadata(result.metadata));
+}
+
+TEST(TimeModelHostMapping, MapsBothDirectionsAndRetainsTheExactModel)
+{
+    auto snapshot = model(11U);
+    snapshot.camera_id.reset();
+    snapshot.anchor_monotonic_ns = 1'000;
+    snapshot.anchor_utc_ns = 10'000;
+    snapshot.valid_from_monotonic_ns = 900;
+    snapshot.anchor_camera_ticks.reset();
+    snapshot.camera_timestamp_frequency_hz.reset();
+    auto published = std::make_shared<const ClockModelSnapshot>(snapshot);
+
+    const auto utc = map_monotonic_to_utc(1'250, published);
+    ASSERT_TRUE(utc);
+    EXPECT_EQ(utc.value().mapped_time_ns, 10'250);
+    EXPECT_EQ(utc.value().model.get(), published.get());
+
+    const auto monotonic = map_utc_to_monotonic(10'500, published);
+    ASSERT_TRUE(monotonic);
+    EXPECT_EQ(monotonic.value().mapped_time_ns, 1'500);
+    EXPECT_EQ(monotonic.value().model->model_revision, 11U);
+
+    const auto status = build_clock_sync_snapshot(published, 1'400);
+    EXPECT_TRUE(status.available);
+    EXPECT_EQ(status.current_utc_ns, 10'400);
+    EXPECT_TRUE(status.offset_available);
+    EXPECT_TRUE(status.uncertainty_available);
+    EXPECT_FALSE(status.grandmaster_available);
+    EXPECT_EQ(status.model_revision, 11U);
+}
+
+TEST(TimeModelHostMapping, RejectsUncoveredAndOverflowingTargets)
+{
+    auto snapshot = model(12U);
+    snapshot.camera_id.reset();
+    snapshot.anchor_camera_ticks.reset();
+    snapshot.camera_timestamp_frequency_hz.reset();
+    snapshot.anchor_monotonic_ns = 100;
+    snapshot.anchor_utc_ns = std::numeric_limits<std::int64_t>::max() - 5;
+    snapshot.valid_from_monotonic_ns = 100;
+    auto published = std::make_shared<const ClockModelSnapshot>(snapshot);
+
+    const auto before = map_monotonic_to_utc(99, published);
+    ASSERT_FALSE(before);
+    EXPECT_EQ(before.error().business_code, "TIME_MAPPING_UNAVAILABLE");
+    EXPECT_FALSE(map_monotonic_to_utc(106, published));
+    EXPECT_FALSE(map_utc_to_monotonic(std::numeric_limits<std::int64_t>::min(), published));
+
+    const auto unavailable = build_clock_sync_snapshot({}, 100);
+    EXPECT_FALSE(unavailable.available);
+    EXPECT_EQ(unavailable.clock_source, ClockSource::unknown);
+    EXPECT_EQ(unavailable.sync_state, SyncState::unknown);
+}

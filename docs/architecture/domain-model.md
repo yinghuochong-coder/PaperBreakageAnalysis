@@ -205,6 +205,11 @@ EVT-019870f2-6c80-7a31-9b52-6e3b9ca1d88f
 `clockModelRevision` 必须大于 0，`uncertaintyNs` 必须有值，状态不得为 `UNSYNCED` 或
 `UNKNOWN`。没有校正值仍必须保留 ticks、接收 UTC 和接收单调时间。
 
+`RECEIVE_CLOCK` 是明确的末级降级模型：逐帧以 `receivedUtcNs` 作为
+`correctedCaptureUtcNs` 的近似值，状态必须为 `DEGRADED` 并携带保守不确定度；该值不声称
+相机曝光时刻已被硬件同步。缺少相机 ticks 时仍允许使用此降级路径，但不得虚报为 PTP 或
+`SYNCED`。
+
 `ClockModelSnapshot` 是模型计算使用的不可变快照：
 
 | 字段 | 类型 | 说明 |

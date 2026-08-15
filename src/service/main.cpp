@@ -8,11 +8,13 @@
 #include "paperbreak/pipeline/preview.hpp"
 #include "paperbreak/platform/atomic_file.hpp"
 #include "paperbreak/platform/system_metrics.hpp"
+#include "paperbreak/platform/windows_clock_probe.hpp"
 #include "paperbreak/service/algorithm_metrics.hpp"
 #include "paperbreak/service/camera_startup.hpp"
 #include "paperbreak/service/event_runtime.hpp"
 #include "paperbreak/service/runtime.hpp"
 #include "paperbreak/service/system_commands.hpp"
+#include "paperbreak/service/time_sync_service.hpp"
 #include "paperbreak/service/windows/console_control.hpp"
 #include "paperbreak/service/windows/scm.hpp"
 #include "paperbreak/service/windows/scm_host.hpp"
@@ -2187,12 +2189,19 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     const std::weak_ptr<paperbreak::pipeline::PreviewRuntime> weak_preview = preview;
     const std::weak_ptr<paperbreak::service::EventRuntime> weak_event_runtime = event_runtime;
     const std::weak_ptr<paperbreak::storage::NvmeRollingCache> weak_nvme_cache = nvme_cache;
+    auto time_runtime_target = std::make_shared<std::weak_ptr<paperbreak::time::TimeSyncRuntime>>();
     paperbreak::camera::CameraFrameDeliveryOptions delivery_options{
         .frame_pool_capacity = loaded.value().effective->acquisition.frame_pool_capacity,
         .queue_capacity = loaded.value().effective->acquisition.queue_capacity,
         .receive_timeout =
             std::chrono::milliseconds{loaded.value().effective->acquisition.receive_timeout_ms},
         .register_thread = service_thread_registrar};
+    delivery_options.clock_model_provider =
+        [time_runtime_target](const std::string_view camera_id) {
+            if (const auto runtime = time_runtime_target->lock())
+                return runtime->camera_model(camera_id);
+            return std::shared_ptr<const paperbreak::time::ClockModelSnapshot>{};
+        };
     delivery_options.diagnostics = debug_diagnostics(paperbreak::logging::Category::camera);
     cameras = std::make_shared<paperbreak::camera::CameraControlRuntime>(
         std::move(camera_provider),
@@ -2250,6 +2259,67 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
                     paperbreak::ipc::PushPolicy::coalesce_latest));
             }
         });
+    const auto& time_config = loaded.value().effective->time_sync;
+    auto time_alarm_monitor = std::make_shared<paperbreak::service::TimeSyncAlarmMonitor>(
+        alarms, paperbreak::service::TimeSyncAlarmOptions{
+                    .warning_threshold_ns = time_config.warning_threshold_ns,
+                    .alarm_threshold_ns = time_config.alarm_threshold_ns,
+                    .warning_duration = std::chrono::milliseconds{time_config.warning_duration_ms},
+                    .alarm_duration = std::chrono::milliseconds{time_config.alarm_duration_ms}});
+    std::vector<std::unique_ptr<paperbreak::time::ICameraClockProbe>> camera_clock_probes;
+    std::size_t enabled_time_camera_count{};
+    for (const auto& camera : loaded.value().effective->cameras)
+    {
+        if (!camera.enabled)
+            continue;
+        ++enabled_time_camera_count;
+        if (camera_clock_probes.size() >= paperbreak::time::time_sync_camera_capacity)
+            continue;
+        camera_clock_probes.push_back(
+            std::make_unique<paperbreak::service::CameraControlClockProbe>(
+                camera.id, cameras, time_config.receive_clock_uncertainty_ns));
+    }
+    if (enabled_time_camera_count > paperbreak::time::time_sync_camera_capacity)
+    {
+        static_cast<void>(alarms->raise_alarm(
+            {.code = "TIME_SYNC_CAMERA_CAPACITY_EXCEEDED",
+             .severity = paperbreak::Severity::warning,
+             .source = "time.system",
+             .message = "启用相机数量超过当前时间同步槽容量",
+             .details = {{"enabledCameraCount", std::to_string(enabled_time_camera_count)},
+                         {"timeSyncCameraCapacity",
+                          std::to_string(paperbreak::time::time_sync_camera_capacity)}}}));
+    }
+    paperbreak::time::TimeSyncRuntimeOptions time_options{
+        .sample_period = std::chrono::milliseconds{time_config.sample_period_ms},
+        .probe_timeout = std::chrono::milliseconds{time_config.probe_timeout_ms},
+        .first_sample_timeout = std::chrono::seconds{2},
+        .receive_clock_uncertainty_ns = time_config.receive_clock_uncertainty_ns,
+        .system_time_jump_threshold_ns = 100'000'000};
+    time_options.model_observer =
+        [weak_monitor =
+             std::weak_ptr<paperbreak::service::TimeSyncAlarmMonitor>{time_alarm_monitor}](
+            const std::int64_t monotonic_ns,
+            const std::shared_ptr<const paperbreak::time::ClockModelSnapshot>& system_model,
+            const std::vector<std::shared_ptr<const paperbreak::time::ClockModelSnapshot>>&
+                camera_models) {
+            if (const auto monitor = weak_monitor.lock())
+                monitor->observe(monotonic_ns, system_model, camera_models);
+        };
+    auto time_runtime_result = paperbreak::time::TimeSyncRuntime::create(
+        paperbreak::platform::create_windows_system_clock_probe(
+            time_config.receive_clock_uncertainty_ns),
+        std::move(camera_clock_probes), std::make_unique<paperbreak::time::StandardRuntimeClock>(),
+        std::move(time_options));
+    if (!time_runtime_result)
+    {
+        static_cast<void>(logging->shutdown());
+        return paperbreak::Result<std::unique_ptr<paperbreak::service::windows::IHostedService>>::
+            failure(time_runtime_result.error());
+    }
+    auto time_runtime =
+        std::shared_ptr<paperbreak::time::TimeSyncRuntime>{std::move(time_runtime_result).value()};
+    *time_runtime_target = time_runtime;
     auto commands = std::make_shared<paperbreak::service::SystemCommandService>(
         configuration->repository, status, metrics, alarms, logging, config_path.parent_path(),
         preview, cameras, event_runtime, event_database, event_inspector, on_event_reviewed);
@@ -2413,6 +2483,8 @@ create_hosted_service(const std::filesystem::path& config_path, const bool valid
     components.push_back(std::make_unique<EventLifecycleComponent>(event_runtime));
     if (nvme_cache)
         components.push_back(std::make_unique<NvmeLifecycleComponent>(nvme_cache));
+    components.push_back(std::make_unique<paperbreak::service::TimeSyncLifecycleComponent>(
+        time_runtime, time_alarm_monitor));
     components.push_back(std::make_unique<paperbreak::service::CameraStartupLifecycleComponent>(
         cameras, loaded.value().effective->cameras, loaded.value().effective->acquisition,
         logging));

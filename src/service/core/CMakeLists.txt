@@ -3,7 +3,9 @@ add_library(paperbreak_service_core STATIC
     src/camera_startup.cpp
     src/event_runtime.cpp
     src/runtime.cpp
-    src/system_commands.cpp)
+    src/system_commands.cpp
+    src/time_sync_monitor.cpp
+    src/time_sync_service.cpp)
 
 target_link_libraries(paperbreak_service_core
     PUBLIC
@@ -18,6 +20,7 @@ target_link_libraries(paperbreak_service_core
         paperbreak_monitoring
         paperbreak_pipeline
         paperbreak_storage
+        paperbreak_time
         paperbreak_uplink
         paperbreak_compiler_options)
 target_link_libraries(paperbreak_service_core PRIVATE nlohmann_json::nlohmann_json)

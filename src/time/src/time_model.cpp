@@ -45,6 +45,26 @@ bool checked_add(const std::int64_t left, const std::int64_t right, std::int64_t
     return true;
 }
 
+bool checked_subtract(const std::int64_t left, const std::int64_t right,
+                      std::int64_t& output) noexcept
+{
+    if ((right > 0 && left < std::numeric_limits<std::int64_t>::min() + right) ||
+        (right < 0 && left > std::numeric_limits<std::int64_t>::max() + right))
+    {
+        return false;
+    }
+    output = left - right;
+    return true;
+}
+
+Error mapping_error(const std::string& reason)
+{
+    auto error = make_error("TIME_MAPPING_UNAVAILABLE", Severity::error, "时间映射不可用", "time",
+                            "time.map", true);
+    error.details.push_back({"reason", reason});
+    return error;
+}
+
 struct UnsignedDivision final
 {
     std::uint64_t quotient{};
@@ -232,6 +252,67 @@ Result<void> validate_clock_model_snapshot(const ClockModelSnapshot& snapshot)
     return Result<void>::success();
 }
 
+Result<ClockTimeMapping> map_monotonic_to_utc(
+    const std::int64_t monotonic_ns,
+    const std::shared_ptr<const ClockModelSnapshot>& model) noexcept
+{
+    if (!model || !validate_clock_model_snapshot(*model))
+        return Result<ClockTimeMapping>::failure(mapping_error("missing-or-invalid-model"));
+    if (monotonic_ns < model->valid_from_monotonic_ns)
+        return Result<ClockTimeMapping>::failure(mapping_error("model-not-yet-valid"));
+
+    std::int64_t delta{};
+    std::int64_t mapped{};
+    if (!checked_subtract(monotonic_ns, model->anchor_monotonic_ns, delta) ||
+        !checked_add(model->anchor_utc_ns, delta, mapped))
+        return Result<ClockTimeMapping>::failure(mapping_error("arithmetic-overflow"));
+    return Result<ClockTimeMapping>::success({.mapped_time_ns = mapped, .model = model});
+}
+
+Result<ClockTimeMapping> map_utc_to_monotonic(
+    const std::int64_t utc_ns, const std::shared_ptr<const ClockModelSnapshot>& model) noexcept
+{
+    if (!model || !validate_clock_model_snapshot(*model))
+        return Result<ClockTimeMapping>::failure(mapping_error("missing-or-invalid-model"));
+
+    std::int64_t delta{};
+    std::int64_t mapped{};
+    if (!checked_subtract(utc_ns, model->anchor_utc_ns, delta) ||
+        !checked_add(model->anchor_monotonic_ns, delta, mapped))
+        return Result<ClockTimeMapping>::failure(mapping_error("arithmetic-overflow"));
+    if (mapped < model->valid_from_monotonic_ns)
+        return Result<ClockTimeMapping>::failure(mapping_error("model-not-yet-valid"));
+    return Result<ClockTimeMapping>::success({.mapped_time_ns = mapped, .model = model});
+}
+
+ClockSyncSnapshot build_clock_sync_snapshot(const std::shared_ptr<const ClockModelSnapshot>& model,
+                                            const std::int64_t current_monotonic_ns) noexcept
+{
+    ClockSyncSnapshot snapshot;
+    if (!model || !validate_clock_model_snapshot(*model))
+        return snapshot;
+
+    snapshot.available = true;
+    snapshot.clock_source = model->clock_source;
+    snapshot.sync_state = model->sync_state;
+    snapshot.offset_ns = model->offset_ns;
+    snapshot.offset_available = model->offset_ns.has_value();
+    snapshot.uncertainty_ns = model->uncertainty_ns;
+    snapshot.uncertainty_available = model->uncertainty_ns.has_value();
+    snapshot.maximum_observed_offset_ns = model->maximum_observed_offset_ns;
+    snapshot.maximum_observed_offset_available = model->maximum_observed_offset_ns.has_value();
+    snapshot.last_synchronized_utc_ns = model->last_synchronized_utc_ns;
+    snapshot.last_synchronized_utc_available = model->last_synchronized_utc_ns.has_value();
+    snapshot.grandmaster_identity = model->grandmaster_identity;
+    snapshot.grandmaster_available = model->grandmaster_identity.has_value();
+    snapshot.model_revision = model->model_revision;
+    snapshot.last_error_code = model->last_error_code;
+    const auto current = map_monotonic_to_utc(current_monotonic_ns, model);
+    if (current)
+        snapshot.current_utc_ns = current.value().mapped_time_ns;
+    return snapshot;
+}
+
 void ImmutableClockModelStore::publish(std::shared_ptr<const ClockModelSnapshot> snapshot) noexcept
 {
     snapshot_.store(std::move(snapshot), std::memory_order_release);
@@ -275,6 +356,22 @@ FrameTimeBuildResult build_frame_time_metadata(
         result.status = FrameTimeBuildStatus::invalid_model;
         return result;
     }
+    if (received_monotonic_ns < model->valid_from_monotonic_ns)
+    {
+        result.status = FrameTimeBuildStatus::model_not_yet_valid;
+        return result;
+    }
+    if (model->clock_source == ClockSource::receive_clock)
+    {
+        result.metadata.corrected_capture_utc_ns = received_utc_ns;
+        result.metadata.clock_source = model->clock_source;
+        result.metadata.clock_offset_ns = model->offset_ns;
+        result.metadata.uncertainty_ns = model->uncertainty_ns;
+        result.metadata.sync_state = model->sync_state;
+        result.metadata.clock_model_revision = model->model_revision;
+        result.status = FrameTimeBuildStatus::corrected;
+        return result;
+    }
     if (!camera_timestamp_ticks || !model->anchor_camera_ticks ||
         !model->camera_timestamp_frequency_hz)
     {
@@ -284,11 +381,6 @@ FrameTimeBuildResult build_frame_time_metadata(
     if (*camera_timestamp_frequency_hz != *model->camera_timestamp_frequency_hz)
     {
         result.status = FrameTimeBuildStatus::frequency_mismatch;
-        return result;
-    }
-    if (received_monotonic_ns < model->valid_from_monotonic_ns)
-    {
-        result.status = FrameTimeBuildStatus::model_not_yet_valid;
         return result;
     }
     const auto delta =

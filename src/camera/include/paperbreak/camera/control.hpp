@@ -29,6 +29,8 @@ struct CameraFrameDeliveryOptions final
     std::chrono::milliseconds receive_timeout{250};
     ThreadRegistrationFactory register_thread;
     DebugDiagnosticSink diagnostics;
+    std::function<std::shared_ptr<const time::ClockModelSnapshot>(std::string_view)>
+        clock_model_provider;
 };
 
 enum class CameraControlState
@@ -68,6 +70,9 @@ class CameraControlRuntime final
                                                        const CameraParameterSnapshot& parameters);
     [[nodiscard]] Result<CapturedFrameMetadata> capture_snapshot(std::string_view id);
     [[nodiscard]] Result<void> software_trigger(std::string_view id);
+    [[nodiscard]] Result<CameraClockSample> sample_clock(
+        std::string_view id, std::stop_token stop_token,
+        std::chrono::steady_clock::time_point deadline);
 
   private:
     struct Session;

@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -232,6 +233,24 @@ struct CapturedFrameMetadata final
     bool operator==(const CapturedFrameMetadata&) const = default;
 };
 
+struct CameraClockSample final
+{
+    std::uint64_t camera_timestamp_ticks{};
+    std::uint64_t camera_timestamp_frequency_hz{};
+    std::int64_t sample_monotonic_ns{};
+    std::int64_t sample_utc_ns{};
+    bool hardware_ptp_supported{};
+    bool hardware_ptp_enabled{};
+    bool hardware_ptp_synchronized{};
+    std::optional<std::int64_t> offset_ns;
+    std::int64_t uncertainty_ns{};
+    std::optional<std::int64_t> maximum_observed_offset_ns;
+    std::optional<std::int64_t> last_synchronized_utc_ns;
+    std::optional<std::string> grandmaster_identity;
+    std::optional<std::string> last_error_code;
+    bool operator==(const CameraClockSample&) const = default;
+};
+
 class ICameraDevice
 {
   public:
@@ -250,6 +269,13 @@ class ICameraDevice
         FrameBuffer& destination, std::chrono::milliseconds timeout) = 0;
     [[nodiscard]] virtual Result<void> software_trigger() = 0;
     [[nodiscard]] virtual Result<void> stop_acquisition() = 0;
+    [[nodiscard]] virtual Result<CameraClockSample> sample_clock(
+        std::stop_token, std::chrono::steady_clock::time_point)
+    {
+        return Result<CameraClockSample>::failure(
+            make_error("TIME_PROBE_NOT_SUPPORTED", Severity::warning,
+                       "相机适配器不支持时间能力采样", "camera", "camera.sampleClock"));
+    }
     [[nodiscard]] virtual Result<void> save_user_set(std::string_view name) = 0;
     [[nodiscard]] virtual Result<CameraParameterSnapshot> restore_defaults() = 0;
 };

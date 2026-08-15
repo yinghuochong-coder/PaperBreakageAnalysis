@@ -192,7 +192,7 @@
     }
   ],
   "configRevision": 93,
-  "configSchemaVersion": 7,
+  "configSchemaVersion": 8,
   "event": {
     "generatePreviewVideo": true,
     "keyFrameCount": 7,
@@ -210,6 +210,15 @@
     "heartbeatStaleSeconds": 30,
     "memoryWarningPercent": 85.0,
     "sampleIntervalMs": 1000
+  },
+  "timeSync": {
+    "alarmDurationMs": 3000,
+    "alarmThresholdNs": 5000000,
+    "probeTimeoutMs": 250,
+    "receiveClockUncertaintyNs": 50000000,
+    "samplePeriodMs": 1000,
+    "warningDurationMs": 3000,
+    "warningThresholdNs": 1000000
   },
   "logging": {
     "directory": "data/logs",

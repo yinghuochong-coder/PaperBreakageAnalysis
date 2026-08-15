@@ -191,21 +191,50 @@ Grandmaster 或亚毫秒精度测试，继续待 V5-02 硬件联调；未开始 
 
 ### T1-02 TimeSyncRuntime 与时钟模型
 
-- 状态：`not-started`
+- 状态：`completed`
+- 负责人：Codex
+- 开始日期：2026-08-14
+- 完成日期：2026-08-14
+- ExecPlan：`.agent/plans/t1-02-time-sync-runtime-clock-model.md`
 - 前置：T1-01
 
 实现独立工作线程，按“硬件 PTP → OS PTP/NTP → OFFSET_MODEL → RECEIVE_CLOCK”选择来源，发布不可变工控机/相机快照，并提供 UTC↔单调时间映射。模型包含锚点、版本、不确定度和最后错误；旧模型不可回写历史帧。
 
 测试：可注入来源、偏移、漂移、不可用、来源切换、系统时间跳变和关闭超时；本任务只验证 P0 降级，不实现 P1 自动恢复。
 
+验收证据：`paperbreak_time` 新增无平台依赖的系统/相机探针端口和单线程
+`TimeSyncRuntime`，按硬件 PTP、OS PTP/NTP、offset、receive 顺序为系统及最多四个相机
+发布容量 1 的不可变模型。修订在实例内严格递增；状态投影、最后稳定错误、偏移/不确定度和
+UTC↔单调 checked 映射均保留创建时模型。刷新控制容量固定 16，满载拒绝最新并返回
+`SYS_BUSY`；停止令牌独立唤醒，deadline join 和不配合取消的探针超时均有测试。系统时间跳变
+锁存为 `SYS_TIME_JUMP_DETECTED/DEGRADED`，不提前实现 P1 自动恢复。18 项定向时间测试、完整
+Debug 构建、格式检查和非硬件 CTest 33/33 通过。Windows/MVS 生产探针、schema v8 和报警由
+T1-03 完成；实体 PTP/Grandmaster 精度仍留待 V5-02。
+
 ### T1-03 生产探针、配置和报警
 
-- 状态：`not-started`
+- 状态：`completed`
+- 负责人：Codex
+- 开始日期：2026-08-15
+- 完成日期：2026-08-15
+- ExecPlan：`.agent/plans/t1-03-production-probes-config-alarms.md`
 - 前置：T1-02
 
 在 platform 层实现 Windows 时钟探针，在 Hikrobot 适配器内实现相机时间能力/采样；MVS 类型不得越界。配置升级到 schema v8，v7 原子迁移，增加采样周期、不确定度及 Warning/Alarm 阈值。来源变化和阈值持续超限进入状态与报警登记表。
 
 测试：配置迁移/回滚、探针不支持/失败、降级不伪报硬件同步、报警持续时间和确定性关闭。硬件精度保持未验证，直到 V5-02。
+
+验收证据：Windows 平台适配器以只读方式查询 W32Time、精确 UTC 和系统时间增量，只报告保守的
+OS NTP/同步中状态；Hikrobot 适配器在 MVS 边界内锁存 ticks/频率并查询 IEEE 1588 能力、状态和
+offset，只有明确的 Slave 状态才报告硬件 PTP 同步。生产服务装配系统/最多四相机探针、
+`TimeSyncRuntime`、帧模型提供器和确定性生命周期；超过四个启用相机时登记容量报警，不伪造额外
+时间模型。
+
+配置升级到 schema v8，增加采样周期、探针超时、接收时钟不确定度和 Warning/Alarm 阈值/持续
+时间；启动加载 v7 时保留历史副本并原子写回，失败保持原文件和活动快照。`timeSync` 变更按重启
+生效处理。来源变化进入报警历史，连续超限按单调时间登记并在恢复、升级或停止时清除活动项。
+Debug/Release 构建与非硬件 CTest 均 33/33 通过，Release 单元测试 459/459；静态分析和格式/diff
+门禁通过。未执行实体 MV-CS020-60GM、Grandmaster 或亚毫秒精度测试，继续待 V5-02；未开始 D2-01。
 
 ## 7. D2：事件数据升级
 

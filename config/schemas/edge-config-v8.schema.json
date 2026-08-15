@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://paperbreak.local/schemas/edge-config-v8.schema.json",
+  "title": "PaperBreak Edge Configuration v8",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "configSchemaVersion", "configRevision", "modifiedAt", "system", "cameras",
+    "acquisition", "preview", "algorithm", "event", "storage", "uplink",
+    "plantIo", "logging", "health", "timeSync"
+  ],
+  "properties": {
+    "configSchemaVersion": { "const": 8 },
+    "configRevision": { "type": "integer", "minimum": 1 },
+    "modifiedAt": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$" },
+    "system": { "$ref": "edge-config-v7.schema.json#/properties/system" },
+    "cameras": { "$ref": "edge-config-v7.schema.json#/properties/cameras" },
+    "acquisition": { "$ref": "edge-config-v7.schema.json#/properties/acquisition" },
+    "preview": { "$ref": "edge-config-v7.schema.json#/properties/preview" },
+    "algorithm": { "$ref": "edge-config-v7.schema.json#/properties/algorithm" },
+    "event": { "$ref": "edge-config-v7.schema.json#/properties/event" },
+    "storage": { "$ref": "edge-config-v7.schema.json#/properties/storage" },
+    "uplink": { "$ref": "edge-config-v7.schema.json#/properties/uplink" },
+    "plantIo": { "$ref": "edge-config-v7.schema.json#/properties/plantIo" },
+    "logging": { "$ref": "edge-config-v7.schema.json#/properties/logging" },
+    "health": { "$ref": "edge-config-v7.schema.json#/properties/health" },
+    "timeSync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "samplePeriodMs", "probeTimeoutMs", "receiveClockUncertaintyNs",
+        "warningThresholdNs", "alarmThresholdNs", "warningDurationMs", "alarmDurationMs"
+      ],
+      "properties": {
+        "samplePeriodMs": { "type": "integer", "minimum": 100, "maximum": 60000 },
+        "probeTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "receiveClockUncertaintyNs": { "type": "integer", "minimum": 1000000, "maximum": 60000000000 },
+        "warningThresholdNs": { "type": "integer", "minimum": 1, "maximum": 60000000000 },
+        "alarmThresholdNs": { "type": "integer", "minimum": 1, "maximum": 60000000000 },
+        "warningDurationMs": { "type": "integer", "minimum": 0, "maximum": 3600000 },
+        "alarmDurationMs": { "type": "integer", "minimum": 0, "maximum": 3600000 }
+      }
+    }
+  }
+}

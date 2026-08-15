@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -97,6 +98,7 @@ struct AcquisitionWorkerOptions final
     std::size_t consecutive_timeout_limit{3U};
     std::optional<std::chrono::milliseconds> software_trigger_interval;
     const time::ImmutableClockModelStore* clock_model_store{};
+    std::function<std::shared_ptr<const time::ClockModelSnapshot>()> clock_model_provider;
     ThreadRegistrationFactory register_thread;
     DebugDiagnosticSink diagnostics;
 };

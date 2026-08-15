@@ -1,5 +1,6 @@
 add_library(paperbreak_time STATIC
-    src/time_model.cpp)
+    src/time_model.cpp
+    src/time_sync_runtime.cpp)
 target_link_libraries(paperbreak_time PUBLIC paperbreak_common paperbreak_compiler_options)
 target_include_directories(paperbreak_time PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

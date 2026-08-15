@@ -70,8 +70,42 @@ struct ClockModelSnapshot final
     bool operator==(const ClockModelSnapshot&) const = default;
 };
 
+struct ClockSyncSnapshot final
+{
+    bool available{};
+    std::optional<std::int64_t> current_utc_ns;
+    ClockSource clock_source{ClockSource::unknown};
+    SyncState sync_state{SyncState::unknown};
+    std::optional<std::int64_t> offset_ns;
+    bool offset_available{};
+    std::optional<std::int64_t> uncertainty_ns;
+    bool uncertainty_available{};
+    std::optional<std::int64_t> maximum_observed_offset_ns;
+    bool maximum_observed_offset_available{};
+    std::optional<std::int64_t> last_synchronized_utc_ns;
+    bool last_synchronized_utc_available{};
+    std::optional<std::string> grandmaster_identity;
+    bool grandmaster_available{};
+    std::uint64_t model_revision{};
+    std::optional<std::string> last_error_code;
+    bool operator==(const ClockSyncSnapshot&) const = default;
+};
+
+struct ClockTimeMapping final
+{
+    std::int64_t mapped_time_ns{};
+    std::shared_ptr<const ClockModelSnapshot> model;
+};
+
 [[nodiscard]] Result<void> validate_frame_time_metadata(const FrameTimeMetadata& metadata);
 [[nodiscard]] Result<void> validate_clock_model_snapshot(const ClockModelSnapshot& snapshot);
+[[nodiscard]] ClockSyncSnapshot build_clock_sync_snapshot(
+    const std::shared_ptr<const ClockModelSnapshot>& model,
+    std::int64_t current_monotonic_ns) noexcept;
+[[nodiscard]] Result<ClockTimeMapping> map_monotonic_to_utc(
+    std::int64_t monotonic_ns, const std::shared_ptr<const ClockModelSnapshot>& model) noexcept;
+[[nodiscard]] Result<ClockTimeMapping> map_utc_to_monotonic(
+    std::int64_t utc_ns, const std::shared_ptr<const ClockModelSnapshot>& model) noexcept;
 
 /// Capacity-one immutable publication slot. Readers never wait and retain the loaded revision.
 class ImmutableClockModelStore final
